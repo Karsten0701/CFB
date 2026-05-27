@@ -1,0 +1,30 @@
+{
+  "name": "CFB",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Packages": {
+        "$path": "Packages"
+      }
+    },
+
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "$path": "src/client"
+      },
+      "StarterCharacterScripts": {
+        "$path": "src/client/StarterCharacter"
+      }
+    }
+  }
+}
