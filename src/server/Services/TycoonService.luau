@@ -27,9 +27,9 @@ local function getYenMultiplier(player: Player): number
 	return if MonetizationService:OwnsGamePass(player, "DoubleYen") then 2 else 1
 end
 
-local function getManaPowerMultiplier(player: Player): number
+local function getManaMultiplier(player: Player): number
 	local MonetizationService = Knit.GetService("MonetizationService")
-	return if MonetizationService:OwnsGamePass(player, "DoubleManaPower") then 2 else 1
+	return if MonetizationService:OwnsGamePass(player, "DoubleMana") then 2 else 1
 end
 
 local function getDepositInterval(player: Player): number
@@ -170,7 +170,7 @@ function TycoonService:ReleaseTycoon(player: Player)
 	end
 end
 
-function TycoonService.Client:CollectManaPower(player: Player, amount: number): (boolean, string?)
+function TycoonService.Client:CollectMana(player: Player, amount: number): (boolean, string?)
 	if type(amount) ~= "number" or amount <= 0 or amount > 1_000_000_000 then
 		return false, "Invalid amount"
 	end
@@ -209,13 +209,13 @@ function TycoonService.Client:CollectManaPower(player: Player, amount: number): 
 
 	pickupBudget[player] -= amount
 
-	local finalAmount = amount * getManaPowerMultiplier(player)
+	local finalAmount = amount * getManaMultiplier(player)
 	local MonetizationService = Knit.GetService("MonetizationService")
 	if MonetizationService:OwnsGamePass(player, "AutoDeposit") then
-		local depositAmount = PlayerDataService:Get(player, "ManaPowerInDeposit") or 0
-		PlayerDataService:Set(player, "ManaPowerInDeposit", depositAmount + finalAmount)
+		local depositAmount = PlayerDataService:Get(player, "ManaInDeposit") or 0
+		PlayerDataService:Set(player, "ManaInDeposit", depositAmount + finalAmount)
 	else
-		PlayerDataService:AddManaPowerToBag(player, finalAmount)
+		PlayerDataService:AddManaToBag(player, finalAmount)
 	end
 
 	return true
@@ -254,17 +254,17 @@ function TycoonService:SellAllProcessor(player: Player): number
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
 
-	local deposit = PlayerDataService:Get(player, "ManaPowerInDeposit") or 0
+	local deposit = PlayerDataService:Get(player, "ManaInDeposit") or 0
 	if deposit <= 0 then
 		return 0
 	end
 
-	PlayerDataService:Set(player, "ManaPowerInDeposit", 0)
+	PlayerDataService:Set(player, "ManaInDeposit", 0)
 	PlayerDataService:AddYen(player, deposit * getYenMultiplier(player))
 	return deposit
 end
 
-function TycoonService.Client:DepositManaPower(player: Player): (boolean, string?)
+function TycoonService.Client:DepositMana(player: Player): (boolean, string?)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
 
@@ -288,7 +288,7 @@ function TycoonService.Client:DepositManaPower(player: Player): (boolean, string
 		return false, "Too far"
 	end
 
-	local deposited = PlayerDataService:DepositManaPower(player)
+	local deposited = PlayerDataService:DepositMana(player)
 	if deposited <= 0 then
 		return false, "Nothing to deposit"
 	end
@@ -440,10 +440,10 @@ function TycoonService:KnitStart()
 
 			local MonetizationService = Knit.GetService("MonetizationService")
 			if MonetizationService:OwnsGamePass(player, "AutoDeposit") then
-				PlayerDataService:DepositManaPower(player)
+				PlayerDataService:DepositMana(player)
 			end
 
-			local deposit = math.floor(PlayerDataService:Get(player, "ManaPowerInDeposit") or 0)
+			local deposit = math.floor(PlayerDataService:Get(player, "ManaInDeposit") or 0)
 			local rate = math.floor(PlayerDataService:Get(player, "Rate") or 0)
 
 			if deposit <= 0 or rate <= 0 then
@@ -455,7 +455,7 @@ function TycoonService:KnitStart()
 				continue
 			end
 
-			PlayerDataService:Set(player, "ManaPowerInDeposit", deposit - transfer)
+			PlayerDataService:Set(player, "ManaInDeposit", deposit - transfer)
 			PlayerDataService:AddYen(player, transfer * getYenMultiplier(player))
 		end
 	end)

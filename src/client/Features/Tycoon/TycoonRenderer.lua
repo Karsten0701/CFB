@@ -11,6 +11,7 @@ local TycoonRenderer = {}
 TycoonRenderer.__index = TycoonRenderer
 
 local DROP_INTERVAL = 5
+local DOUBLE_DROP_SPEED_INTERVAL = 2.5
 local MAX_ACTIVE_DROPS = 200
 local PICKUP_ANIMATION_TIME = 0.42
 local UNIT_SPAWN_BATCH_SIZE = 5
@@ -197,6 +198,10 @@ function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
 	self.entitlements = entitlements or {}
 end
 
+function TycoonRenderer:getDropInterval(): number
+	return if self.entitlements.DoubleDropSpeed then DOUBLE_DROP_SPEED_INTERVAL else DROP_INTERVAL
+end
+
 function TycoonRenderer:getDropperHolder(): Instance?
 	return self.tycoon:FindFirstChild("DropperHolder")
 end
@@ -209,12 +214,14 @@ function TycoonRenderer:getDropsFolder(): Folder
 	local dropperHolder = self:getDropperHolder()
 	assert(dropperHolder, "DropperHolder missing")
 
-	local dropsFolder = dropperHolder:FindFirstChild("ManaPowerDrops") or dropperHolder:FindFirstChild("MagicPowerDrops")
+	local dropsFolder = dropperHolder:FindFirstChild("ManaDrops")
+		or dropperHolder:FindFirstChild("ManaPowerDrops")
+		or dropperHolder:FindFirstChild("MagicPowerDrops")
 	if not dropsFolder then
 		dropsFolder = Instance.new("Folder")
 		dropsFolder.Parent = dropperHolder
 	end
-	dropsFolder.Name = "ManaPowerDrops"
+	dropsFolder.Name = "ManaDrops"
 
 	self.dropsFolder = dropsFolder
 	return dropsFolder
@@ -326,7 +333,7 @@ function TycoonRenderer:pickupOrb(orb: BasePart, value: number)
 	end
 
 	self.activeOrbs[orb] = nil
-	local displayValue = if self.entitlements.DoubleManaPower then value * 2 else value
+	local displayValue = if self.entitlements.DoubleMana then value * 2 else value
 	self:showPickupBillboard(orb.Position, displayValue)
 	self:animatePickupOrb(orb)
 
@@ -468,7 +475,7 @@ function TycoonRenderer:ensurePickupLoop()
 	end)
 end
 
-function TycoonRenderer:spawnManaPowerDrop(dropPart: BasePart, value: number)
+function TycoonRenderer:spawnManaDrop(dropPart: BasePart, value: number)
 	if not self.isOwn then
 		return
 	end
@@ -491,7 +498,7 @@ function TycoonRenderer:spawnManaPowerDrop(dropPart: BasePart, value: number)
 	local dropsFolder = self:getDropsFolder()
 
 	local sphere = Instance.new("Part")
-	sphere.Name = "ManaPowerDrop"
+	sphere.Name = "ManaDrop"
 	sphere.Shape = Enum.PartType.Ball
 	sphere.Size = Vector3.new(1, 1, 1)
 	sphere.Material = Enum.Material.Neon
@@ -522,8 +529,8 @@ function TycoonRenderer:startDropLoop(unitModel: Model, dropPart: BasePart, tier
 
 	local thread = task.spawn(function()
 		while unitModel.Parent do
-			self:spawnManaPowerDrop(dropPart, tierData.DropValue or 1)
-			task.wait(DROP_INTERVAL)
+			self:spawnManaDrop(dropPart, tierData.DropValue or 1)
+			task.wait(self:getDropInterval())
 		end
 	end)
 

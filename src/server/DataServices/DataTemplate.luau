@@ -1,12 +1,13 @@
 return {
 	Yen = 100,
-	ManaPowerInBag = 0,
-	ManaPowerInDeposit = 0,
+	ManaInBag = 0,
+	ManaInDeposit = 0,
 	TotalUnitsPurchased = 0,
 	RateLevel = 0,
 	Rate = 1,
 	Units = {},
 	ProcessedReceipts = {},
+	PurchasedProducts = {},
 	TycoonName = "",
 	Settings = {
 		ShowOthers = true,

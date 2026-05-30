@@ -18,6 +18,9 @@ function MonetizationService:GetEntitlements(player: Player): { [string]: boolea
 	end
 
 	local entitlements = {}
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
 	for key, gamePass in Monetization.GamePasses do
 		local owns = false
 		local ok, result = pcall(function()
@@ -31,6 +34,13 @@ function MonetizationService:GetEntitlements(player: Player): { [string]: boolea
 		end
 
 		entitlements[key] = owns
+	end
+
+	for _, product in Monetization.DeveloperProducts do
+		if product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
+			local ownsProduct = PlayerDataService:Get(player, { "PurchasedProducts", product.EntitlementKey }) == true
+			entitlements[product.EntitlementKey] = entitlements[product.EntitlementKey] == true or ownsProduct
+		end
 	end
 
 	gamePassCache[player] = entitlements
@@ -88,6 +98,11 @@ function MonetizationService:KnitStart()
 			success = TycoonService:GrantUnits(player, product.Amount)
 		elseif product.Kind == "SellAll" then
 			TycoonService:SellAllProcessor(player)
+			success = true
+		elseif product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
+			PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
+			gamePassCache[player] = gamePassCache[player] or {}
+			gamePassCache[player][product.EntitlementKey] = true
 			success = true
 		end
 

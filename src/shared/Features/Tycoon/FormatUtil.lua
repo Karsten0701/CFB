@@ -49,7 +49,7 @@ function FormatUtil.formatNumber(value: number): string
 	return addThousandsSeparators(trimTrailingZeroDecimal(string.format("%.1f", value)))
 end
 
-function FormatUtil.formatManaPower(value: number): string
+function FormatUtil.formatMana(value: number): string
 	return FormatUtil.formatNumber(value) .. " Mana"
 end
 

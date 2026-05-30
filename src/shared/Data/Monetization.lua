@@ -30,6 +30,13 @@ Monetization.DeveloperProducts = {
 		Price = 19,
 		Kind = "SellAll",
 	},
+	DoubleYen = {
+		ProductId = 3601297598,
+		Price = 5,
+		Kind = "OneTimeEntitlement",
+		EntitlementKey = "DoubleYen",
+		DisplayName = "2x Yen",
+	},
 }
 
 Monetization.GamePasses = {
@@ -37,7 +44,7 @@ Monetization.GamePasses = {
 		PassId = 1862051990,
 		Price = 249,
 	},
-	DoubleManaPower = {
+	DoubleMana = {
 		PassId = 1862912773,
 		Price = 199,
 	},
@@ -45,9 +52,13 @@ Monetization.GamePasses = {
 		PassId = 1860952285,
 		Price = 249,
 	},
+	DoubleDropSpeed = {
+		PassId = 1859927580,
+		Price = 249,
+	},
 	AutoCollect = {
 		PassId = 1862930826,
-		Price = 99,
+		Price = 49,
 	},
 	AutoDeposit = {
 		PassId = 1862972802,

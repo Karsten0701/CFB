@@ -30,16 +30,22 @@ local function migrateNumberField(player: Player, oldPath: string, newPath: stri
 	PlayerDataService:Set(player, newPath, if type(oldValue) == "number" then oldValue else 0)
 end
 
-local function ensureManaPowerData(player: Player)
+local function ensureManaData(player: Player)
 	migrateNumberField(player, "Money", "Yen")
 	ensureNumberField(player, "Yen", 100)
-	migrateNumberField(player, "MagicPowerInBag", "ManaPowerInBag")
-	migrateNumberField(player, "MagicPowerInDeposit", "ManaPowerInDeposit")
-	ensureNumberField(player, "ManaPowerInBag", 0)
-	ensureNumberField(player, "ManaPowerInDeposit", 0)
+	migrateNumberField(player, "MagicPowerInBag", "ManaInBag")
+	migrateNumberField(player, "MagicPowerInDeposit", "ManaInDeposit")
+	migrateNumberField(player, "ManaPowerInBag", "ManaInBag")
+	migrateNumberField(player, "ManaPowerInDeposit", "ManaInDeposit")
+	ensureNumberField(player, "ManaInBag", 0)
+	ensureNumberField(player, "ManaInDeposit", 0)
 
 	if type(PlayerDataService:Get(player, "ProcessedReceipts")) ~= "table" then
 		PlayerDataService:Set(player, "ProcessedReceipts", {})
+	end
+
+	if type(PlayerDataService:Get(player, "PurchasedProducts")) ~= "table" then
+		PlayerDataService:Set(player, "PurchasedProducts", {})
 	end
 end
 
@@ -79,7 +85,7 @@ end
 
 function PlayerDataService:KnitInit()
 	function DataService:onPlayerInit(player: Player, _data: any)
-		ensureManaPowerData(player)
+		ensureManaData(player)
 		setupLeaderstats(player)
 
 		PlayerDataService:Observe(player, "Yen", function()
@@ -144,25 +150,25 @@ function PlayerDataService:TrySpendYen(player: Player, amount: number): boolean
 	return true
 end
 
-function PlayerDataService:AddManaPowerToBag(player: Player, amount: number)
+function PlayerDataService:AddManaToBag(player: Player, amount: number)
 	if amount <= 0 then
 		return
 	end
 
-	self:Update(player, "ManaPowerInBag", function(current: number)
+	self:Update(player, "ManaInBag", function(current: number)
 		return current + amount
 	end)
 end
 
-function PlayerDataService:DepositManaPower(player: Player): number
-	local bagAmount = self:Get(player, "ManaPowerInBag") or 0
+function PlayerDataService:DepositMana(player: Player): number
+	local bagAmount = self:Get(player, "ManaInBag") or 0
 	if bagAmount <= 0 then
 		return 0
 	end
 
-	local depositAmount = self:Get(player, "ManaPowerInDeposit") or 0
-	self:Set(player, "ManaPowerInBag", 0)
-	self:Set(player, "ManaPowerInDeposit", depositAmount + bagAmount)
+	local depositAmount = self:Get(player, "ManaInDeposit") or 0
+	self:Set(player, "ManaInBag", 0)
+	self:Set(player, "ManaInDeposit", depositAmount + bagAmount)
 
 	return bagAmount
 end

@@ -122,11 +122,11 @@ function TycoonController:updateProcesserDisplay(tycoon: Instance)
 	end
 
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local deposit = PlayerDataController:Get("ManaPowerInDeposit") or 0
+	local deposit = PlayerDataController:Get("ManaInDeposit") or 0
 	local rate = PlayerDataController:Get("Rate") or 0
 
 	if mpLabel then
-		mpLabel.Text = FormatUtil.formatManaPower(math.floor(deposit))
+		mpLabel.Text = FormatUtil.formatMana(math.floor(deposit))
 	end
 
 	if rateLabel then
@@ -170,7 +170,10 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 	end
 end
 
-function TycoonController:registerButtonAction(head: BasePart, action: { kind: string, amount: number?, buttonName: string })
+function TycoonController:registerButtonAction(
+	head: BasePart,
+	action: { kind: string, amount: number?, buttonName: string }
+)
 	buttonActions[head] = action
 end
 
@@ -221,7 +224,7 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "deposit" then
-		TycoonService:DepositManaPower():andThen(function(success, err)
+		TycoonService:DepositMana():andThen(function(success, err)
 			if not success and err and err ~= "Nothing to deposit" then
 				warn("[TycoonController] Deposit failed:", err)
 			end
@@ -392,7 +395,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean)
 
 	local onPickup = if isOwn
 		then function(value: number)
-			TycoonService:CollectManaPower(value)
+			TycoonService:CollectMana(value)
 		end
 		else nil
 
@@ -462,7 +465,7 @@ function TycoonController:setupOwnTycoon()
 		self:updateButtonPrices(tycoon)
 	end, janitor)
 
-	PlayerDataController:Observe("ManaPowerInDeposit", function()
+	PlayerDataController:Observe("ManaInDeposit", function()
 		self:updateProcesserDisplay(tycoon)
 	end, janitor)
 
