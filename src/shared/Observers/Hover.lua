@@ -18,7 +18,6 @@ HoverEffects.Settings = {
 	ClickTweenInfo = TweenInfo.new(0.045, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
 	ReleaseTweenInfo = TweenInfo.new(0.13, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
 }
-
 local activeButtons = {}
 local started = false
 local mouseDown = false
@@ -44,7 +43,7 @@ local function playTween(button, data, tweenInfo, targetSize)
 	end
 
 	data.Tween = TweenService:Create(button, tweenInfo, {
-		Size = targetSize
+		Size = targetSize,
 	})
 
 	data.Tween:Play()
@@ -52,7 +51,9 @@ end
 
 local function refreshButton(button)
 	local data = activeButtons[button]
-	if not data then return end
+	if not data then
+		return
+	end
 
 	if data.Hovering and mouseDown then
 		playTween(button, data, HoverEffects.Settings.ClickTweenInfo, data.ClickSize)
@@ -72,8 +73,12 @@ local function refreshAllHovering()
 end
 
 function HoverEffects.SetupButton(button)
-	if activeButtons[button] then return end
-	if not button:IsA("GuiButton") then return end
+	if activeButtons[button] then
+		return
+	end
+	if not button:IsA("GuiButton") then
+		return
+	end
 
 	button.AnchorPoint = button.AnchorPoint
 
@@ -120,7 +125,9 @@ function HoverEffects.SetupButton(button)
 	end)
 
 	data.Connections[#data.Connections + 1] = button:GetPropertyChangedSignal("Size"):Connect(function()
-		if data.Tween then return end
+		if data.Tween then
+			return
+		end
 
 		data.OriginalSize = button.Size
 		data.HoverSize = scaleUDim2(data.OriginalSize, HoverEffects.Settings.HoverScale)
@@ -134,7 +141,9 @@ end
 
 function HoverEffects.RemoveButton(button)
 	local data = activeButtons[button]
-	if not data then return end
+	if not data then
+		return
+	end
 
 	if data.Tween then
 		data.Tween:Cancel()
@@ -148,7 +157,9 @@ function HoverEffects.RemoveButton(button)
 end
 
 function HoverEffects.Start()
-	if started then return end
+	if started then
+		return
+	end
 	started = true
 
 	for _, object in CollectionService:GetTagged(HoverEffects.TagName) do
@@ -164,7 +175,9 @@ function HoverEffects.Start()
 	end)
 
 	UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+			return
+		end
 
 		mouseDown = false
 		refreshAllHovering()

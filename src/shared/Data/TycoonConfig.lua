@@ -1,0 +1,17 @@
+return {
+	SpotsPerFloor = 9,
+	MaxFloors = 11,
+	MaxUnits = 99,
+	FloorYOffset = 14,
+	MergeRatio = 3,
+	AutoMergeThreshold = 99,
+	UnitPriceBase = 3,
+	UnitPriceIncrement = 3,
+	RateUpgradeBasePrice = 5,
+	RateUpgradeScale = 1.35,
+	TycoonsPath = { "Map", "Tycoons" },
+	AssetsPath = { "Assets", "AnimeDroppers" },
+	ButtonTag = "Button",
+	BuyButtonPrefix = "Buy",
+	RateButtonPrefix = "Rate",
+}

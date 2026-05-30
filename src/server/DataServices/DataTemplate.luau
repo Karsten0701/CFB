@@ -1,14 +1,14 @@
 return {
-	currency = 0,
-	level = 1,
-	xp = 0,
-	inventory = {},
-	settings = {
-		musicVolume = 0.5,
-		sfxVolume = 0.5,
-	},
-	stats = {
-		wins = 0,
-		losses = 0,
+	Yen = 100,
+	ManaPowerInBag = 0,
+	ManaPowerInDeposit = 0,
+	TotalUnitsPurchased = 0,
+	RateLevel = 0,
+	Rate = 1,
+	Units = {},
+	ProcessedReceipts = {},
+	TycoonName = "",
+	Settings = {
+		ShowOthers = true,
 	},
 }
