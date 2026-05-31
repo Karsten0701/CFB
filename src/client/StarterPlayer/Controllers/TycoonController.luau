@@ -5,7 +5,6 @@ local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ButtonPress = require(ReplicatedStorage.Shared.Observers.Button)
-local Culling = require(ReplicatedStorage.Shared.Performance.Culling)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Loading = require(ReplicatedStorage.Shared.Performance.Loading)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
@@ -30,9 +29,65 @@ local standingLoopConnection: RBXScriptConnection? = nil
 local actionTycoon: Instance? = nil
 local lastActionScanAt = 0
 local productPromptOpen = false
+local activeProductPromptHead: BasePart? = nil
+local productPromptToken = 0
+local pendingRobuxUnitAmount: number? = nil
 local monetizationEntitlements: { [string]: boolean } = {}
+local otherTycoonStreamingConnection: RBXScriptConnection? = nil
+local lastOtherTycoonStreamAt = 0
 
 local ACTION_COOLDOWN = 1.12
+local OTHER_TYCOON_STREAM_INTERVAL = 0.75
+local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
+
+local function isLocalProductPromptFinished(firstArg: any): boolean
+	if firstArg == localPlayer then
+		return true
+	end
+
+	if type(firstArg) == "number" then
+		return firstArg == localPlayer.UserId
+	end
+
+	return false
+end
+
+local function resetProductPromptState()
+	productPromptOpen = false
+	if activeProductPromptHead then
+		wasStandingOnButton[activeProductPromptHead] = false
+		lastActionAt[activeProductPromptHead] = 0
+		activeProductPromptHead = nil
+	end
+	pendingRobuxUnitAmount = nil
+end
+
+local function promptDevProduct(head: BasePart, productId: number)
+	if productPromptOpen then
+		return
+	end
+
+	productPromptOpen = true
+	activeProductPromptHead = head
+	productPromptToken += 1
+	local token = productPromptToken
+
+	local ok, err = pcall(function()
+		MarketplaceService:PromptProductPurchase(localPlayer, productId)
+	end)
+
+	if not ok then
+		warn("[TycoonController] Product prompt failed:", err)
+		resetProductPromptState()
+		return
+	end
+
+	task.delay(30, function()
+		if productPromptOpen and productPromptToken == token then
+			resetProductPromptState()
+		end
+	end)
+end
 
 local function getButtonModelFromTaggedObject(tycoon: Instance, object: Instance): Model?
 	local model = if object:IsA("Model") then object else object:FindFirstAncestorOfClass("Model")
@@ -131,13 +186,41 @@ function TycoonController:updateProcesserDisplay(tycoon: Instance)
 
 	if rateLabel then
 		local intervalText = if monetizationEntitlements.DoubleDeposit then "0.5s" else "1s"
-		rateLabel.Text = FormatUtil.formatNumber(math.floor(rate)) .. "/" .. intervalText
+		rateLabel.Text = "Rate: " .. FormatUtil.formatNumber(math.floor(rate)) .. "/" .. intervalText
+	end
+end
+
+function TycoonController:setDefaultProcesserDisplay(tycoon: Instance)
+	local mpLabel, rateLabel = getProcesserLabels(tycoon)
+
+	if mpLabel then
+		mpLabel.Text = FormatUtil.formatMana(0)
+	end
+
+	if rateLabel then
+		rateLabel.Text = "Rate: 1/s"
+	end
+end
+
+function TycoonController:updateAllDefaultProcesserDisplays()
+	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
+	if not tycoonsFolder then
+		return
+	end
+
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local ownName = PlayerDataController:Get("TycoonName")
+
+	for _, tycoon in tycoonsFolder:GetChildren() do
+		if tycoon.Name ~= ownName then
+			self:setDefaultProcesserDisplay(tycoon)
+		end
 	end
 end
 
 function TycoonController:updateButtonPrices(tycoon: Instance)
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local totalPurchased = PlayerDataController:Get("TotalUnitsPurchased") or 0
+	local baseUnitCount = Pricing.getBaseUnitCount(PlayerDataController:Get("Units") or {})
 	local rateLevel = PlayerDataController:Get("RateLevel") or 0
 
 	for _, child in tycoon:GetChildren() do
@@ -150,7 +233,7 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			local billboard = getButtonBillboard(child)
 			local priceLabel = getBillboardTextLabel(billboard, "Price")
 			if priceLabel then
-				priceLabel.Text = Pricing.formatYen(Pricing.getUnitBulkPrice(totalPurchased, buyAmount))
+				priceLabel.Text = Pricing.formatYen(Pricing.getUnitBulkPrice(baseUnitCount, buyAmount))
 			end
 		end
 
@@ -194,27 +277,30 @@ function TycoonController:performButtonAction(head: BasePart)
 
 	if action.kind == "robux_buy" and action.amount then
 		local product = Monetization.getUnitProduct(action.amount)
-		if product and not productPromptOpen then
-			productPromptOpen = true
-			MarketplaceService:PromptProductPurchase(localPlayer, product.ProductId)
+		if product then
+			pendingRobuxUnitAmount = action.amount
+			promptDevProduct(head, product.ProductId)
 		elseif not product then
 			warn("[TycoonController] No dev product for robux unit amount:", action.amount)
 		end
 	elseif action.kind == "sell_all_product" then
-		if not productPromptOpen then
-			productPromptOpen = true
-			MarketplaceService:PromptProductPurchase(localPlayer, Monetization.DeveloperProducts.SellAll.ProductId)
-		end
+		promptDevProduct(head, Monetization.DeveloperProducts.SellAll.ProductId)
 	elseif action.kind == "buy" and action.amount then
 		TycoonService:BuyUnits(action.amount, action.buttonName):andThen(function(success, err)
 			if not success and err then
 				warn("[TycoonController] Buy failed:", err)
+			elseif success then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowBoughtUnitsMessage(action.amount)
 			end
 		end)
 	elseif action.kind == "merge" then
-		TycoonService:MergeUnits(action.buttonName):andThen(function(success, err)
+		TycoonService:MergeUnits(action.buttonName):andThen(function(success, err, mergedUnitCount)
 			if not success and err and err ~= "Nothing to merge" then
 				warn("[TycoonController] Merge failed:", err)
+			elseif success then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowMergedUnitsMessage(mergedUnitCount or 0)
 			end
 		end)
 	elseif action.kind == "rate" and action.amount then
@@ -224,9 +310,14 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "deposit" then
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		local depositAmount = PlayerDataController:Get("ManaInBag") or 0
 		TycoonService:DepositMana():andThen(function(success, err)
 			if not success and err and err ~= "Nothing to deposit" then
 				warn("[TycoonController] Deposit failed:", err)
+			elseif success then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowDepositMessage(depositAmount)
 			end
 		end)
 	end
@@ -251,19 +342,19 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 
 		ButtonPress.SetupButton(head)
 
-		local robuxBuyAmount = TycoonUtil.getRobuxBuyAmount(buttonModel)
-		if robuxBuyAmount then
+		if TycoonUtil.isSellAllButton(buttonModel) then
 			nextButtonActions[head] = {
-				kind = "robux_buy",
-				amount = robuxBuyAmount,
+				kind = "sell_all_product",
 				buttonName = buttonModel.Name,
 			}
 			return
 		end
 
-		if TycoonUtil.isSellAllButton(buttonModel) then
+		local robuxBuyAmount = TycoonUtil.getRobuxBuyAmount(buttonModel)
+		if robuxBuyAmount then
 			nextButtonActions[head] = {
-				kind = "sell_all_product",
+				kind = "robux_buy",
+				amount = robuxBuyAmount,
 				buttonName = buttonModel.Name,
 			}
 			return
@@ -347,9 +438,9 @@ function TycoonController:startStandingLoop()
 		for head in buttonActions do
 			local standing = ButtonPress.IsStandingOn(head)
 			local action = buttonActions[head]
-			local isProductPrompt = action and (action.kind == "robux_buy" or action.kind == "sell_all_product")
+			local isSellAllProduct = action and action.kind == "sell_all_product"
 
-			if standing and (not isProductPrompt or not wasStandingOnButton[head]) then
+			if standing and (not isSellAllProduct or not wasStandingOnButton[head]) then
 				self:performButtonAction(head)
 			end
 
@@ -363,31 +454,17 @@ function TycoonController:shouldRenderTycoon(tycoon: Instance, isOwn: boolean): 
 		return Loading.shouldLoadTycoon(tycoon, true)
 	end
 
-	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local settings = PlayerDataController:Get("Settings")
-	if not ShowOther.shouldRenderOthers(settings) then
-		return false
-	end
-
-	local root = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-	local spawnPart = tycoon:FindFirstChild("Spawn")
-	if root and spawnPart and spawnPart:IsA("BasePart") then
-		local distance = (root.Position - spawnPart.Position).Magnitude
-		if not Culling.shouldRenderAtDistance(distance, false) then
-			return false
-		end
-	end
-
+	-- Other tycoon structures are already part of the map. This only gates local unit visuals.
 	return Loading.shouldLoadTycoon(tycoon, false)
 end
 
-function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean)
+function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 	if renderers[tycoon] then
-		return
+		return true
 	end
 
 	if not self:shouldRenderTycoon(tycoon, isOwn) then
-		return
+		return false
 	end
 
 	local janitor = Janitor.new()
@@ -405,6 +482,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean)
 		renderer = renderer,
 		janitor = janitor,
 		isOwn = isOwn,
+		lastVisualRefreshAt = 0,
 	}
 
 	if isOwn then
@@ -422,6 +500,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean)
 	end
 
 	Loading.onTycoonLoaded(tycoon)
+	return true
 end
 
 function TycoonController:rebuildTycoon(tycoon: Instance, units: { { Tier: number } })
@@ -433,20 +512,22 @@ function TycoonController:rebuildTycoon(tycoon: Instance, units: { { Tier: numbe
 	entry.renderer:rebuild(units)
 end
 
-function TycoonController:setupOwnTycoon()
+function TycoonController:setupOwnTycoon(): boolean
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 
 	local tycoonName = PlayerDataController:Get("TycoonName")
 	if not tycoonName or tycoonName == "" then
-		return
+		return false
 	end
 
 	local tycoon = TycoonUtil.getTycoonByName(tycoonName)
 	if not tycoon then
-		return
+		return false
 	end
 
-	self:setupTycoon(tycoon, true)
+	if not self:setupTycoon(tycoon, true) or not renderers[tycoon] then
+		return false
+	end
 
 	local units = PlayerDataController:Get("Units") or {}
 	self:rebuildTycoon(tycoon, units)
@@ -455,9 +536,6 @@ function TycoonController:setupOwnTycoon()
 
 	PlayerDataController:Observe("Units", function(newUnits)
 		self:rebuildTycoon(tycoon, newUnits or {})
-	end, janitor)
-
-	PlayerDataController:Observe("TotalUnitsPurchased", function()
 		self:updateButtonPrices(tycoon)
 	end, janitor)
 
@@ -473,30 +551,34 @@ function TycoonController:setupOwnTycoon()
 		self:updateButtonPrices(tycoon)
 		self:updateProcesserDisplay(tycoon)
 	end, janitor)
+
+	return true
 end
 
 function TycoonController:setupOtherTycoons()
-	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
-	if not tycoonsFolder then
+	if otherTycoonStreamingConnection then
 		return
 	end
 
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local ownName = PlayerDataController:Get("TycoonName")
+	self:updateAllDefaultProcesserDisplays()
 
-	for _, tycoon in tycoonsFolder:GetChildren() do
-		if tycoon.Name == ownName then
-			continue
+	otherTycoonStreamingConnection = RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+		if now - lastOtherTycoonStreamAt < OTHER_TYCOON_STREAM_INTERVAL then
+			return
 		end
 
-		if tycoon:GetAttribute("Claimed") == true then
-			self:setupTycoon(tycoon, false)
-		end
-	end
+		lastOtherTycoonStreamAt = now
+		self:refreshOtherTycoons()
+	end)
 
 	PlayerDataController:Observe("Settings", function()
+		self:updateAllDefaultProcesserDisplays()
 		self:refreshOtherTycoons()
 	end, PlayerDataController:NewJanitor())
+
+	self:refreshOtherTycoons()
 end
 
 function TycoonController:refreshOtherTycoons()
@@ -507,21 +589,61 @@ function TycoonController:refreshOtherTycoons()
 
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local ownName = PlayerDataController:Get("TycoonName")
+	local settings = PlayerDataController:Get("Settings")
+	local shouldShowOthers = ShowOther.shouldRenderOthers(settings)
+	local TycoonService = Knit.GetService("TycoonService")
 
 	for _, tycoon in tycoonsFolder:GetChildren() do
 		if tycoon.Name == ownName then
 			continue
 		end
 
-		local shouldRender = tycoon:GetAttribute("Claimed") == true and self:shouldRenderTycoon(tycoon, false)
-		local entry = renderers[tycoon]
+		self:setDefaultProcesserDisplay(tycoon)
 
-		if shouldRender and not entry then
-			self:setupTycoon(tycoon, false)
-		elseif not shouldRender and entry and not entry.isOwn then
+		local entry = renderers[tycoon]
+		local shouldLoad = shouldShowOthers and tycoon:GetAttribute("Claimed") == true and not entry
+		local shouldUnload = entry
+			and not entry.isOwn
+			and (not shouldShowOthers or tycoon:GetAttribute("Claimed") ~= true)
+
+		if shouldUnload then
 			entry.renderer:destroy()
 			entry.janitor:Destroy()
 			renderers[tycoon] = nil
+		elseif shouldLoad then
+			if self:setupTycoon(tycoon, false) then
+				TycoonService:GetTycoonVisualData(tycoon.Name)
+					:andThen(function(success, payload)
+						local currentEntry = renderers[tycoon]
+						if not success or not currentEntry or currentEntry.isOwn then
+							return
+						end
+
+						currentEntry.lastVisualRefreshAt = os.clock()
+						self:rebuildTycoon(tycoon, payload.Units or {})
+					end)
+					:catch(function(err)
+						warn("[TycoonController] Failed to load tycoon visuals:", err)
+					end)
+			end
+		elseif entry and not entry.isOwn and shouldShowOthers then
+			local now = os.clock()
+			if now - (entry.lastVisualRefreshAt or 0) >= OTHER_TYCOON_VISUAL_REFRESH_INTERVAL then
+				entry.lastVisualRefreshAt = now
+				TycoonService:GetTycoonVisualData(tycoon.Name)
+					:andThen(function(success, payload)
+						local currentEntry = renderers[tycoon]
+						if not success or not currentEntry or currentEntry.isOwn then
+							return
+						end
+
+						currentEntry.lastVisualRefreshAt = os.clock()
+						self:rebuildTycoon(tycoon, payload.Units or {})
+					end)
+					:catch(function(err)
+						warn("[TycoonController] Failed to refresh tycoon visuals:", err)
+					end)
+			end
 		end
 	end
 end
@@ -530,9 +652,14 @@ function TycoonController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local initialized = false
 
-	MarketplaceService.PromptProductPurchaseFinished:Connect(function(player)
-		if player == localPlayer then
-			productPromptOpen = false
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, _productId, wasPurchased)
+		if isLocalProductPromptFinished(firstArg) then
+			if wasPurchased == true and pendingRobuxUnitAmount then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowRobuxUnitsMessage(pendingRobuxUnitAmount)
+			end
+
+			resetProductPromptState()
 		end
 	end)
 
@@ -541,13 +668,18 @@ function TycoonController:KnitStart()
 			return
 		end
 
+		self:updateAllDefaultProcesserDisplays()
+
 		local tycoonName = PlayerDataController:Get("TycoonName")
 		if not tycoonName or tycoonName == "" then
 			return
 		end
 
+		if not self:setupOwnTycoon() then
+			return
+		end
+
 		initialized = true
-		self:setupOwnTycoon()
 		self:setupOtherTycoons()
 	end
 
@@ -555,12 +687,15 @@ function TycoonController:KnitStart()
 		PlayerDataController:WaitForData()
 		init()
 
-		if not initialized then
-			PlayerDataController:Observe("TycoonName", function(name)
-				if name and name ~= "" then
-					init()
-				end
-			end)
+		PlayerDataController:Observe("TycoonName", function(name)
+			if name and name ~= "" then
+				init()
+			end
+		end)
+
+		while not initialized do
+			task.wait(0.5)
+			init()
 		end
 	end)
 end

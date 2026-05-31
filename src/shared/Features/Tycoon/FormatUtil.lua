@@ -17,7 +17,7 @@ local SUFFIXES = {
 local function addThousandsSeparators(numberText: string): string
 	local formatted = numberText
 	while true do
-		local nextFormatted, replacements = string.gsub(formatted, "^(-?%d+)(%d%d%d)", "%1.%2")
+		local nextFormatted, replacements = string.gsub(formatted, "^(-?%d+)(%d%d%d)", "%1,%2")
 		formatted = nextFormatted
 		if replacements == 0 then
 			break

@@ -11,5 +11,11 @@ return {
 	TycoonName = "",
 	Settings = {
 		ShowOthers = true,
+		ShowOtherTycoons = true,
+		AutoMergeAt = 100,
+		AutoCollect = false,
+		AutoDeposit = false,
+		Sound = true,
+		Music = true,
 	},
 }

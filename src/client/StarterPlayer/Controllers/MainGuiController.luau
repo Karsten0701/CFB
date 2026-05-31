@@ -1,10 +1,13 @@
 local Players = game:GetService("Players")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
+local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local Icon = require(ReplicatedStorage.Packages.topbarplus)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
 local MainGuiController = Knit.CreateController({
@@ -14,6 +17,7 @@ local MainGuiController = Knit.CreateController({
 local localPlayer = Players.LocalPlayer
 local COUNTER_ANIMATION_TIME = 0.5
 local COUNTER_ANIMATION_STEPS = 50
+local MESSAGE_LIFETIME = 3
 local DOUBLE_YEN_PRODUCT = Monetization.DeveloperProducts.DoubleYen
 
 local displayedValues = {
@@ -23,11 +27,88 @@ local displayedValues = {
 
 local doubleYenClickConnection: RBXScriptConnection? = nil
 local doubleYenPromptOpen = false
+local settingsIcon = nil
+local homeIcon = nil
+local boundSettingsFrame: GuiObject? = nil
+local lastHomeTeleportAt = 0
+local activeMessages = {}
+local nextMessageLayoutOrder = 0
+local shopConnections: { RBXScriptConnection } = {}
+local gamePassPromptOpen = false
+
+local SHOP_GAMEPASS_ALIASES = {
+	AutoCollect = "AutoCollect",
+	AutoDeposit = "AutoDeposit",
+	DoubleCoins = "DoubleYen",
+	DoubleYen = "DoubleYen",
+	DoubleDepoSpeed = "DoubleDeposit",
+	DoubleDeposit = "DoubleDeposit",
+	DoubleDropSpeed = "DoubleDropSpeed",
+	DoubleMana = "DoubleMana",
+}
 
 local animationTokens = {
 	ManaBag = 0,
 	YenShow = 0,
 }
+
+local function setMessageTransparency(instance: Instance, transparency: number)
+	for _, descendant in instance:GetDescendants() do
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+			descendant.TextTransparency = transparency
+			descendant.TextStrokeTransparency = math.clamp(transparency, 0, 1)
+		elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+			descendant.ImageTransparency = transparency
+		elseif descendant:IsA("UIStroke") then
+			descendant.Transparency = transparency
+		end
+	end
+
+	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+		instance.TextTransparency = transparency
+		instance.TextStrokeTransparency = math.clamp(transparency, 0, 1)
+	elseif instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
+		instance.ImageTransparency = transparency
+	end
+end
+
+local function setRichText(instance: Instance, enabled: boolean)
+	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+		instance.RichText = enabled
+	end
+
+	for _, descendant in instance:GetDescendants() do
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+			descendant.RichText = enabled
+		end
+	end
+end
+
+local function setFirstMessageText(instance: Instance, text: string)
+	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
+		instance.Text = text
+		return
+	end
+
+	for _, descendant in instance:GetDescendants() do
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+			descendant.Text = text
+			return
+		end
+	end
+end
+
+local function isLocalProductPromptFinished(firstArg: any): boolean
+	if firstArg == localPlayer then
+		return true
+	end
+
+	if type(firstArg) == "number" then
+		return firstArg == localPlayer.UserId
+	end
+
+	return false
+end
 
 function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 	local mainGui = self:getMainGui()
@@ -51,6 +132,274 @@ function MainGuiController:getMainGui(): Instance?
 	end
 
 	return playerGui:FindFirstChild("MainGui")
+end
+
+function MainGuiController:getSettingsFrame(): GuiObject?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	local settingsFrame = mainGui:FindFirstChild("SettingsFrame")
+	return if settingsFrame and settingsFrame:IsA("GuiObject") then settingsFrame else nil
+end
+
+function MainGuiController:getShopFrame(): GuiObject?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	local shopFrame = mainGui:FindFirstChild("ShopFrame")
+	return if shopFrame and shopFrame:IsA("GuiObject") then shopFrame else nil
+end
+
+function MainGuiController:getMessageHolder(): Instance?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	return mainGui:FindFirstChild("MessageHolder")
+end
+
+function MainGuiController:getMessageTemplate(): GuiObject?
+	local messageHolder = self:getMessageHolder()
+	if not messageHolder then
+		return nil
+	end
+
+	local template = messageHolder:FindFirstChild("Template")
+	if template and template:IsA("GuiObject") then
+		template.Visible = false
+		return template
+	end
+
+	return nil
+end
+
+function MainGuiController:getMessageText(baseText: string, count: number): string
+	if count <= 1 then
+		return baseText
+	end
+
+	return baseText .. ' <font color="#FFFFFF">x' .. count .. "</font>"
+end
+
+function MainGuiController:pulseMessage(messageGui: GuiObject)
+	local scale = messageGui:FindFirstChild("MessageScale")
+	if not scale or not scale:IsA("UIScale") then
+		scale = Instance.new("UIScale")
+		scale.Name = "MessageScale"
+		scale.Parent = messageGui
+	end
+
+	scale.Scale = 1.08
+	TweenService:Create(scale, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Scale = 1,
+	}):Play()
+end
+
+function MainGuiController:fadeOutMessage(key: string, token: number)
+	local entry = activeMessages[key]
+	if not entry or entry.Token ~= token then
+		return
+	end
+
+	local messageGui = entry.Gui
+	activeMessages[key] = nil
+	if not messageGui or not messageGui.Parent then
+		return
+	end
+
+	local fadeProgress = Instance.new("NumberValue")
+	fadeProgress.Value = 0
+	local connection = fadeProgress.Changed:Connect(function(value)
+		setMessageTransparency(messageGui, value)
+	end)
+
+	TweenService:Create(fadeProgress, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Value = 1,
+	}):Play()
+
+	task.delay(0.28, function()
+		connection:Disconnect()
+		fadeProgress:Destroy()
+		if messageGui.Parent then
+			messageGui:Destroy()
+		end
+	end)
+end
+
+function MainGuiController:showMessage(key: string, richText: string)
+	local existing = activeMessages[key]
+	if existing and existing.Gui and existing.Gui.Parent then
+		existing.Count += 1
+		existing.Token += 1
+		setFirstMessageText(existing.Gui, self:getMessageText(existing.BaseText, existing.Count))
+		self:pulseMessage(existing.Gui)
+
+		local token = existing.Token
+		task.delay(MESSAGE_LIFETIME, function()
+			self:fadeOutMessage(key, token)
+		end)
+		return
+	end
+
+	local template = self:getMessageTemplate()
+	local messageHolder = self:getMessageHolder()
+	if not template or not messageHolder then
+		return
+	end
+
+	nextMessageLayoutOrder -= 1
+	local messageGui = template:Clone()
+	messageGui.Name = "Message"
+	messageGui.Visible = true
+	messageGui.LayoutOrder = nextMessageLayoutOrder
+	setRichText(messageGui, true)
+	setFirstMessageText(messageGui, richText)
+	setMessageTransparency(messageGui, 1)
+
+	local scale = Instance.new("UIScale")
+	scale.Name = "MessageScale"
+	scale.Scale = 0.82
+	scale.Parent = messageGui
+
+	messageGui.Parent = messageHolder
+	activeMessages[key] = {
+		Gui = messageGui,
+		BaseText = richText,
+		Count = 1,
+		Token = 1,
+	}
+
+	TweenService:Create(scale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Scale = 1,
+	}):Play()
+
+	local fadeProgress = Instance.new("NumberValue")
+	fadeProgress.Value = 1
+	local connection = fadeProgress.Changed:Connect(function(value)
+		setMessageTransparency(messageGui, value)
+	end)
+
+	TweenService:Create(fadeProgress, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Value = 0,
+	}):Play()
+
+	task.delay(0.2, function()
+		connection:Disconnect()
+		fadeProgress:Destroy()
+	end)
+
+	local token = activeMessages[key].Token
+	task.delay(MESSAGE_LIFETIME, function()
+		self:fadeOutMessage(key, token)
+	end)
+end
+
+function MainGuiController:ShowDepositMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"DepositMana:" .. amount,
+		'You deposited <font color="#42B6FF">' .. FormatUtil.formatMana(amount) .. "</font>"
+	)
+end
+
+function MainGuiController:ShowBoughtUnitsMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"BoughtUnits:" .. amount,
+		'You bought <font color="#47FF6A">' .. FormatUtil.formatNumber(amount) .. " Anime Units</font>"
+	)
+end
+
+function MainGuiController:ShowMergedUnitsMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"MergedUnits:" .. amount,
+		'You merged <font color="#FFCC33">' .. FormatUtil.formatNumber(amount) .. " Anime Units</font>"
+	)
+end
+
+function MainGuiController:ShowRobuxUnitsMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"RobuxUnits:" .. amount,
+		'You bought <font color="#47FF6A">+'
+			.. FormatUtil.formatNumber(amount)
+			.. ' Anime Drops</font>, <font color="#FFD86B">Thank you for your support!</font>'
+	)
+end
+
+function MainGuiController:setupSettingsIcon()
+	if not settingsIcon then
+		settingsIcon = Icon.new()
+			:setName("Settings")
+			:setImage("rbxassetid://77679977863044")
+			:setImageScale(0.72)
+			:setCaption("Settings")
+			:align("Left")
+	end
+
+	local settingsFrame = self:getSettingsFrame()
+	if not settingsFrame or boundSettingsFrame == settingsFrame then
+		return
+	end
+
+	settingsFrame.Visible = false
+	if boundSettingsFrame then
+		settingsIcon:unbindToggleItem(boundSettingsFrame)
+	end
+
+	boundSettingsFrame = settingsFrame
+	settingsIcon:bindToggleItem(settingsFrame)
+end
+
+function MainGuiController:setupHomeIcon()
+	if homeIcon then
+		return
+	end
+
+	homeIcon = Icon.new()
+		:setName("TeleportHome")
+		:setImage("rbxassetid://122963480555617")
+		:setImageScale(0.72)
+		:setCaption("Teleport to plot")
+		:align("Left")
+		:oneClick(true)
+
+	homeIcon.selected:Connect(function()
+		local now = os.clock()
+		if now - lastHomeTeleportAt < 1 then
+			return
+		end
+
+		lastHomeTeleportAt = now
+		local TycoonService = Knit.GetService("TycoonService")
+		TycoonService:TeleportHome():andThen(function(success, err)
+			if not success and err then
+				warn("[MainGuiController] Teleport home failed:", err)
+			end
+		end)
+	end)
 end
 
 function MainGuiController:getDoubleYenOfferRootFromDescendant(mainGui: Instance, descendant: Instance): GuiObject?
@@ -129,6 +478,102 @@ function MainGuiController:getClickableGui(root: GuiObject): GuiObject
 	end
 
 	return root
+end
+
+function MainGuiController:clearShopConnections()
+	for _, connection in shopConnections do
+		connection:Disconnect()
+	end
+
+	table.clear(shopConnections)
+end
+
+function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey: string)
+	local gamePass = Monetization.GamePasses[gamePassKey]
+	if not gamePass or type(gamePass.PassId) ~= "number" or gamePass.PassId <= 0 then
+		warn("[MainGuiController] Missing gamepass for shop button:", buttonRoot.Name, gamePassKey)
+		return
+	end
+
+	local clickable = self:getClickableGui(buttonRoot)
+	local function prompt()
+		if gamePassPromptOpen then
+			return
+		end
+
+		gamePassPromptOpen = true
+		local ok, err = pcall(function()
+			MarketplaceService:PromptGamePassPurchase(localPlayer, gamePass.PassId)
+		end)
+
+		if not ok then
+			gamePassPromptOpen = false
+			warn("[MainGuiController] Gamepass prompt failed:", err)
+		end
+	end
+
+	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+		table.insert(shopConnections, clickable.Activated:Connect(prompt))
+	else
+		table.insert(shopConnections, clickable.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				prompt()
+			end
+		end))
+	end
+end
+
+function MainGuiController:connectGuiActivated(guiObject: GuiObject, callback: () -> ())
+	local clickable = self:getClickableGui(guiObject)
+	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+		table.insert(shopConnections, clickable.Activated:Connect(callback))
+	else
+		table.insert(shopConnections, clickable.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				callback()
+			end
+		end))
+	end
+end
+
+function MainGuiController:setupShopFrame()
+	self:clearShopConnections()
+
+	local shopFrame = self:getShopFrame()
+	if not shopFrame then
+		return
+	end
+
+	OpenFrame.SetupFrame(shopFrame)
+
+	local topBar = shopFrame:FindFirstChild("TopBar")
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true)
+	if closeButton and closeButton:IsA("GuiObject") then
+		self:connectGuiActivated(closeButton, function()
+			OpenFrame.Toggle(shopFrame)
+		end)
+	end
+
+	local mainGui = self:getMainGui()
+	local rightSide = mainGui and mainGui:FindFirstChild("RightSide")
+	local shopButton = rightSide and rightSide:FindFirstChild("ShopButton", true)
+	if shopButton and shopButton:IsA("GuiObject") then
+		self:connectGuiActivated(shopButton, function()
+			OpenFrame.Toggle(shopFrame)
+		end)
+	end
+
+	local scrollingFrame = shopFrame:FindFirstChild("ScrollingFrame")
+	if not scrollingFrame then
+		return
+	end
+
+	for buttonName, gamePassKey in SHOP_GAMEPASS_ALIASES do
+		local buttonRoot = scrollingFrame:FindFirstChild(buttonName)
+		if buttonRoot and buttonRoot:IsA("GuiObject") then
+			self:connectShopButton(buttonRoot, gamePassKey)
+		end
+	end
 end
 
 function MainGuiController:updateDoubleYenOffer()
@@ -249,6 +694,9 @@ function MainGuiController:updateAll(instant: boolean?)
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local mana = math.max(math.floor(PlayerDataController:Get("ManaInBag") or 0), 0)
 	local yen = math.max(math.floor(PlayerDataController:Get("Yen") or 0), 0)
+	self:setupSettingsIcon()
+	self:setupHomeIcon()
+	self:setupShopFrame()
 
 	if instant then
 		animationTokens.ManaBag += 1
@@ -268,11 +716,20 @@ end
 
 function MainGuiController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
+	self:setupSettingsIcon()
+	self:setupHomeIcon()
+	self:setupShopFrame()
 
-	MarketplaceService.PromptProductPurchaseFinished:Connect(function(player)
-		if player == localPlayer then
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg)
+		if isLocalProductPromptFinished(firstArg) then
 			doubleYenPromptOpen = false
 			self:updateDoubleYenOffer()
+		end
+	end)
+
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player)
+		if player == localPlayer then
+			gamePassPromptOpen = false
 		end
 	end)
 
@@ -298,6 +755,8 @@ function MainGuiController:KnitStart()
 		if child.Name == "MainGui" then
 			task.defer(function()
 				self:updateAll(true)
+				self:setupSettingsIcon()
+				self:setupShopFrame()
 			end)
 		end
 	end)

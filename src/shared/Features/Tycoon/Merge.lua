@@ -34,9 +34,10 @@ function Merge.sortUnits(units: { { Tier: number } }): { { Tier: number } }
 	return sortedUnits
 end
 
-function Merge.runOnce(units: { { Tier: number } }): ({ { Tier: number } }, boolean)
+function Merge.runOnce(units: { { Tier: number } }): ({ { Tier: number } }, boolean, number)
 	local counts = countByTier(units)
 	local changed = false
+	local mergedUnitCount = 0
 
 	for tier = 1, AnimeDroppers.MaxTier do
 		local tierData = AnimeDroppers.Tiers[tier]
@@ -50,11 +51,12 @@ function Merge.runOnce(units: { { Tier: number } }): ({ { Tier: number } }, bool
 		if mergeCount > 0 then
 			counts[tier] = count - mergeCount * TycoonConfig.MergeRatio
 			counts[targetTier] = (counts[targetTier] or 0) + mergeCount
+			mergedUnitCount += mergeCount * TycoonConfig.MergeRatio
 			changed = true
 		end
 	end
 
-	return rebuildUnits(counts), changed
+	return rebuildUnits(counts), changed, mergedUnitCount
 end
 
 function Merge.autoMerge(units: { { Tier: number } }): { { Tier: number } }

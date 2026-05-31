@@ -1,5 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local DataService = require(ReplicatedStorage.Packages.dataservice).server
 local Knit = require(ReplicatedStorage.Packages.knit)
 local DataTemplate = require(script.Parent.DataTemplate)
@@ -13,40 +15,100 @@ local PlayerDataService = Knit.CreateService({
 
 local leaderstatValues: { [Player]: { Yen: IntValue, Units: IntValue } } = {}
 
-local function ensureNumberField(player: Player, path: string, defaultValue: number)
-	local value = PlayerDataService:Get(player, path)
-	if type(value) ~= "number" then
-		PlayerDataService:Set(player, path, defaultValue)
-	end
-end
-
-local function migrateNumberField(player: Player, oldPath: string, newPath: string)
-	local newValue = PlayerDataService:Get(player, newPath)
-	if type(newValue) == "number" then
+local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
+	if type(data[newPath]) == "number" then
 		return
 	end
 
-	local oldValue = PlayerDataService:Get(player, oldPath)
-	PlayerDataService:Set(player, newPath, if type(oldValue) == "number" then oldValue else 0)
+	data[newPath] = if type(data[oldPath]) == "number" then data[oldPath] else defaultValue
 end
 
-local function ensureManaData(player: Player)
-	migrateNumberField(player, "Money", "Yen")
-	ensureNumberField(player, "Yen", 100)
-	migrateNumberField(player, "MagicPowerInBag", "ManaInBag")
-	migrateNumberField(player, "MagicPowerInDeposit", "ManaInDeposit")
-	migrateNumberField(player, "ManaPowerInBag", "ManaInBag")
-	migrateNumberField(player, "ManaPowerInDeposit", "ManaInDeposit")
-	ensureNumberField(player, "ManaInBag", 0)
-	ensureNumberField(player, "ManaInDeposit", 0)
-
-	if type(PlayerDataService:Get(player, "ProcessedReceipts")) ~= "table" then
-		PlayerDataService:Set(player, "ProcessedReceipts", {})
+local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
+	local normalizedUnits = {}
+	if type(units) ~= "table" then
+		return normalizedUnits
 	end
 
-	if type(PlayerDataService:Get(player, "PurchasedProducts")) ~= "table" then
-		PlayerDataService:Set(player, "PurchasedProducts", {})
+	for _, unit in units do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		local tier = math.clamp(math.floor(tonumber(unit.Tier) or 1), 1, AnimeDroppers.MaxTier)
+		if AnimeDroppers.Tiers[tier] then
+			table.insert(normalizedUnits, {
+				Tier = tier,
+				Slot = tonumber(unit.Slot) or math.huge,
+			})
+		end
 	end
+
+	table.sort(normalizedUnits, function(left, right)
+		if left.Tier == right.Tier then
+			return left.Slot < right.Slot
+		end
+
+		return left.Tier > right.Tier
+	end)
+
+	for slot, unit in normalizedUnits do
+		unit.Slot = slot
+	end
+
+	return normalizedUnits
+end
+
+local function ensureManaData(data: { [string]: any })
+	migrateNumberFieldInData(data, "Money", "Yen", 100)
+	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
+	migrateNumberFieldInData(data, "MagicPowerInDeposit", "ManaInDeposit", 0)
+	migrateNumberFieldInData(data, "ManaPowerInBag", "ManaInBag", 0)
+	migrateNumberFieldInData(data, "ManaPowerInDeposit", "ManaInDeposit", 0)
+
+	if type(data.Yen) ~= "number" then
+		data.Yen = 100
+	end
+
+	if type(data.ManaInBag) ~= "number" then
+		data.ManaInBag = 0
+	end
+
+	if type(data.ManaInDeposit) ~= "number" then
+		data.ManaInDeposit = 0
+	end
+
+	if type(data.ProcessedReceipts) ~= "table" then
+		data.ProcessedReceipts = {}
+	end
+
+	if type(data.PurchasedProducts) ~= "table" then
+		data.PurchasedProducts = {}
+	end
+
+	if type(data.Settings) ~= "table" then
+		data.Settings = {}
+	end
+
+	if type(data.Settings.ShowOthers) ~= "boolean" then
+		data.Settings.ShowOthers = true
+	end
+
+	if type(data.Settings.ShowOtherTycoons) ~= "boolean" then
+		data.Settings.ShowOtherTycoons = true
+	end
+
+	local autoMergeAt = tonumber(data.Settings.AutoMergeAt) or 100
+	data.Settings.AutoMergeAt = math.clamp(math.floor(autoMergeAt), 1, 100)
+
+	if type(data.Settings.AutoCollect) ~= "boolean" then
+		data.Settings.AutoCollect = true
+	end
+
+	if type(data.Settings.AutoDeposit) ~= "boolean" then
+		data.Settings.AutoDeposit = true
+	end
+
+	data.Units = normalizeUnits(data.Units)
 end
 
 local function syncLeaderstats(player: Player)
@@ -59,7 +121,7 @@ local function syncLeaderstats(player: Player)
 	local units = PlayerDataService:GetUnits(player)
 
 	values.Yen.Value = math.floor(yen)
-	values.Units.Value = #units
+	values.Units.Value = Pricing.getBaseUnitCount(units)
 end
 
 local function setupLeaderstats(player: Player)
@@ -84,8 +146,8 @@ local function setupLeaderstats(player: Player)
 end
 
 function PlayerDataService:KnitInit()
-	function DataService:onPlayerInit(player: Player, _data: any)
-		ensureManaData(player)
+	function DataService:onPlayerInit(player: Player, data: any)
+		ensureManaData(data)
 		setupLeaderstats(player)
 
 		PlayerDataService:Observe(player, "Yen", function()
@@ -99,7 +161,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData",
+		profileStoreIndex = "CFB_PlayerData.5",
 	})
 end
 
@@ -173,12 +235,12 @@ function PlayerDataService:DepositMana(player: Player): number
 	return bagAmount
 end
 
-function PlayerDataService:GetUnits(player: Player): { { Tier: number } }
+function PlayerDataService:GetUnits(player: Player): { { Tier: number, Slot: number } }
 	return self:Get(player, "Units") or {}
 end
 
 function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } })
-	self:Set(player, "Units", units)
+	self:Set(player, "Units", normalizeUnits(units))
 end
 
 function PlayerDataService:Observe(player: Player, path: Path, callback: (any, any?) -> ())

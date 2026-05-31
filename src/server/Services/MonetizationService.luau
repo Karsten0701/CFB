@@ -33,12 +33,14 @@ function MonetizationService:GetEntitlements(player: Player): { [string]: boolea
 			warn("[MonetizationService] Gamepass ownership check failed:", key, result)
 		end
 
+		entitlements[key .. "GamePass"] = owns
 		entitlements[key] = owns
 	end
 
 	for _, product in Monetization.DeveloperProducts do
 		if product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
 			local ownsProduct = PlayerDataService:Get(player, { "PurchasedProducts", product.EntitlementKey }) == true
+			entitlements[product.EntitlementKey .. "Product"] = ownsProduct
 			entitlements[product.EntitlementKey] = entitlements[product.EntitlementKey] == true or ownsProduct
 		end
 	end
@@ -52,6 +54,16 @@ function MonetizationService:OwnsGamePass(player: Player, gamePassKey: string): 
 	return entitlements[gamePassKey] == true
 end
 
+function MonetizationService:OwnsGamePassOnly(player: Player, gamePassKey: string): boolean
+	local entitlements = self:GetEntitlements(player)
+	return entitlements[gamePassKey .. "GamePass"] == true
+end
+
+function MonetizationService:OwnsProductEntitlement(player: Player, entitlementKey: string): boolean
+	local entitlements = self:GetEntitlements(player)
+	return entitlements[entitlementKey .. "Product"] == true
+end
+
 function MonetizationService:KnitStart()
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, passId, wasPurchased)
 		if not wasPurchased then
@@ -62,6 +74,7 @@ function MonetizationService:KnitStart()
 			if gamePass.PassId == passId then
 				gamePassCache[player] = gamePassCache[player] or {}
 				gamePassCache[player][key] = true
+				gamePassCache[player][key .. "GamePass"] = true
 				break
 			end
 		end
@@ -103,6 +116,7 @@ function MonetizationService:KnitStart()
 			PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
 			gamePassCache[player] = gamePassCache[player] or {}
 			gamePassCache[player][product.EntitlementKey] = true
+			gamePassCache[player][product.EntitlementKey .. "Product"] = true
 			success = true
 		end
 

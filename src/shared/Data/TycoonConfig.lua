@@ -4,7 +4,7 @@ return {
 	MaxUnits = 99,
 	FloorYOffset = 14,
 	MergeRatio = 3,
-	AutoMergeThreshold = 99,
+	AutoMergeThreshold = 100,
 	UnitPriceBase = 3,
 	UnitPriceIncrement = 3,
 	RateUpgradeBasePrice = 5,

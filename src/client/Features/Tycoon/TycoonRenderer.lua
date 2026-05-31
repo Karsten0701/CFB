@@ -1,21 +1,47 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
+local PhysicsService = game:GetService("PhysicsService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Grid = require(ReplicatedStorage.Shared.Features.Tycoon.Grid)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 
 local TycoonRenderer = {}
 TycoonRenderer.__index = TycoonRenderer
 
-local DROP_INTERVAL = 5
-local DOUBLE_DROP_SPEED_INTERVAL = 2.5
-local MAX_ACTIVE_DROPS = 200
+local DROP_INTERVAL = 6
+local DOUBLE_DROP_SPEED_INTERVAL = 3
+local MAX_ACTIVE_DROPS = 150
 local PICKUP_ANIMATION_TIME = 0.42
 local UNIT_SPAWN_BATCH_SIZE = 5
 local UNIT_SPAWN_BATCH_DELAY = 0.1
+local UNIT_RENDER_BATCH_SIZE = 5
+local UNIT_RENDER_BATCH_DELAY = 0.05
+local PLAYER_COLLISION_GROUP = "PlayerCharacters"
+local DROP_COLLISION_GROUP = "ManaDrops"
+local DROP_WALL_COLLISION_GROUP = "DropWalls"
+
+pcall(function()
+	PhysicsService:RegisterCollisionGroup(PLAYER_COLLISION_GROUP)
+end)
+pcall(function()
+	PhysicsService:RegisterCollisionGroup(DROP_COLLISION_GROUP)
+end)
+pcall(function()
+	PhysicsService:RegisterCollisionGroup(DROP_WALL_COLLISION_GROUP)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, true)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(PLAYER_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+end)
 
 local function getAssetsFolder(): Folder?
 	local current: Instance = ReplicatedStorage
@@ -99,6 +125,35 @@ local function getPickupTemplate(): Instance?
 	return assets:FindFirstChild("Pickup")
 end
 
+local function getDropTemplate(tier: number): Instance?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local dropsFolder = assets and assets:FindFirstChild("Drops")
+	if not dropsFolder then
+		return nil
+	end
+
+	return dropsFolder:FindFirstChild("Tier" .. tier) or dropsFolder:FindFirstChild("Template")
+end
+
+local function getFirstBasePart(instance: Instance): BasePart?
+	if instance:IsA("BasePart") then
+		return instance
+	end
+
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function setDropPhysics(part: BasePart, value: number)
+	part.Anchored = false
+	part.CanCollide = true
+	part.CanQuery = true
+	part.CanTouch = true
+	part.CollisionGroup = DROP_COLLISION_GROUP
+	part:SetAttribute("DropValue", value)
+	part:SetAttribute("Value", value)
+	part.CustomPhysicalProperties = PhysicalProperties.new(0.4, 0.35, 0.15)
+end
+
 local function getAdorneePart(model: Model): BasePart?
 	local head = model:FindFirstChild("Head", true)
 	if head and head:IsA("BasePart") then
@@ -139,7 +194,16 @@ local function fadeTextLabels(instance: Instance, transparency: number)
 	end
 end
 
-local function quadraticBezier(startPosition: Vector3, controlPosition: Vector3, endPosition: Vector3, alpha: number): Vector3
+local function scaleUDim2(size: UDim2, scale: number): UDim2
+	return UDim2.new(size.X.Scale * scale, size.X.Offset * scale, size.Y.Scale * scale, size.Y.Offset * scale)
+end
+
+local function quadraticBezier(
+	startPosition: Vector3,
+	controlPosition: Vector3,
+	endPosition: Vector3,
+	alpha: number
+): Vector3
 	local inverse = 1 - alpha
 	return inverse * inverse * startPosition + 2 * inverse * alpha * controlPosition + alpha * alpha * endPosition
 end
@@ -180,13 +244,17 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.onPickup = onPickup
 	self.unitModels = {}
 	self.unitEntries = {}
-	self.dropThreads = {}
 	self.rebuildToken = 0
 	self.activeOrbs = {}
+	self.dropTouchConnections = {}
 	self.isOwn = true
 	self.entitlements = {}
 	self.dropsFolder = nil
+	self.dropBounds = nil
+	self.autoCollectPart = nil
 	self.pickupConnection = nil
+	self.dropLoopConnection = nil
+	self.nextDropAt = os.clock() + self:getDropInterval()
 	return self
 end
 
@@ -196,6 +264,7 @@ end
 
 function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
 	self.entitlements = entitlements or {}
+	self:updateAutoCollectPad()
 end
 
 function TycoonRenderer:getDropInterval(): number
@@ -241,6 +310,101 @@ function TycoonRenderer:getUnitsFolder(): Folder
 	return unitsFolder
 end
 
+function TycoonRenderer:getDropBounds(): BasePart?
+	if self.dropBounds and self.dropBounds.Parent then
+		return self.dropBounds
+	end
+
+	local dropperHolder = self:getDropperHolder()
+	local firstLayerStuff = dropperHolder and dropperHolder:FindFirstChild("FirstLayerStuff")
+	if firstLayerStuff then
+		self:ensureDropWallCollision(firstLayerStuff)
+	end
+
+	local bounds = firstLayerStuff and firstLayerStuff:FindFirstChild("Bounds")
+	if bounds and bounds:IsA("BasePart") then
+		self.dropBounds = bounds
+		return bounds
+	end
+
+	return nil
+end
+
+function TycoonRenderer:getAutoCollectPart(): BasePart?
+	if self.autoCollectPart and self.autoCollectPart.Parent then
+		return self.autoCollectPart
+	end
+
+	local dropperHolder = self:getDropperHolder()
+	local firstLayerStuff = dropperHolder and dropperHolder:FindFirstChild("FirstLayerStuff")
+	local autoCollect = firstLayerStuff and firstLayerStuff:FindFirstChild("AutoCollect")
+	if autoCollect and autoCollect:IsA("BasePart") then
+		self.autoCollectPart = autoCollect
+		return autoCollect
+	end
+
+	return nil
+end
+
+function TycoonRenderer:updateAutoCollectPad()
+	local autoCollect = self:getAutoCollectPart()
+	if not autoCollect then
+		return
+	end
+
+	local hasAutoCollect = self.entitlements.AutoCollect == true
+	autoCollect.Transparency = if hasAutoCollect then 0 else 1
+	autoCollect.CanCollide = false
+	autoCollect.CanTouch = hasAutoCollect
+	autoCollect.CanQuery = hasAutoCollect
+
+	for _, descendant in autoCollect:GetDescendants() do
+		if descendant:IsA("BillboardGui") then
+			descendant.Enabled = hasAutoCollect
+		elseif descendant:IsA("BasePart") then
+			descendant.Transparency = if hasAutoCollect then 0 else 1
+			descendant.CanCollide = false
+			descendant.CanTouch = hasAutoCollect
+			descendant.CanQuery = hasAutoCollect
+		end
+	end
+end
+
+function TycoonRenderer:ensureDropWallCollision(firstLayerStuff: Instance)
+	local wall = firstLayerStuff:FindFirstChild("Wall")
+	if not wall then
+		return
+	end
+
+	if wall:IsA("BasePart") then
+		wall.CanCollide = true
+		wall.CanQuery = true
+		wall.CollisionGroup = DROP_WALL_COLLISION_GROUP
+	end
+
+	for _, descendant in wall:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = true
+			descendant.CanQuery = true
+			descendant.CollisionGroup = DROP_WALL_COLLISION_GROUP
+		end
+	end
+end
+
+function TycoonRenderer:isInsideDropBounds(position: Vector3): boolean
+	local bounds = self:getDropBounds()
+	if not bounds then
+		return true
+	end
+
+	local localPosition = bounds.CFrame:PointToObjectSpace(position)
+	local halfSize = bounds.Size * 0.5
+
+	return math.abs(localPosition.X) <= halfSize.X
+		and math.abs(localPosition.Y) <= halfSize.Y
+		and math.abs(localPosition.Z) <= halfSize.Z
+end
+
 function TycoonRenderer:ensureFloors(unitCount: number)
 	local dropperHolder = self:getDropperHolder()
 	if not dropperHolder then
@@ -278,27 +442,18 @@ function TycoonRenderer:clearRenderedUnits()
 	self.rebuildToken += 1
 
 	for _, entry in self.unitEntries do
-		if entry.Thread then
-			task.cancel(entry.Thread)
-		end
-
 		if entry.Model and entry.Model.Parent then
 			entry.Model:Destroy()
 		end
 	end
 	table.clear(self.unitModels)
 	table.clear(self.unitEntries)
-	table.clear(self.dropThreads)
 end
 
 function TycoonRenderer:removeRenderedUnit(unitIndex: number)
 	local entry = self.unitEntries[unitIndex]
 	if not entry then
 		return
-	end
-
-	if entry.Thread then
-		task.cancel(entry.Thread)
 	end
 
 	if entry.Model and entry.Model.Parent then
@@ -310,12 +465,18 @@ function TycoonRenderer:removeRenderedUnit(unitIndex: number)
 end
 
 function TycoonRenderer:clearDrops()
-	for orb in self.activeOrbs do
-		if orb and orb.Parent then
-			orb:Destroy()
+	for orb, entry in self.activeOrbs do
+		local container = if type(entry) == "table" then entry.Instance else orb
+		if container and container.Parent then
+			container:Destroy()
 		end
 	end
 	table.clear(self.activeOrbs)
+
+	for _, connection in self.dropTouchConnections do
+		connection:Disconnect()
+	end
+	table.clear(self.dropTouchConnections)
 end
 
 function TycoonRenderer:findDropPart(spotPart: BasePart): BasePart?
@@ -327,15 +488,32 @@ function TycoonRenderer:findDropPart(spotPart: BasePart): BasePart?
 	return spotPart
 end
 
-function TycoonRenderer:pickupOrb(orb: BasePart, value: number)
-	if not self.activeOrbs[orb] then
+function TycoonRenderer:pickupOrb(orb: BasePart)
+	local entry = self.activeOrbs[orb]
+	if not entry then
 		return
 	end
 
 	self.activeOrbs[orb] = nil
+	local touchConnection = self.dropTouchConnections[orb]
+	if touchConnection then
+		touchConnection:Disconnect()
+		self.dropTouchConnections[orb] = nil
+	end
+
+	local value = entry.Value or 1
+	local container = entry.Instance or orb
 	local displayValue = if self.entitlements.DoubleMana then value * 2 else value
 	self:showPickupBillboard(orb.Position, displayValue)
 	self:animatePickupOrb(orb)
+
+	if container ~= orb and container.Parent then
+		task.delay(PICKUP_ANIMATION_TIME, function()
+			if container.Parent then
+				container:Destroy()
+			end
+		end)
+	end
 
 	if self.onPickup then
 		self.onPickup(value)
@@ -361,21 +539,32 @@ function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
 
 	local popup = template:Clone()
 	popup.Name = "PickupPopup"
-	setFirstTextLabelText(popup, "+" .. tostring(value))
+	setFirstTextLabelText(popup, "+" .. FormatUtil.formatMana(value))
 	fadeTextLabels(popup, 0)
 
+	local targetSize: UDim2? = nil
 	if popup:IsA("BillboardGui") then
 		popup.Adornee = anchor
+		targetSize = popup.Size
+		popup.Size = scaleUDim2(targetSize, 0.35)
 	end
 	popup.Parent = anchor
 
-	local moveTween = TweenService:Create(anchor, TweenInfo.new(0.65, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-		Position = anchor.Position + Vector3.new(0, 1.8, 0),
-	})
+	local drift = Vector3.new(math.random(-8, 8) / 10, 1.95, math.random(-8, 8) / 10)
+	local moveTween =
+		TweenService:Create(anchor, TweenInfo.new(0.72, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+			Position = anchor.Position + drift,
+		})
 	moveTween:Play()
 
-	task.delay(0.25, function()
-		if not anchor.Parent then
+	if popup:IsA("BillboardGui") and targetSize then
+		TweenService:Create(popup, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Size = targetSize,
+		}):Play()
+	end
+
+	task.delay(0.72, function()
+		if not anchor.Parent or not popup.Parent then
 			return
 		end
 
@@ -385,9 +574,17 @@ function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
 			fadeTextLabels(popup, valueNow)
 		end)
 
-		local fadeTween = TweenService:Create(fadeProgress, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Value = 1,
-		})
+		local fadeTween =
+			TweenService:Create(fadeProgress, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Value = 1,
+			})
+
+		if popup:IsA("BillboardGui") and targetSize then
+			TweenService:Create(popup, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+				Size = scaleUDim2(targetSize, 0.15),
+			}):Play()
+		end
+
 		fadeTween:Play()
 		fadeTween.Completed:Connect(function()
 			connection:Disconnect()
@@ -406,7 +603,8 @@ function TycoonRenderer:animatePickupOrb(orb: BasePart)
 
 	local startPosition = orb.Position
 	local startSize = orb.Size
-	local controlPosition = startPosition:Lerp(root.Position, 0.45) + Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0)
+	local controlPosition = startPosition:Lerp(root.Position, 0.45)
+		+ Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0)
 	local startTime = os.clock()
 
 	orb.Anchored = true
@@ -462,20 +660,25 @@ function TycoonRenderer:ensurePickupLoop()
 			return
 		end
 
-		for orb, value in self.activeOrbs do
+		for orb in self.activeOrbs do
 			if not orb.Parent then
 				self.activeOrbs[orb] = nil
 				continue
 			end
 
-			if self.entitlements.AutoCollect or (root.Position - orb.Position).Magnitude <= 3 then
-				self:pickupOrb(orb, value)
+			if (root.Position - orb.Position).Magnitude <= 3 or not self:isInsideDropBounds(orb.Position) then
+				self:pickupOrb(orb)
 			end
 		end
 	end)
 end
 
-function TycoonRenderer:spawnManaDrop(dropPart: BasePart, value: number)
+function TycoonRenderer:isLocalCharacterPart(part: BasePart): boolean
+	local character = Players.LocalPlayer.Character
+	return character ~= nil and part:IsDescendantOf(character)
+end
+
+function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: number)
 	if not self.isOwn then
 		return
 	end
@@ -486,6 +689,11 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, value: number)
 			activeDropCount += 1
 		else
 			self.activeOrbs[orb] = nil
+			local touchConnection = self.dropTouchConnections[orb]
+			if touchConnection then
+				touchConnection:Disconnect()
+				self.dropTouchConnections[orb] = nil
+			end
 		end
 	end
 
@@ -496,46 +704,96 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, value: number)
 	self:ensurePickupLoop()
 
 	local dropsFolder = self:getDropsFolder()
-
-	local sphere = Instance.new("Part")
-	sphere.Name = "ManaDrop"
-	sphere.Shape = Enum.PartType.Ball
-	sphere.Size = Vector3.new(1, 1, 1)
-	sphere.Material = Enum.Material.Neon
-	sphere.Color = Color3.fromRGB(120, 80, 255)
-	sphere.Anchored = false
-	sphere.CanCollide = true
-	sphere.CanQuery = true
-	sphere.CanTouch = true
-	sphere.CFrame = dropPart.CFrame + Vector3.new(0, 1.5, 0)
-	sphere.CustomPhysicalProperties = PhysicalProperties.new(0.4, 0.35, 0.15)
-	sphere:SetAttribute("DropValue", value)
-	sphere:SetAttribute("Value", value)
-	sphere.Parent = dropsFolder
-	sphere.AssemblyLinearVelocity = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
-
-	self.activeOrbs[sphere] = value
-end
-
-function TycoonRenderer:startDropLoop(unitModel: Model, dropPart: BasePart, tier: number)
-	if not self.isOwn then
-		return nil
+	local template = getDropTemplate(tier)
+	if not template then
+		warn("[TycoonRenderer] No drop template found for tier:", tier)
+		return
 	end
 
-	local tierData = AnimeDroppers.Tiers[tier]
-	if not tierData then
-		return nil
+	local dropInstance = template:Clone()
+	dropInstance.Name = "ManaDrop"
+	dropInstance:SetAttribute("DropValue", value)
+	dropInstance:SetAttribute("Value", value)
+
+	local pickupPart = getFirstBasePart(dropInstance)
+	if not pickupPart then
+		dropInstance:Destroy()
+		warn("[TycoonRenderer] Drop template has no BasePart:", template:GetFullName())
+		return
 	end
 
-	local thread = task.spawn(function()
-		while unitModel.Parent do
-			self:spawnManaDrop(dropPart, tierData.DropValue or 1)
-			task.wait(self:getDropInterval())
+	for _, descendant in dropInstance:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			setDropPhysics(descendant, value)
+		end
+	end
+	if dropInstance:IsA("BasePart") then
+		setDropPhysics(dropInstance, value)
+	end
+
+	if dropInstance:IsA("Model") then
+		dropInstance:PivotTo(dropPart.CFrame + Vector3.new(0, 1.5, 0))
+	elseif dropInstance:IsA("BasePart") then
+		dropInstance.CFrame = dropPart.CFrame + Vector3.new(0, 1.5, 0)
+	end
+
+	dropInstance.Parent = dropsFolder
+	pickupPart.AssemblyLinearVelocity = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
+
+	self.activeOrbs[pickupPart] = {
+		Value = value,
+		Instance = dropInstance,
+	}
+	self.dropTouchConnections[pickupPart] = pickupPart.Touched:Connect(function(hit)
+		if not self.activeOrbs[pickupPart] then
+			return
+		end
+
+		if self:isLocalCharacterPart(hit) then
+			self:pickupOrb(pickupPart)
+			return
+		end
+
+		local autoCollect = self:getAutoCollectPart()
+		if
+			self.entitlements.AutoCollect
+			and autoCollect
+			and (hit == autoCollect or hit:IsDescendantOf(autoCollect))
+		then
+			self:pickupOrb(pickupPart)
 		end
 	end)
+end
 
-	table.insert(self.dropThreads, thread)
-	return thread
+function TycoonRenderer:ensureDropLoop()
+	if self.dropLoopConnection or not self.isOwn then
+		return
+	end
+
+	self.nextDropAt = os.clock() + self:getDropInterval()
+	self.dropLoopConnection = RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+		local interval = self:getDropInterval()
+		if now < self.nextDropAt then
+			return
+		end
+
+		self.nextDropAt += interval
+		if self.nextDropAt < now then
+			self.nextDropAt = now + interval
+		end
+
+		for _, entry in self.unitEntries do
+			if not entry.Model or not entry.Model.Parent or not entry.DropPart then
+				continue
+			end
+
+			local tierData = AnimeDroppers.Tiers[entry.Tier]
+			if tierData then
+				self:spawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1)
+			end
+		end
+	end)
 end
 
 function TycoonRenderer:getSpotForUnitIndex(dropperHolder: Instance, unitIndex: number): BasePart?
@@ -549,17 +807,8 @@ function TycoonRenderer:getSpotForUnitIndex(dropperHolder: Instance, unitIndex: 
 end
 
 function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: BasePart)
-	if entry.Thread then
-		task.cancel(entry.Thread)
-		entry.Thread = nil
-	end
-
 	entry.Model:PivotTo(spotPart.CFrame)
-
-	local dropPart = self:findDropPart(spotPart)
-	if dropPart then
-		entry.Thread = self:startDropLoop(entry.Model, dropPart, entry.Tier)
-	end
+	entry.DropPart = self:findDropPart(spotPart)
 
 	self.unitEntries[unitIndex] = entry
 	self.unitModels[unitIndex] = entry.Model
@@ -568,9 +817,14 @@ end
 function TycoonRenderer:rebuild(units: { { Tier: number } })
 	self.rebuildToken += 1
 	local rebuildToken = self.rebuildToken
+	self:updateAutoCollectPad()
 
 	local sortedUnits = table.clone(units)
 	table.sort(sortedUnits, function(left, right)
+		if left.Slot and right.Slot and left.Slot ~= right.Slot then
+			return left.Slot < right.Slot
+		end
+
 		return (left.Tier or 1) > (right.Tier or 1)
 	end)
 
@@ -583,11 +837,22 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 
 	local unitsFolder = self:getUnitsFolder()
 	local unitsToSpawn = {}
+	local unitsToMove = {}
+	local unitsToDestroy = {}
 	local reusableByTier = {}
+	local renderOperationsThisBatch = 0
+
+	local function queueDestroy(entry)
+		if entry and entry.Model and entry.Model.Parent then
+			table.insert(unitsToDestroy, entry.Model)
+		end
+	end
 
 	for unitIndex in self.unitEntries do
 		if unitIndex > #sortedUnits then
-			self:removeRenderedUnit(unitIndex)
+			queueDestroy(self.unitEntries[unitIndex])
+			self.unitEntries[unitIndex] = nil
+			self.unitModels[unitIndex] = nil
 		end
 	end
 
@@ -617,7 +882,11 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 		if reusableEntry and reusableEntry.Model and reusableEntry.Model.Parent then
 			local spotPart = self:getSpotForUnitIndex(dropperHolder, spawnInfo.Index)
 			if spotPart then
-				self:moveRenderedUnit(spawnInfo.Index, reusableEntry, spotPart)
+				table.insert(unitsToMove, {
+					Index = spawnInfo.Index,
+					Entry = reusableEntry,
+					SpotPart = spotPart,
+				})
 				continue
 			end
 		end
@@ -627,18 +896,41 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 
 	for _, entries in reusableByTier do
 		for _, entry in entries do
-			if entry.Thread then
-				task.cancel(entry.Thread)
-			end
-
-			if entry.Model and entry.Model.Parent then
-				entry.Model:Destroy()
-			end
+			queueDestroy(entry)
 		end
 	end
 
+	self:ensureDropLoop()
+
 	task.spawn(function()
-		local spawnedThisBatch = 0
+		local function stepBatch()
+			renderOperationsThisBatch += 1
+			if renderOperationsThisBatch >= UNIT_RENDER_BATCH_SIZE then
+				renderOperationsThisBatch = 0
+				task.wait(UNIT_RENDER_BATCH_DELAY)
+			end
+		end
+
+		for _, model in unitsToDestroy do
+			if rebuildToken ~= self.rebuildToken then
+				return
+			end
+
+			if model.Parent then
+				model:Destroy()
+			end
+
+			stepBatch()
+		end
+
+		for _, moveInfo in unitsToMove do
+			if rebuildToken ~= self.rebuildToken then
+				return
+			end
+
+			self:moveRenderedUnit(moveInfo.Index, moveInfo.Entry, moveInfo.SpotPart)
+			stepBatch()
+		end
 
 		for _, spawnInfo in finalUnitsToSpawn do
 			if rebuildToken ~= self.rebuildToken then
@@ -661,26 +953,23 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 			unitModel.Name = template.Name .. "_" .. unitIndex
 			unitModel:PivotTo(spotPart.CFrame)
 			anchorModel(unitModel)
-			addOverhead(unitModel, template.Name, tier)
+			local tierData = AnimeDroppers.Tiers[tier]
+			addOverhead(unitModel, tierData and tierData.DisplayName or template.Name, tier)
 			unitModel.Parent = unitsFolder
 
 			self.unitModels[unitIndex] = unitModel
 
 			local dropPart = self:findDropPart(spotPart)
-			local dropThread = nil
-			if dropPart then
-				dropThread = self:startDropLoop(unitModel, dropPart, tier)
-			end
 
 			self.unitEntries[unitIndex] = {
 				Model = unitModel,
 				Tier = tier,
-				Thread = dropThread,
+				DropPart = dropPart,
 			}
 
-			spawnedThisBatch += 1
-			if spawnedThisBatch >= UNIT_SPAWN_BATCH_SIZE then
-				spawnedThisBatch = 0
+			renderOperationsThisBatch += 1
+			if renderOperationsThisBatch >= UNIT_SPAWN_BATCH_SIZE then
+				renderOperationsThisBatch = 0
 				task.wait(UNIT_SPAWN_BATCH_DELAY)
 			end
 		end
@@ -695,6 +984,16 @@ function TycoonRenderer:destroy()
 		self.pickupConnection:Disconnect()
 		self.pickupConnection = nil
 	end
+
+	if self.dropLoopConnection then
+		self.dropLoopConnection:Disconnect()
+		self.dropLoopConnection = nil
+	end
+
+	for _, connection in self.dropTouchConnections do
+		connection:Disconnect()
+	end
+	table.clear(self.dropTouchConnections)
 end
 
 return TycoonRenderer

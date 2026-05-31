@@ -1,4 +1,5 @@
 local Players = game:GetService("Players")
+local PhysicsService = game:GetService("PhysicsService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
@@ -19,12 +20,63 @@ local playerCharacterConnections: { [Player]: RBXScriptConnection } = {}
 local pickupBudget: { [Player]: number } = {}
 local pickupBudgetUpdatedAt: { [Player]: number } = {}
 local processElapsed: { [Player]: number } = {}
+local visualDataRequestAt: { [Player]: { [string]: number } } = {}
 
 local PROCESS_INTERVAL = 1
+local DROP_INTERVAL = 5
+local MAX_ACTIVE_DROPS = 200
+local PLAYER_COLLISION_GROUP = "PlayerCharacters"
+local DROP_COLLISION_GROUP = "ManaDrops"
+local DROP_WALL_COLLISION_GROUP = "DropWalls"
+local VISUAL_DATA_REQUEST_COOLDOWN = 0.35
+
+local function resetPickupBudgetTimer(player: Player)
+	pickupBudget[player] = 0
+	pickupBudgetUpdatedAt[player] = os.clock()
+end
+
+local function setupCollisionGroups()
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(PLAYER_COLLISION_GROUP)
+	end)
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(DROP_COLLISION_GROUP)
+	end)
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(DROP_WALL_COLLISION_GROUP)
+	end)
+	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, true)
+	PhysicsService:CollisionGroupSetCollidable(PLAYER_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+end
+
+local function setCharacterCollisionGroup(character: Model)
+	for _, descendant in character:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.CollisionGroup = PLAYER_COLLISION_GROUP
+		end
+	end
+
+	character.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("BasePart") then
+			descendant.CollisionGroup = PLAYER_COLLISION_GROUP
+		end
+	end)
+end
 
 local function getYenMultiplier(player: Player): number
 	local MonetizationService = Knit.GetService("MonetizationService")
-	return if MonetizationService:OwnsGamePass(player, "DoubleYen") then 2 else 1
+	local multiplier = 1
+
+	if MonetizationService:OwnsGamePassOnly(player, "DoubleYen") then
+		multiplier *= 2
+	end
+
+	if MonetizationService:OwnsProductEntitlement(player, "DoubleYen") then
+		multiplier *= 2
+	end
+
+	return multiplier
 end
 
 local function getManaMultiplier(player: Player): number
@@ -35,6 +87,15 @@ end
 local function getDepositInterval(player: Player): number
 	local MonetizationService = Knit.GetService("MonetizationService")
 	return if MonetizationService:OwnsGamePass(player, "DoubleDeposit") then 0.5 else PROCESS_INTERVAL
+end
+
+local function getTycoonOwnerPlayer(tycoon: Instance): Player?
+	local ownerUserId = tycoon:GetAttribute("Owner")
+	if type(ownerUserId) ~= "number" or ownerUserId <= 0 then
+		return nil
+	end
+
+	return Players:GetPlayerByUserId(ownerUserId)
 end
 
 local function addTierOneUnits(units: { { Tier: number } }, amount: number, shouldAutoMerge: boolean): { { Tier: number } }
@@ -80,12 +141,25 @@ local function addTierOneUnits(units: { { Tier: number } }, amount: number, shou
 	return nextUnits
 end
 
+local function getAutoMergeAt(PlayerDataService, player: Player): number
+	local settings = PlayerDataService:Get(player, "Settings")
+	if type(settings) ~= "table" then
+		return 100
+	end
+
+	return math.clamp(math.floor(tonumber(settings.AutoMergeAt) or 100), 1, 100)
+end
+
+local function shouldAutoMergeUnitBuy(PlayerDataService, player: Player, currentUnitCount: number, amount: number): boolean
+	return amount >= getAutoMergeAt(PlayerDataService, player) or currentUnitCount + amount > TycoonConfig.MaxUnits
+end
+
 local function getMaxPickupRate(units: { { Tier: number } }): number
 	local total = 0
 	for _, unit in units do
 		local tierData = AnimeDroppers.Tiers[unit.Tier]
 		if tierData then
-			total += (tierData.DropValue or 1) / 5
+			total += (tierData.DropValue or 1) / DROP_INTERVAL
 		end
 	end
 	return math.max(total, 1)
@@ -100,6 +174,7 @@ function TycoonService:AssignTycoon(player: Player)
 		local existingTycoon = TycoonUtil.getPlayerTycoon(player, existingName)
 		if existingTycoon then
 			playerTycoons[player] = existingTycoon
+			resetPickupBudgetTimer(player)
 
 			if not playerCharacterConnections[player] then
 				playerCharacterConnections[player] = player.CharacterAdded:Connect(function()
@@ -124,6 +199,7 @@ function TycoonService:AssignTycoon(player: Player)
 			tycoon:SetAttribute("Owner", player.UserId)
 			PlayerDataService:Set(player, "TycoonName", tycoon.Name)
 			playerTycoons[player] = tycoon
+			resetPickupBudgetTimer(player)
 
 			if not playerCharacterConnections[player] then
 				playerCharacterConnections[player] = player.CharacterAdded:Connect(function()
@@ -152,6 +228,7 @@ function TycoonService:ReleaseTycoon(player: Player)
 	pickupBudget[player] = nil
 	pickupBudgetUpdatedAt[player] = nil
 	processElapsed[player] = nil
+	visualDataRequestAt[player] = nil
 
 	local characterConnection = playerCharacterConnections[player]
 	if characterConnection then
@@ -200,10 +277,11 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 		return false, "Invalid amount"
 	end
 
-	pickupBudget[player] = math.min((pickupBudget[player] or maxDropValue) + maxRate * elapsed, math.max(maxRate * 10, maxDropValue * 2))
+	local maxStoredDropValue = math.max(maxRate * DROP_INTERVAL * MAX_ACTIVE_DROPS, maxDropValue * MAX_ACTIVE_DROPS)
+	pickupBudget[player] = math.min((pickupBudget[player] or 0) + maxRate * elapsed, maxStoredDropValue)
 	pickupBudgetUpdatedAt[player] = now
 
-	if pickupBudget[player] < amount then
+	if pickupBudget[player] + 0.001 < amount then
 		return false, "Too fast"
 	end
 
@@ -219,6 +297,72 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 	end
 
 	return true
+end
+
+function TycoonService.Client:TeleportHome(player: Player): (boolean, string?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tycoon = playerTycoons[player]
+	if not tycoon then
+		local tycoonName = PlayerDataService:Get(player, "TycoonName")
+		if tycoonName and tycoonName ~= "" then
+			tycoon = TycoonUtil.getPlayerTycoon(player, tycoonName)
+			if tycoon then
+				playerTycoons[player] = tycoon
+			end
+		end
+	end
+
+	if not tycoon then
+		return false, "No tycoon"
+	end
+
+	TycoonUtil.teleportToSpawn(player, tycoon)
+	return true
+end
+
+function TycoonService.Client:GetTycoonVisualData(player: Player, tycoonName: string): (boolean, any)
+	if type(tycoonName) ~= "string" or tycoonName == "" then
+		return false, "Invalid tycoon"
+	end
+
+	local now = os.clock()
+	visualDataRequestAt[player] = visualDataRequestAt[player] or {}
+	if now - (visualDataRequestAt[player][tycoonName] or 0) < VISUAL_DATA_REQUEST_COOLDOWN then
+		return false, "Too fast"
+	end
+	visualDataRequestAt[player][tycoonName] = now
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tycoon = TycoonUtil.getTycoonByName(tycoonName)
+	if not tycoon or tycoon:GetAttribute("Claimed") ~= true then
+		return false, "No tycoon"
+	end
+
+	local owner = getTycoonOwnerPlayer(tycoon)
+	if not owner then
+		return false, "No owner"
+	end
+
+	PlayerDataService:WaitForData(owner)
+	local units = PlayerDataService:GetUnits(owner)
+	local compactUnits = table.create(#units)
+	for _, unit in units do
+		table.insert(compactUnits, {
+			Tier = unit.Tier,
+			Slot = unit.Slot,
+		})
+	end
+
+	-- Visual-only payload. Server stays authoritative for money, drops, buys and merges.
+	return true, {
+		TycoonName = tycoon.Name,
+		OwnerUserId = owner.UserId,
+		Units = compactUnits,
+	}
 end
 
 function TycoonService:GrantUnits(player: Player, amount: number): boolean
@@ -241,7 +385,8 @@ function TycoonService:GrantUnits(player: Player, amount: number): boolean
 		return false
 	end
 
-	local units = addTierOneUnits(PlayerDataService:GetUnits(player), amount, true)
+	local currentUnits = PlayerDataService:GetUnits(player)
+	local units = addTierOneUnits(currentUnits, amount, shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount))
 	if #units > TycoonConfig.MaxUnits then
 		return false
 	end
@@ -324,26 +469,26 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 		return false, "Invalid button"
 	end
 
-	local totalPurchased = PlayerDataService:Get(player, "TotalUnitsPurchased")
-	local price = Pricing.getUnitBulkPrice(totalPurchased, amount)
+	local currentUnits = PlayerDataService:GetUnits(player)
+	local baseUnitCount = Pricing.getBaseUnitCount(currentUnits)
+	local price = Pricing.getUnitBulkPrice(baseUnitCount, amount)
 	if not PlayerDataService:TrySpendYen(player, price) then
 		return false, "Not enough yen"
 	end
 
-	local currentUnits = PlayerDataService:GetUnits(player)
-	local units = addTierOneUnits(currentUnits, amount, #currentUnits + amount > TycoonConfig.MaxUnits)
+	local units = addTierOneUnits(currentUnits, amount, shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount))
 	if #units > TycoonConfig.MaxUnits then
 		PlayerDataService:AddYen(player, price)
 		return false, "Grid full"
 	end
 
 	PlayerDataService:SetUnits(player, units)
-	PlayerDataService:Set(player, "TotalUnitsPurchased", totalPurchased + amount)
+	PlayerDataService:Set(player, "TotalUnitsPurchased", baseUnitCount + amount)
 
 	return true
 end
 
-function TycoonService.Client:MergeUnits(player: Player, buttonName: string): (boolean, string?)
+function TycoonService.Client:MergeUnits(player: Player, buttonName: string): (boolean, string?, number?)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
 
@@ -359,13 +504,13 @@ function TycoonService.Client:MergeUnits(player: Player, buttonName: string): (b
 	end
 
 	local units = PlayerDataService:GetUnits(player)
-	local mergedUnits, changed = Merge.runOnce(units)
+	local mergedUnits, changed, mergedUnitCount = Merge.runOnce(units)
 	if not changed then
 		return false, "Nothing to merge"
 	end
 
 	PlayerDataService:SetUnits(player, mergedUnits)
-	return true
+	return true, nil, mergedUnitCount
 end
 
 function TycoonService.Client:UpgradeRate(player: Player, amount: number, buttonName: string): (boolean, string?)
@@ -408,13 +553,24 @@ function TycoonService.Client:UpgradeRate(player: Player, amount: number, button
 end
 
 function TycoonService:KnitStart()
+	setupCollisionGroups()
+
 	for _, player in Players:GetPlayers() do
+		if player.Character then
+			setCharacterCollisionGroup(player.Character)
+		end
+		player.CharacterAdded:Connect(setCharacterCollisionGroup)
+
 		task.spawn(function()
 			self:AssignTycoon(player)
 		end)
 	end
 
 	Players.PlayerAdded:Connect(function(player)
+		if player.Character then
+			setCharacterCollisionGroup(player.Character)
+		end
+		player.CharacterAdded:Connect(setCharacterCollisionGroup)
 		self:AssignTycoon(player)
 	end)
 
