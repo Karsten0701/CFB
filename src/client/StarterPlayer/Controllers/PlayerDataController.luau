@@ -76,4 +76,12 @@ function PlayerDataController:SetSfxVolume(volume: number)
 	return Knit.GetService("PlayerDataService"):SetSfxVolume(volume)
 end
 
+function PlayerDataController:SetSetting(settingName: string, value: any)
+	return Knit.GetService("PlayerDataService"):SetSetting(settingName, value)
+end
+
+function PlayerDataController:MarkFavoritePromptShown()
+	return Knit.GetService("PlayerDataService"):MarkFavoritePromptShown()
+end
+
 return PlayerDataController

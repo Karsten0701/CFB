@@ -97,6 +97,16 @@ function TycoonUtil.getBuyAmount(buttonModel: Instance): number?
 		or TycoonUtil.parseBuyAmount(buttonModel.Name)
 end
 
+function TycoonUtil.isBuyMaxUnitsButton(buttonModel: Instance): boolean
+	local lowerName = string.lower(buttonModel.Name)
+
+	return getBooleanButtonAttribute(buttonModel, "UnitBuyMax")
+		or getBooleanButtonAttribute(buttonModel, "BuyMaxUnits")
+		or lowerName == "buymaxunits"
+		or lowerName == "buyunitmax"
+		or lowerName == "buymax"
+end
+
 function TycoonUtil.getRobuxBuyAmount(buttonModel: Instance): number?
 	local nameAmount = tonumber(string.match(buttonModel.Name, "^BuyRobux(%d+)$"))
 	if not getBooleanButtonAttribute(buttonModel, "RobuxBuy") and not nameAmount then
@@ -111,6 +121,20 @@ function TycoonUtil.getRateAmount(buttonModel: Instance): number?
 	return getPositiveNumberButtonAttribute(buttonModel, "RateBuy")
 		or getPositiveNumberButtonAttribute(buttonModel, "RateUpgrade")
 		or TycoonUtil.parseRateAmount(buttonModel.Name)
+end
+
+function TycoonUtil.isRateMaxButton(buttonModel: Instance): boolean
+	local lowerName = string.lower(buttonModel.Name)
+
+	return getBooleanButtonAttribute(buttonModel, "RateBuyMax")
+		or getBooleanButtonAttribute(buttonModel, "RateUpgradeMax")
+		or lowerName == "ratebuymax"
+		or lowerName == "ratebuymaxbutton"
+		or lowerName == "buymaxrate"
+		or lowerName == "maxratebuy"
+		or lowerName == "maxrate"
+		or lowerName == "ratemax"
+		or (string.find(lowerName, "rate") ~= nil and string.find(lowerName, "max") ~= nil)
 end
 
 function TycoonUtil.isDepositButton(buttonModel: Instance): boolean
@@ -139,6 +163,15 @@ function TycoonUtil.isSellAllButton(buttonModel: Instance): boolean
 		or getBooleanButtonAttribute(buttonModel, "SellAllButton")
 		or lowerName == "sellall"
 		or lowerName == "sellallbutton"
+end
+
+function TycoonUtil.isGroupRewardButton(buttonModel: Instance): boolean
+	local lowerName = string.lower(buttonModel.Name)
+
+	return getBooleanButtonAttribute(buttonModel, "GroupReward")
+		or getBooleanButtonAttribute(buttonModel, "GroupRewardButton")
+		or lowerName == "groupreward"
+		or lowerName == "grouprewardbutton"
 end
 
 function TycoonUtil.teleportToSpawn(player: Player, tycoon: Instance)

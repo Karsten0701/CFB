@@ -2,6 +2,13 @@ local FormatUtil = {}
 
 local COMPACT_THRESHOLD = 100_000_000
 local SUFFIXES = {
+	{ Value = 1e54, Suffix = "SpDe" },
+	{ Value = 1e51, Suffix = "SxDe" },
+	{ Value = 1e48, Suffix = "QiDe" },
+	{ Value = 1e45, Suffix = "QaDe" },
+	{ Value = 1e42, Suffix = "TDe" },
+	{ Value = 1e39, Suffix = "DDe" },
+	{ Value = 1e36, Suffix = "UDe" },
 	{ Value = 1e33, Suffix = "De" },
 	{ Value = 1e30, Suffix = "No" },
 	{ Value = 1e27, Suffix = "Oc" },
@@ -32,7 +39,14 @@ local function trimTrailingZeroDecimal(numberText: string): string
 end
 
 function FormatUtil.formatNumber(value: number): string
+	if value ~= value then
+		return "0"
+	end
+
 	local absValue = math.abs(value)
+	if absValue == math.huge then
+		return if value > 0 then "Inf" else "-Inf"
+	end
 
 	if absValue >= COMPACT_THRESHOLD then
 		for _, suffixInfo in SUFFIXES do

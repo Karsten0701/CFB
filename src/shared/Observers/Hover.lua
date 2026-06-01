@@ -4,8 +4,11 @@
 local HoverEffects = {}
 
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 
 HoverEffects.TagName = "Hover"
 
@@ -99,6 +102,7 @@ function HoverEffects.SetupButton(button)
 
 	data.Connections[#data.Connections + 1] = button.MouseEnter:Connect(function()
 		data.Hovering = true
+		SoundUtil.Hover()
 		refreshButton(button)
 	end)
 
@@ -109,6 +113,7 @@ function HoverEffects.SetupButton(button)
 
 	data.Connections[#data.Connections + 1] = button.MouseButton1Down:Connect(function()
 		mouseDown = true
+		SoundUtil.Click()
 		refreshButton(button)
 	end)
 

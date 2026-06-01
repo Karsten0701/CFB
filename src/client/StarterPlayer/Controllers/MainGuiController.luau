@@ -1,12 +1,17 @@
 local Players = game:GetService("Players")
+local AvatarEditorService = game:GetService("AvatarEditorService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Icon = require(ReplicatedStorage.Packages.topbarplus)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
@@ -34,7 +39,20 @@ local lastHomeTeleportAt = 0
 local activeMessages = {}
 local nextMessageLayoutOrder = 0
 local shopConnections: { RBXScriptConnection } = {}
+local rebirthConnections: { RBXScriptConnection } = {}
+local settingsConnections: { RBXScriptConnection } = {}
+local settingsRowCache: { [string]: GuiObject } = {}
+local settingsSliderCache: { [string]: { Frame: GuiObject?, Slider: GuiObject?, Label: TextLabel? } } = {}
+local settingsToggleTextCache: { [GuiObject]: { TextLabel | TextButton } } = {}
+local musicSoundCache: { Sound } = {}
+local lastMusicScanAt = -math.huge
+local musicEnabledCache = true
+local lastAppliedMusicVolume: number? = nil
+local lastAppliedMusicEnabled: boolean? = nil
+local lastAppliedSfxVolume: number? = nil
+local lastAppliedSoundEnabled: boolean? = nil
 local gamePassPromptOpen = false
+local rebirthRequestOpen = false
 
 local SHOP_GAMEPASS_ALIASES = {
 	AutoCollect = "AutoCollect",
@@ -335,6 +353,30 @@ function MainGuiController:ShowMergedUnitsMessage(amount: number)
 	)
 end
 
+function MainGuiController:ShowRateUpgradeMessage(gain: number)
+	gain = math.max(math.floor(gain), 0)
+	if gain <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"RateUpgrade:" .. gain,
+		'You bought <font color="#47FF6A">+' .. FormatUtil.formatNumber(gain) .. " Rate</font>"
+	)
+end
+
+function MainGuiController:ShowGroupRewardMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"GroupReward:" .. amount,
+		'You claimed <font color="#FFD86B">' .. Pricing.formatYen(amount) .. "</font>"
+	)
+end
+
 function MainGuiController:ShowRobuxUnitsMessage(amount: number)
 	amount = math.max(math.floor(amount), 0)
 	if amount <= 0 then
@@ -346,6 +388,25 @@ function MainGuiController:ShowRobuxUnitsMessage(amount: number)
 		'You bought <font color="#47FF6A">+'
 			.. FormatUtil.formatNumber(amount)
 			.. ' Anime Drops</font>, <font color="#FFD86B">Thank you for your support!</font>'
+	)
+end
+
+function MainGuiController:ShowMissingRebirthTierMessage()
+	self:showMessage("RebirthMissingTier", "You dont have the Required Tier neccesary to rebirth.")
+end
+
+function MainGuiController:ShowRebirthMessage(rebirths: number, tokenReward: number?)
+	tokenReward = math.max(math.floor(tokenReward or 0), 0)
+	local tokenText = ""
+	if tokenReward > 0 then
+		tokenText = ' <font color="#47FF6A">+'
+			.. FormatUtil.formatNumber(tokenReward)
+			.. " Rebirth Tokens.</font>"
+	end
+
+	self:showMessage(
+		"Rebirth:" .. tostring(rebirths),
+		'Rebirth complete! <font color="#FFD86B">Yen Boost upgraded.</font>' .. tokenText
 	)
 end
 
@@ -371,6 +432,337 @@ function MainGuiController:setupSettingsIcon()
 
 	boundSettingsFrame = settingsFrame
 	settingsIcon:bindToggleItem(settingsFrame)
+end
+
+function MainGuiController:clearSettingsConnections()
+	for _, connection in settingsConnections do
+		connection:Disconnect()
+	end
+
+	table.clear(settingsConnections)
+	table.clear(settingsRowCache)
+	table.clear(settingsSliderCache)
+	table.clear(settingsToggleTextCache)
+end
+
+function MainGuiController:getSettingsRow(rowName: string): GuiObject?
+	local cached = settingsRowCache[rowName]
+	if cached and cached.Parent then
+		return cached
+	end
+
+	local frame = self:getSettingsFrame()
+	local row = frame and frame:FindFirstChild(rowName, true)
+	if row and row:IsA("GuiObject") then
+		settingsRowCache[rowName] = row
+		return row
+	end
+
+	return nil
+end
+
+function MainGuiController:getSettingsValue(settingName: string, fallback: any): any
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local value = PlayerDataController:Get({ "Settings", settingName })
+	return if value == nil then fallback else value
+end
+
+function MainGuiController:setSetting(settingName: string, value: any)
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	PlayerDataController:SetSetting(settingName, value)
+end
+
+function MainGuiController:setToggleVisual(row: GuiObject, enabled: boolean)
+	row:SetAttribute("Enabled", enabled)
+	row.BackgroundTransparency = if enabled then 0.05 else 0.25
+	row.BackgroundColor3 = if enabled then Color3.fromRGB(32, 210, 95) else Color3.fromRGB(45, 45, 45)
+
+	local textTargets = settingsToggleTextCache[row]
+	if not textTargets then
+		textTargets = {}
+		settingsToggleTextCache[row] = textTargets
+
+		for _, descendant in row:GetDescendants() do
+			if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+				local lowerName = string.lower(descendant.Name)
+				if lowerName == "value" or lowerName == "status" or lowerName == "toggle" then
+					table.insert(textTargets, descendant)
+				end
+			end
+		end
+	end
+
+	for index = #textTargets, 1, -1 do
+		local descendant = textTargets[index]
+		if not descendant.Parent then
+			table.remove(textTargets, index)
+			continue
+		end
+
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
+			descendant.Text = if enabled then "ON" else "OFF"
+		end
+	end
+end
+
+function MainGuiController:connectSettingsActivated(guiObject: GuiObject, callback: () -> ())
+	local clickable = self:getClickableGui(guiObject)
+	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+		table.insert(settingsConnections, clickable.Activated:Connect(callback))
+	else
+		table.insert(
+			settingsConnections,
+			clickable.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					callback()
+				end
+			end)
+		)
+	end
+end
+
+function MainGuiController:setupSettingsToggle(rowName: string, settingName: string, fallback: boolean)
+	local row = self:getSettingsRow(rowName)
+	if not row then
+		return
+	end
+
+	local function refresh()
+		self:setToggleVisual(row, self:getSettingsValue(settingName, fallback) == true)
+	end
+
+	refresh()
+	self:connectSettingsActivated(row, function()
+		local nextValue = self:getSettingsValue(settingName, fallback) ~= true
+		self:setSetting(settingName, nextValue)
+		self:setToggleVisual(row, nextValue)
+		if settingName == "Sound" then
+			SoundUtil.SetSoundEnabled(nextValue)
+		elseif settingName == "Music" then
+			musicEnabledCache = nextValue
+			self:applyMusicVolume(math.clamp(tonumber(self:getSettingsValue("musicVolume", 1)) or 1, 0, 1))
+		end
+	end)
+end
+
+function MainGuiController:setupAutoMergeSetting()
+	local row = self:getSettingsRow("AutoMerge")
+	if not row then
+		return
+	end
+
+	local textBox = row:FindFirstChildWhichIsA("TextBox", true)
+	if not textBox then
+		return
+	end
+
+	local currentValue = math.clamp(math.floor(tonumber(self:getSettingsValue("AutoMergeAt", 100)) or 100), 0, 100)
+	textBox.Text = tostring(currentValue)
+
+	table.insert(
+		settingsConnections,
+		textBox.FocusLost:Connect(function()
+			local nextValue = math.clamp(math.floor(tonumber(textBox.Text) or currentValue), 0, 100)
+			currentValue = nextValue
+			textBox.Text = tostring(nextValue)
+			self:setSetting("AutoMergeAt", nextValue)
+		end)
+	)
+end
+
+function MainGuiController:findSliderParts(rowName: string): (GuiObject?, GuiObject?, TextLabel?)
+	local cached = settingsSliderCache[rowName]
+	if cached and cached.Frame and cached.Frame.Parent then
+		return cached.Frame, cached.Slider, cached.Label
+	end
+
+	local row = self:getSettingsRow(rowName)
+	local sliderFrame = row and row:FindFirstChild("SliderFrame", true)
+	if not sliderFrame or not sliderFrame:IsA("GuiObject") then
+		return nil, nil, nil
+	end
+
+	local slider = sliderFrame:FindFirstChild("Slider", true)
+	local label = row:FindFirstChild("TextLabel", true)
+	local sliderObject = if slider and slider:IsA("GuiObject") then slider else nil
+	local labelObject = if label and label:IsA("TextLabel") then label else nil
+	settingsSliderCache[rowName] = {
+		Frame = sliderFrame,
+		Slider = sliderObject,
+		Label = labelObject,
+	}
+
+	return sliderFrame, sliderObject, labelObject
+end
+
+function MainGuiController:applyMusicVolume(volume: number)
+	local targetVolume = if musicEnabledCache then volume else 0
+	local now = os.clock()
+
+	if now - lastMusicScanAt > 3 then
+		lastMusicScanAt = now
+		table.clear(musicSoundCache)
+
+		for _, root in { SoundService, workspace } do
+			for _, descendant in root:GetDescendants() do
+				if not descendant:IsA("Sound") then
+					continue
+				end
+
+				local lowerName = string.lower(descendant.Name)
+				if not (string.find(lowerName, "music") or string.find(lowerName, "song") or string.find(lowerName, "theme") or string.find(lowerName, "bgm")) then
+					continue
+				end
+
+				table.insert(musicSoundCache, descendant)
+			end
+		end
+	end
+
+	for index = #musicSoundCache, 1, -1 do
+		local sound = musicSoundCache[index]
+		if not sound.Parent then
+			table.remove(musicSoundCache, index)
+			continue
+		end
+
+		local originalVolume = sound:GetAttribute("OriginalVolume")
+		if type(originalVolume) ~= "number" then
+			originalVolume = sound.Volume
+			sound:SetAttribute("OriginalVolume", originalVolume)
+		end
+
+		sound.Volume = originalVolume * targetVolume
+	end
+end
+
+function MainGuiController:applySettingsEffects(settings: any)
+	if type(settings) ~= "table" then
+		return
+	end
+
+	local soundEnabled = settings.Sound ~= false
+	local sfxVolume = math.clamp(tonumber(settings.sfxVolume) or 1, 0, 1)
+	if soundEnabled ~= lastAppliedSoundEnabled or sfxVolume ~= lastAppliedSfxVolume then
+		lastAppliedSoundEnabled = soundEnabled
+		lastAppliedSfxVolume = sfxVolume
+		SoundUtil.ConfigureFromSettings(settings)
+	end
+
+	local musicEnabled = settings.Music ~= false
+	local musicVolume = math.clamp(tonumber(settings.musicVolume) or 1, 0, 1)
+	if musicEnabled ~= lastAppliedMusicEnabled or musicVolume ~= lastAppliedMusicVolume then
+		lastAppliedMusicEnabled = musicEnabled
+		lastAppliedMusicVolume = musicVolume
+		musicEnabledCache = musicEnabled
+		self:applyMusicVolume(musicVolume)
+	end
+end
+
+function MainGuiController:setupVolumeSlider(rowName: string, settingName: string, setterName: string)
+	local sliderFrame, slider, label = self:findSliderParts(rowName)
+	if not sliderFrame or not slider then
+		return
+	end
+
+	local dragging = false
+	local currentVolume = math.clamp(tonumber(self:getSettingsValue(settingName, 1)) or 1, 0, 1)
+	local function saveVolume(volume: number, force: boolean?)
+		if not force then
+			return
+		end
+
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		PlayerDataController[setterName](PlayerDataController, volume)
+	end
+
+	local function setVisual(volume: number)
+		volume = math.clamp(volume, 0, 1)
+		slider.Position = UDim2.new(volume, 0, slider.Position.Y.Scale, slider.Position.Y.Offset)
+		if label then
+			label.Text = tostring(math.floor(volume * 100 + 0.5)) .. "%"
+		end
+	end
+
+	local function setFromPosition(screenX: number, shouldSave: boolean)
+		local x = sliderFrame.AbsolutePosition.X
+		local width = math.max(sliderFrame.AbsoluteSize.X, 1)
+		local volume = math.clamp((screenX - x) / width, 0, 1)
+		currentVolume = volume
+		setVisual(volume)
+
+		if settingName == "musicVolume" then
+			self:applyMusicVolume(volume)
+		elseif settingName == "sfxVolume" then
+			SoundUtil.SetLocalSfxVolume(volume)
+		end
+
+		if shouldSave then
+			saveVolume(volume)
+		end
+	end
+
+	setVisual(currentVolume)
+	if settingName == "musicVolume" then
+		musicEnabledCache = self:getSettingsValue("Music", true) == true
+		self:applyMusicVolume(currentVolume)
+	elseif settingName == "sfxVolume" then
+		SoundUtil.SetLocalSfxVolume(currentVolume)
+	end
+
+	local function beginDrag(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+
+		dragging = true
+		setFromPosition(input.Position.X, true)
+	end
+
+	table.insert(settingsConnections, sliderFrame.InputBegan:Connect(beginDrag))
+	table.insert(settingsConnections, slider.InputBegan:Connect(beginDrag))
+	table.insert(settingsConnections, UserInputService.InputChanged:Connect(function(input)
+		if not dragging then
+			return
+		end
+
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			setFromPosition(input.Position.X, true)
+		end
+	end))
+	table.insert(settingsConnections, UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+			saveVolume(currentVolume, true)
+		end
+	end))
+end
+
+function MainGuiController:setupSettingsFrame()
+	self:clearSettingsConnections()
+
+	local frame = self:getSettingsFrame()
+	if not frame then
+		return
+	end
+
+	local topBar = frame:FindFirstChild("TopBar")
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true)
+	if closeButton and closeButton:IsA("GuiObject") then
+		self:connectSettingsActivated(closeButton, function()
+			OpenFrame.Toggle(frame, false)
+			if settingsIcon then
+				settingsIcon:deselect("CloseButton", settingsIcon)
+			end
+		end)
+	end
+
+	self:setupSettingsToggle("AutoCollect", "AutoCollect", false)
+	self:setupSettingsToggle("AutoDeposit", "AutoDeposit", false)
+	self:setupSettingsToggle("ShowOtherTycoon", "ShowOtherTycoons", true)
+	self:setupAutoMergeSetting()
+	self:setupVolumeSlider("Music", "musicVolume", "SetMusicVolume")
+	self:setupVolumeSlider("SoundsFX", "sfxVolume", "SetSfxVolume")
 end
 
 function MainGuiController:setupHomeIcon()
@@ -515,11 +907,14 @@ function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey:
 	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
 		table.insert(shopConnections, clickable.Activated:Connect(prompt))
 	else
-		table.insert(shopConnections, clickable.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				prompt()
-			end
-		end))
+		table.insert(
+			shopConnections,
+			clickable.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					prompt()
+				end
+			end)
+		)
 	end
 end
 
@@ -528,11 +923,160 @@ function MainGuiController:connectGuiActivated(guiObject: GuiObject, callback: (
 	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
 		table.insert(shopConnections, clickable.Activated:Connect(callback))
 	else
-		table.insert(shopConnections, clickable.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				callback()
+		table.insert(
+			shopConnections,
+			clickable.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					callback()
+				end
+			end)
+		)
+	end
+end
+
+function MainGuiController:connectRebirthGuiActivated(guiObject: GuiObject, callback: () -> ())
+	local clickable = self:getClickableGui(guiObject)
+	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+		table.insert(rebirthConnections, clickable.Activated:Connect(callback))
+	else
+		table.insert(
+			rebirthConnections,
+			clickable.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					callback()
+				end
+			end)
+		)
+	end
+end
+
+function MainGuiController:clearRebirthConnections()
+	for _, connection in rebirthConnections do
+		connection:Disconnect()
+	end
+
+	table.clear(rebirthConnections)
+end
+
+function MainGuiController:getRebirthFrame(): GuiObject?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	local rebirthFrame = mainGui:FindFirstChild("RebirthFrame")
+	return if rebirthFrame and rebirthFrame:IsA("GuiObject") then rebirthFrame else nil
+end
+
+function MainGuiController:getRebirthRequiredTier(rebirths: number): number
+	local rebirthConfig = TycoonConfig.Rebirth
+	return math.max(
+		math.floor((rebirthConfig.FirstRequiredTier or 15) + rebirths * (rebirthConfig.RequiredTierStep or 5)),
+		1
+	)
+end
+
+function MainGuiController:getRebirthYenMultiplier(rebirths: number): number
+	local rebirthConfig = TycoonConfig.Rebirth
+	return (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
+end
+
+function MainGuiController:formatRebirthMultiplier(multiplier: number): string
+	if multiplier % 1 == 0 then
+		return tostring(math.floor(multiplier))
+	end
+
+	return string.format("%.1f", multiplier)
+end
+
+function MainGuiController:setNamedText(root: Instance, name: string, text: string)
+	local target = root:FindFirstChild(name, true)
+	if target and (target:IsA("TextLabel") or target:IsA("TextButton")) then
+		target.Text = text
+	end
+end
+
+function MainGuiController:getRightSideButton(buttonName: string): GuiObject?
+	local mainGui = self:getMainGui()
+	local rightSide = mainGui and mainGui:FindFirstChild("RightSide")
+	if not rightSide then
+		return nil
+	end
+
+	local button = rightSide:FindFirstChild(buttonName, true)
+	return if button and button:IsA("GuiObject") then button else nil
+end
+
+function MainGuiController:updateRebirthFrame(rebirthOverride: number?)
+	local frame = self:getRebirthFrame()
+	if not frame then
+		return
+	end
+
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local rebirths = math.max(math.floor(rebirthOverride or PlayerDataController:Get("Rebirths") or 0), 0)
+	local nextRebirths = rebirths + 1
+	local requiredTier = self:getRebirthRequiredTier(rebirths)
+	local nextMultiplier = self:getRebirthYenMultiplier(nextRebirths)
+
+	self:setNamedText(frame, "TierReq", "Reach Tier " .. requiredTier)
+	self:setNamedText(frame, "Boost", self:formatRebirthMultiplier(nextMultiplier) .. "x YEN Boost")
+end
+
+function MainGuiController:setupRebirthFrame()
+	self:clearRebirthConnections()
+
+	local frame = self:getRebirthFrame()
+	if not frame then
+		return
+	end
+
+	OpenFrame.SetupFrame(frame)
+	self:updateRebirthFrame()
+
+	local topBar = frame:FindFirstChild("TopBar")
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true)
+	if closeButton and closeButton:IsA("GuiObject") then
+		self:connectRebirthGuiActivated(closeButton, function()
+			OpenFrame.Toggle(frame)
+		end)
+	end
+
+	local acceptButton = frame:FindFirstChild("AcceptButton", true)
+	if acceptButton and acceptButton:IsA("GuiObject") then
+		self:connectRebirthGuiActivated(acceptButton, function()
+			if rebirthRequestOpen then
+				return
 			end
-		end))
+
+			rebirthRequestOpen = true
+			local TycoonService = Knit.GetService("TycoonService")
+			TycoonService:Rebirth()
+				:andThen(function(success, err, rebirths, tokenReward)
+					rebirthRequestOpen = false
+					if success then
+						self:ShowRebirthMessage(rebirths or 0, tokenReward or 0)
+						self:updateRebirthFrame(rebirths)
+						OpenFrame.Toggle(frame, false)
+					elseif err == "Required tier missing" then
+						self:ShowMissingRebirthTierMessage()
+					elseif err then
+						warn("[MainGuiController] Rebirth failed:", err)
+					end
+				end)
+				:catch(function(err)
+					rebirthRequestOpen = false
+					warn("[MainGuiController] Rebirth failed:", err)
+				end)
+		end)
+	end
+
+	local rebirthButton = self:getRightSideButton("RebirthButton")
+	if rebirthButton then
+		self:connectRebirthGuiActivated(rebirthButton, function()
+			self:updateRebirthFrame()
+			OpenFrame.Toggle(frame)
+		end)
 	end
 end
 
@@ -625,6 +1169,31 @@ function MainGuiController:updateDoubleYenOffer()
 	end
 end
 
+function MainGuiController:setupFavoritePrompt()
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local promptConfig = TycoonConfig.FavoritePrompt or {}
+	local itemId = tonumber(promptConfig.ItemId) or 0
+	if itemId <= 0 or PlayerDataController:Get("FavoritePromptShown") == true then
+		return
+	end
+
+	task.delay(tonumber(promptConfig.Delay) or 60, function()
+		if PlayerDataController:Get("FavoritePromptShown") == true then
+			return
+		end
+
+		local ok, err = pcall(function()
+			AvatarEditorService:PromptSetFavorite(itemId, Enum.AvatarItemType.Asset, true)
+		end)
+		if not ok then
+			warn("[MainGuiController] Favorite prompt failed:", err)
+			return
+		end
+
+		PlayerDataController:MarkFavoritePromptShown()
+	end)
+end
+
 function MainGuiController:formatCounter(counterName: string, value: number): string
 	if counterName == "ManaBag" then
 		return FormatUtil.formatNumber(value) .. " Mana"
@@ -695,8 +1264,10 @@ function MainGuiController:updateAll(instant: boolean?)
 	local mana = math.max(math.floor(PlayerDataController:Get("ManaInBag") or 0), 0)
 	local yen = math.max(math.floor(PlayerDataController:Get("Yen") or 0), 0)
 	self:setupSettingsIcon()
+	self:setupSettingsFrame()
 	self:setupHomeIcon()
 	self:setupShopFrame()
+	self:setupRebirthFrame()
 
 	if instant then
 		animationTokens.ManaBag += 1
@@ -717,18 +1288,28 @@ end
 function MainGuiController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	self:setupSettingsIcon()
+	self:setupSettingsFrame()
 	self:setupHomeIcon()
 	self:setupShopFrame()
+	self:setupRebirthFrame()
 
-	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg)
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, productId, wasPurchased)
 		if isLocalProductPromptFinished(firstArg) then
+			if productId == DOUBLE_YEN_PRODUCT.ProductId and wasPurchased == true then
+				SoundUtil.Robux()
+			end
+
 			doubleYenPromptOpen = false
 			self:updateDoubleYenOffer()
 		end
 	end)
 
-	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player)
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, _gamePassId, wasPurchased)
 		if player == localPlayer then
+			if wasPurchased == true then
+				SoundUtil.Robux()
+			end
+
 			gamePassPromptOpen = false
 		end
 	end)
@@ -736,6 +1317,7 @@ function MainGuiController:KnitStart()
 	task.spawn(function()
 		PlayerDataController:WaitForData()
 		self:updateAll()
+		self:setupFavoritePrompt()
 
 		PlayerDataController:Observe("ManaInBag", function()
 			self:updateManaBag()
@@ -748,6 +1330,14 @@ function MainGuiController:KnitStart()
 		PlayerDataController:Observe({ "PurchasedProducts", "DoubleYen" }, function()
 			self:updateDoubleYenOffer()
 		end)
+
+		PlayerDataController:Observe("Rebirths", function()
+			self:updateRebirthFrame()
+		end)
+
+		PlayerDataController:Observe("Settings", function(settings)
+			self:applySettingsEffects(settings)
+		end)
 	end)
 
 	local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -756,7 +1346,9 @@ function MainGuiController:KnitStart()
 			task.defer(function()
 				self:updateAll(true)
 				self:setupSettingsIcon()
+				self:setupSettingsFrame()
 				self:setupShopFrame()
+				self:setupRebirthFrame()
 			end)
 		end
 	end)

@@ -1,7 +1,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local DataService = require(ReplicatedStorage.Packages.dataservice).server
 local Knit = require(ReplicatedStorage.Packages.knit)
 local DataTemplate = require(script.Parent.DataTemplate)
@@ -13,7 +15,10 @@ local PlayerDataService = Knit.CreateService({
 	Client = {},
 })
 
-local leaderstatValues: { [Player]: { Yen: IntValue, Units: IntValue } } = {}
+local leaderstatValues: {
+	[Player]: { Yen: StringValue, Units: StringValue, Rebirths: StringValue, Tokens: StringValue },
+} =
+	{}
 
 local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
 	if type(data[newPath]) == "number" then
@@ -21,6 +26,34 @@ local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string
 	end
 
 	data[newPath] = if type(data[oldPath]) == "number" then data[oldPath] else defaultValue
+end
+
+local function isValidVolume(volume: any): boolean
+	return type(volume) == "number" and volume == volume and volume >= 0 and volume <= 1
+end
+
+local function getStarterUnits(): { { Tier: number } }
+	local configuredStarterUnits = TycoonConfig.StarterUnits
+	if type(configuredStarterUnits) ~= "table" then
+		configuredStarterUnits = { { Tier = 1 } }
+	end
+
+	local starterUnits = {}
+	for _, unit in configuredStarterUnits do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		table.insert(starterUnits, {
+			Tier = unit.Tier or 1,
+		})
+	end
+
+	if #starterUnits <= 0 then
+		table.insert(starterUnits, { Tier = 1 })
+	end
+
+	return starterUnits
 end
 
 local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
@@ -59,14 +92,33 @@ local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
 end
 
 local function ensureManaData(data: { [string]: any })
-	migrateNumberFieldInData(data, "Money", "Yen", 100)
+	migrateNumberFieldInData(data, "Money", "Yen", TycoonConfig.StarterYen or 0)
 	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
 	migrateNumberFieldInData(data, "MagicPowerInDeposit", "ManaInDeposit", 0)
 	migrateNumberFieldInData(data, "ManaPowerInBag", "ManaInBag", 0)
 	migrateNumberFieldInData(data, "ManaPowerInDeposit", "ManaInDeposit", 0)
 
 	if type(data.Yen) ~= "number" then
-		data.Yen = 100
+		data.Yen = TycoonConfig.StarterYen or 0
+	end
+
+	if type(data.Rebirths) ~= "number" then
+		data.Rebirths = 0
+	end
+	data.Rebirths = math.max(math.floor(data.Rebirths), 0)
+
+	if type(data.RebirthTokens) ~= "number" then
+		data.RebirthTokens = 0
+	end
+	data.RebirthTokens = math.max(math.floor(data.RebirthTokens), 0)
+
+	if type(data.LastGroupRewardClaimAt) ~= "number" then
+		data.LastGroupRewardClaimAt = 0
+	end
+	data.LastGroupRewardClaimAt = math.max(math.floor(data.LastGroupRewardClaimAt), 0)
+
+	if type(data.FavoritePromptShown) ~= "boolean" then
+		data.FavoritePromptShown = false
 	end
 
 	if type(data.ManaInBag) ~= "number" then
@@ -98,17 +150,36 @@ local function ensureManaData(data: { [string]: any })
 	end
 
 	local autoMergeAt = tonumber(data.Settings.AutoMergeAt) or 100
-	data.Settings.AutoMergeAt = math.clamp(math.floor(autoMergeAt), 1, 100)
+	data.Settings.AutoMergeAt = math.clamp(math.floor(autoMergeAt), 0, 100)
 
 	if type(data.Settings.AutoCollect) ~= "boolean" then
-		data.Settings.AutoCollect = true
+		data.Settings.AutoCollect = false
 	end
 
 	if type(data.Settings.AutoDeposit) ~= "boolean" then
-		data.Settings.AutoDeposit = true
+		data.Settings.AutoDeposit = false
+	end
+
+	if type(data.Settings.Sound) ~= "boolean" then
+		data.Settings.Sound = true
+	end
+
+	if type(data.Settings.Music) ~= "boolean" then
+		data.Settings.Music = true
+	end
+
+	if not isValidVolume(data.Settings.musicVolume) then
+		data.Settings.musicVolume = 1
+	end
+
+	if not isValidVolume(data.Settings.sfxVolume) then
+		data.Settings.sfxVolume = 1
 	end
 
 	data.Units = normalizeUnits(data.Units)
+	if #data.Units <= 0 then
+		data.Units = normalizeUnits(getStarterUnits())
+	end
 end
 
 local function syncLeaderstats(player: Player)
@@ -119,27 +190,41 @@ local function syncLeaderstats(player: Player)
 
 	local yen = PlayerDataService:Get(player, "Yen") or 0
 	local units = PlayerDataService:GetUnits(player)
+	local rebirths = PlayerDataService:Get(player, "Rebirths") or 0
+	local rebirthTokens = PlayerDataService:Get(player, "RebirthTokens") or 0
 
-	values.Yen.Value = math.floor(yen)
-	values.Units.Value = Pricing.getBaseUnitCount(units)
+	values.Yen.Value = Pricing.formatYen(yen)
+	values.Units.Value = FormatUtil.formatNumber(Pricing.getBaseUnitCount(units))
+	values.Rebirths.Value = FormatUtil.formatNumber(rebirths)
+	values.Tokens.Value = FormatUtil.formatNumber(rebirthTokens)
 end
 
 local function setupLeaderstats(player: Player)
 	local leaderstats = Instance.new("Folder")
 	leaderstats.Name = "leaderstats"
 
-	local yenValue = Instance.new("IntValue")
+	local yenValue = Instance.new("StringValue")
 	yenValue.Name = "Yen"
 	yenValue.Parent = leaderstats
 
-	local unitsValue = Instance.new("IntValue")
+	local unitsValue = Instance.new("StringValue")
 	unitsValue.Name = "Units"
 	unitsValue.Parent = leaderstats
+
+	local rebirthsValue = Instance.new("StringValue")
+	rebirthsValue.Name = "Rebirths"
+	rebirthsValue.Parent = leaderstats
+
+	local tokensValue = Instance.new("StringValue")
+	tokensValue.Name = "Tokens"
+	tokensValue.Parent = leaderstats
 
 	leaderstats.Parent = player
 	leaderstatValues[player] = {
 		Yen = yenValue,
 		Units = unitsValue,
+		Rebirths = rebirthsValue,
+		Tokens = tokensValue,
 	}
 
 	syncLeaderstats(player)
@@ -157,11 +242,19 @@ function PlayerDataService:KnitInit()
 		PlayerDataService:Observe(player, "Units", function()
 			syncLeaderstats(player)
 		end)
+
+		PlayerDataService:Observe(player, "Rebirths", function()
+			syncLeaderstats(player)
+		end)
+
+		PlayerDataService:Observe(player, "RebirthTokens", function()
+			syncLeaderstats(player)
+		end)
 	end
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.5",
+		profileStoreIndex = "CFB_PlayerData.8",
 	})
 end
 
@@ -248,8 +341,20 @@ function PlayerDataService:Observe(player: Player, path: Path, callback: (any, a
 	return DataService:getChangedSignal(player, path):Connect(callback)
 end
 
-local function isValidVolume(volume: any): boolean
-	return type(volume) == "number" and volume == volume and volume >= 0 and volume <= 1
+local function isValidSetting(path: any, value: any): boolean
+	if type(path) ~= "string" then
+		return false
+	end
+
+	if path == "AutoCollect" or path == "AutoDeposit" or path == "ShowOtherTycoons" or path == "ShowOthers" or path == "Sound" or path == "Music" then
+		return type(value) == "boolean"
+	elseif path == "AutoMergeAt" then
+		return type(value) == "number" and value == value and value >= 0 and value <= 100
+	elseif path == "musicVolume" or path == "sfxVolume" then
+		return isValidVolume(value)
+	end
+
+	return false
 end
 
 function PlayerDataService.Client:SetMusicVolume(player: Player, volume: number): boolean
@@ -267,6 +372,24 @@ function PlayerDataService.Client:SetSfxVolume(player: Player, volume: number): 
 	end
 
 	self.Server:Set(player, { "Settings", "sfxVolume" }, volume)
+	return true
+end
+
+function PlayerDataService.Client:SetSetting(player: Player, settingName: string, value: any): boolean
+	if not isValidSetting(settingName, value) then
+		return false
+	end
+
+	if settingName == "AutoMergeAt" then
+		value = math.clamp(math.floor(value), 0, 100)
+	end
+
+	self.Server:Set(player, { "Settings", settingName }, value)
+	return true
+end
+
+function PlayerDataService.Client:MarkFavoritePromptShown(player: Player): boolean
+	self.Server:Set(player, "FavoritePromptShown", true)
 	return true
 end
 

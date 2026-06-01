@@ -2,8 +2,11 @@ local ButtonPress = {}
 
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 
 ButtonPress.TagName = "Button"
 ButtonPress.Settings = {
@@ -60,9 +63,7 @@ function ButtonPress.IsStandingOn(head: BasePart): boolean
 	local radius = math.max(head.Size.X, head.Size.Y, head.Size.Z) * 0.5
 	local verticalOffset = root.Position.Y - head.Position.Y
 
-	return horizontalOffset.Magnitude <= radius + 0.6
-		and verticalOffset >= 0
-		and verticalOffset <= 6
+	return horizontalOffset.Magnitude <= radius + 0.6 and verticalOffset >= 0 and verticalOffset <= 6
 end
 
 local function tweenHead(head: BasePart, data, targetPosition: Vector3, tweenInfo: TweenInfo)
@@ -79,7 +80,12 @@ end
 
 local function playPulseLoop(head: BasePart, data)
 	while activeButtons[head] == data and data.Held do
-		tweenHead(head, data, data.OriginalPosition - Vector3.new(0, ButtonPress.Settings.PressOffset, 0), ButtonPress.Settings.PressTweenInfo)
+		tweenHead(
+			head,
+			data,
+			data.OriginalPosition - Vector3.new(0, ButtonPress.Settings.PressOffset, 0),
+			ButtonPress.Settings.PressTweenInfo
+		)
 		task.wait(0.12)
 
 		if activeButtons[head] ~= data then
@@ -88,6 +94,7 @@ local function playPulseLoop(head: BasePart, data)
 
 		tweenHead(head, data, data.OriginalPosition, ButtonPress.Settings.ReleaseTweenInfo)
 		task.wait(math.max(ButtonPress.Settings.PulseInterval - 0.12, 0.05))
+		SoundUtil.Click()
 	end
 
 	if activeButtons[head] == data then
@@ -105,11 +112,13 @@ function ButtonPress.SetPressed(head: BasePart, pressed: boolean)
 	data.Held = pressed
 
 	if pressed then
+		SoundUtil.Click()
 		if not data.LoopThread then
 			data.LoopThread = task.spawn(playPulseLoop, head, data)
 		end
 	else
 		tweenHead(head, data, data.OriginalPosition, ButtonPress.Settings.ReleaseTweenInfo)
+		SoundUtil.Click()
 	end
 end
 
@@ -119,11 +128,17 @@ local function playPressPulse(head: BasePart, data)
 	end
 
 	data.Pulsing = true
-	tweenHead(head, data, data.OriginalPosition - Vector3.new(0, ButtonPress.Settings.PressOffset, 0), ButtonPress.Settings.PressTweenInfo)
+	tweenHead(
+		head,
+		data,
+		data.OriginalPosition - Vector3.new(0, ButtonPress.Settings.PressOffset, 0),
+		ButtonPress.Settings.PressTweenInfo
+	)
 	task.wait(0.12)
 
 	if activeButtons[head] and not ButtonPress.IsStandingOn(head) then
 		tweenHead(head, data, data.OriginalPosition, ButtonPress.Settings.ReleaseTweenInfo)
+		SoundUtil.Click()
 	end
 
 	data.Pulsing = false
@@ -141,6 +156,7 @@ function ButtonPress.TriggerPress(head: BasePart)
 	end
 
 	data.LastPress = now
+	SoundUtil.Click()
 	task.spawn(playPressPulse, head, data)
 end
 
