@@ -25,10 +25,11 @@ local pendingDepositMana: { [Player]: number } = {}
 local manaFlushScheduled: { [Player]: boolean } = {}
 local processElapsed: { [Player]: number } = {}
 local visualDataRequestAt: { [Player]: { [string]: number } } = {}
+local pickupBlockedUntil: { [Player]: number } = {}
 
 local PROCESS_INTERVAL = 1
-local DROP_INTERVAL = 5
-local MAX_ACTIVE_DROPS = 200
+local DROP_INTERVAL = 6
+local MAX_ACTIVE_DROPS = 150
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
 local DROP_WALL_COLLISION_GROUP = "DropWalls"
@@ -304,7 +305,9 @@ local function shouldAutoMergeUnitBuy(
 	amount: number
 ): boolean
 	local autoMergeAt = getAutoMergeAt(PlayerDataService, player)
-	return autoMergeAt <= 1 or currentUnitCount + amount > autoMergeAt or currentUnitCount + amount > TycoonConfig.MaxUnits
+	return autoMergeAt <= 1
+		or currentUnitCount + amount > autoMergeAt
+		or currentUnitCount + amount > TycoonConfig.MaxUnits
 end
 
 local function getPlayerSettings(PlayerDataService, player: Player): { [string]: any }
@@ -397,6 +400,7 @@ function TycoonService:ReleaseTycoon(player: Player)
 	manaFlushScheduled[player] = nil
 	processElapsed[player] = nil
 	visualDataRequestAt[player] = nil
+	pickupBlockedUntil[player] = nil
 
 	local characterConnection = playerCharacterConnections[player]
 	if characterConnection then
@@ -425,6 +429,10 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 
 	if not playerTycoons[player] then
 		return false, "No tycoon"
+	end
+
+	if os.clock() < (pickupBlockedUntil[player] or 0) then
+		return true
 	end
 
 	local units = PlayerDataService:GetUnits(player)
@@ -680,7 +688,11 @@ function TycoonService.Client:BuyMaxUnits(player: Player, buttonName: string): (
 	end
 
 	local buttonModel = tycoon:FindFirstChild(buttonName)
-	if not buttonModel or not TycoonUtil.isBuyMaxUnitsButton(buttonModel) or not TycoonUtil.isNearButton(player, buttonModel) then
+	if
+		not buttonModel
+		or not TycoonUtil.isBuyMaxUnitsButton(buttonModel)
+		or not TycoonUtil.isNearButton(player, buttonModel)
+	then
 		return false, "Invalid button"
 	end
 
@@ -768,12 +780,20 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 	PlayerDataService:Set(player, "RateLevel", 0)
 	PlayerDataService:Set(player, "Rate", rebirthConfig.ResetRate or 1)
 	PlayerDataService:SetUnits(player, rebirthConfig.StarterUnits or { { Tier = 1 } })
+	pendingBagMana[player] = nil
+	pendingDepositMana[player] = nil
+	manaFlushScheduled[player] = nil
+	pickupBlockedUntil[player] = os.clock() + 1
 	resetPickupBudgetTimer(player)
 
 	return true, nil, nextRebirths, tokenReward
 end
 
-function TycoonService.Client:UpgradeRate(player: Player, amount: number, buttonName: string): (boolean, string?, number?)
+function TycoonService.Client:UpgradeRate(
+	player: Player,
+	amount: number,
+	buttonName: string
+): (boolean, string?, number?)
 	if type(amount) ~= "number" or amount <= 0 then
 		return false, "Invalid amount"
 	end
@@ -823,7 +843,11 @@ function TycoonService.Client:UpgradeRateMax(player: Player, buttonName: string)
 	end
 
 	local buttonModel = tycoon:FindFirstChild(buttonName) or tycoon:FindFirstChild(buttonName, true)
-	if not buttonModel or not TycoonUtil.isRateMaxButton(buttonModel) or not TycoonUtil.isNearButton(player, buttonModel) then
+	if
+		not buttonModel
+		or not TycoonUtil.isRateMaxButton(buttonModel)
+		or not TycoonUtil.isNearButton(player, buttonModel)
+	then
 		return false, "Invalid button"
 	end
 
@@ -856,7 +880,11 @@ function TycoonService.Client:ClaimGroupReward(player: Player, buttonName: strin
 	end
 
 	local buttonModel = tycoon:FindFirstChild(buttonName)
-	if not buttonModel or not TycoonUtil.isGroupRewardButton(buttonModel) or not TycoonUtil.isNearButton(player, buttonModel) then
+	if
+		not buttonModel
+		or not TycoonUtil.isGroupRewardButton(buttonModel)
+		or not TycoonUtil.isNearButton(player, buttonModel)
+	then
 		return false, "Invalid button"
 	end
 

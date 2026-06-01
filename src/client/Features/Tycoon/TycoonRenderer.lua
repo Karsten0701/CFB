@@ -555,6 +555,13 @@ function TycoonRenderer:clearRenderedUnits()
 	end
 	table.clear(self.unitPoolByTier)
 	table.clear(self.unitModelInfo)
+
+	local unitsFolder = self:getUnitsFolder()
+	for _, child in unitsFolder:GetChildren() do
+		if child:IsA("Model") then
+			child:Destroy()
+		end
+	end
 end
 
 function TycoonRenderer:removeRenderedUnit(unitIndex: number)
@@ -599,6 +606,22 @@ function TycoonRenderer:setUnitModelVisible(model: Model, visible: boolean)
 	end
 end
 
+function TycoonRenderer:setUnitModelAssignment(model: Model, unitIndex: number?, tier: number?, pooled: boolean)
+	if unitIndex then
+		model:SetAttribute("UnitIndex", unitIndex)
+	else
+		model:SetAttribute("UnitIndex", nil)
+	end
+
+	if tier then
+		model:SetAttribute("UnitTier", tier)
+	else
+		model:SetAttribute("UnitTier", nil)
+	end
+
+	model:SetAttribute("Pooled", pooled)
+end
+
 function TycoonRenderer:recycleUnitEntry(entry)
 	if not entry or not entry.Model then
 		return
@@ -618,6 +641,7 @@ function TycoonRenderer:recycleUnitEntry(entry)
 	end
 
 	self:setUnitModelVisible(entry.Model, false)
+	self:setUnitModelAssignment(entry.Model, nil, tier, true)
 	entry.Model:PivotTo(UNIT_POOL_CFRAME)
 	table.insert(pool, entry.Model)
 end
@@ -640,6 +664,7 @@ function TycoonRenderer:getOrCreateUnitModel(tier: number, unitIndex: number): M
 		local info = self:getUnitModelInfo(unitModel)
 		unitModel.Name = info.BaseName .. "_" .. unitIndex
 		self:setUnitModelVisible(unitModel, true)
+		self:setUnitModelAssignment(unitModel, unitIndex, tier, false)
 		return unitModel
 	end
 
@@ -654,7 +679,49 @@ function TycoonRenderer:getOrCreateUnitModel(tier: number, unitIndex: number): M
 	local tierData = AnimeDroppers.Tiers[tier]
 	addOverhead(unitModel, tierData and tierData.DisplayName or template.Name, tier)
 	self:getUnitModelInfo(unitModel)
+	self:setUnitModelAssignment(unitModel, unitIndex, tier, false)
 	return unitModel
+end
+
+function TycoonRenderer:cleanupUnitFolderModels(unitsFolder: Instance)
+	local validModels = {}
+	local claimedIndices = {}
+
+	for unitIndex, entry in self.unitEntries do
+		if entry.Model and entry.Model.Parent then
+			validModels[entry.Model] = true
+			claimedIndices[unitIndex] = entry.Model
+			self:setUnitModelAssignment(entry.Model, unitIndex, entry.Tier, false)
+		end
+	end
+
+	for _, pool in self.unitPoolByTier do
+		for _, model in pool do
+			if model and model.Parent then
+				validModels[model] = true
+				self:setUnitModelVisible(model, false)
+				self:setUnitModelAssignment(model, nil, tonumber(model:GetAttribute("UnitTier")), true)
+			end
+		end
+	end
+
+	for _, child in unitsFolder:GetChildren() do
+		if not child:IsA("Model") then
+			continue
+		end
+
+		local unitIndex = tonumber(child:GetAttribute("UnitIndex"))
+		local claimedModel = unitIndex and claimedIndices[unitIndex]
+		if child:GetAttribute("Pooled") == true then
+			self:setUnitModelVisible(child, false)
+			continue
+		end
+
+		if not validModels[child] or (claimedModel and claimedModel ~= child) then
+			self.unitModelInfo[child] = nil
+			child:Destroy()
+		end
+	end
 end
 
 function TycoonRenderer:clearDrops()
@@ -1168,6 +1235,8 @@ end
 function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: BasePart)
 	entry.Model:PivotTo(spotPart.CFrame)
 	entry.DropPart = self:findDropPart(spotPart)
+	self:setUnitModelVisible(entry.Model, true)
+	self:setUnitModelAssignment(entry.Model, unitIndex, entry.Tier, false)
 
 	self.unitEntries[unitIndex] = entry
 	self.unitModels[unitIndex] = entry.Model
@@ -1195,6 +1264,8 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	end
 
 	local unitsFolder = self:getUnitsFolder()
+	self:cleanupUnitFolderModels(unitsFolder)
+
 	local unitsToSpawn = {}
 	local unitsToMove = {}
 	local unitsToDestroy = {}
@@ -1218,6 +1289,15 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	for unitIndex, unit in sortedUnits do
 		local existingEntry = self.unitEntries[unitIndex]
 		if existingEntry and existingEntry.Tier == unit.Tier and existingEntry.Model and existingEntry.Model.Parent then
+			local spotPart = self:getSpotForUnitIndex(dropperHolder, unitIndex)
+			if spotPart then
+				table.insert(unitsToMove, {
+					Index = unitIndex,
+					Entry = existingEntry,
+					SpotPart = spotPart,
+				})
+			end
+
 			continue
 		end
 
@@ -1310,6 +1390,8 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 			if unitModel.Parent ~= unitsFolder then
 				unitModel.Parent = unitsFolder
 			end
+			self:setUnitModelAssignment(unitModel, unitIndex, tier, false)
+			self:setUnitModelVisible(unitModel, true)
 
 			self.unitModels[unitIndex] = unitModel
 

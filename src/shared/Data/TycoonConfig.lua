@@ -12,7 +12,7 @@ return {
 	StarterYen = 0,
 	StarterUnits = { { Tier = 1 } },
 	Rebirth = {
-		FirstRequiredTier = 10,
+		FirstRequiredTier = 5,
 		RequiredTierStep = 5,
 		BaseYenMultiplier = 1,
 		YenMultiplierPerRebirth = 1,

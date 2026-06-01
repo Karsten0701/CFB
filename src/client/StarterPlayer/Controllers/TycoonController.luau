@@ -41,10 +41,14 @@ local otherTycoonStreamingConnection: RBXScriptConnection? = nil
 local lastOtherTycoonStreamAt = 0
 local lastGroupRewardDisplayAt = 0
 local groupJoinPromptOpen = false
+local otherTycoonRefreshToken = 0
+local otherTycoonRefreshRunning = false
 
 local ACTION_COOLDOWN = 1.12
 local OTHER_TYCOON_STREAM_INTERVAL = 0.75
 local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
+local OTHER_TYCOON_BATCH_SIZE = 1
+local OTHER_TYCOON_BATCH_DELAY = 0.08
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
 	if firstArg == localPlayer then
@@ -93,6 +97,16 @@ local function promptDevProduct(head: BasePart, productId: number)
 			resetProductPromptState()
 		end
 	end)
+end
+
+local function getGamePassKeyFromId(gamePassId: number): string?
+	for key, gamePass in Monetization.GamePasses do
+		if gamePass.PassId == gamePassId then
+			return key
+		end
+	end
+
+	return nil
 end
 
 local function retryManaPickup(TycoonService, amount: number, retryIndex: number)
@@ -399,6 +413,53 @@ function TycoonController:setDefaultProcesserDisplay(tycoon: Instance)
 	if rateLabel then
 		rateLabel.Text = "Rate: 1/s"
 	end
+end
+
+function TycoonController:applyEntitlementsToOwnTycoon(autoEnableSetting: string?)
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local settings = PlayerDataController:Get("Settings")
+
+	if autoEnableSetting == "AutoCollect" or autoEnableSetting == "AutoDeposit" then
+		settings = table.clone(settings or {})
+		settings[autoEnableSetting] = true
+	end
+
+	for tycoon, entry in renderers do
+		if not entry.isOwn then
+			continue
+		end
+
+		if entry.renderer then
+			local autoCollect = settings and settings.AutoCollect == true
+			local autoDeposit = settings and settings.AutoDeposit == true
+			entry.lastAutoCollect = autoCollect
+			entry.lastAutoDeposit = autoDeposit
+			entry.renderer:setEntitlements(mergeEntitlementsWithSettings(monetizationEntitlements, settings))
+		end
+
+		self:updateProcesserDisplay(tycoon)
+	end
+end
+
+function TycoonController:refreshMonetizationEntitlements(autoEnableSetting: string?, retryCount: number?)
+	local MonetizationService = Knit.GetService("MonetizationService")
+	MonetizationService:GetEntitlements()
+		:andThen(function(entitlements)
+			monetizationEntitlements = entitlements or {}
+			if autoEnableSetting and monetizationEntitlements[autoEnableSetting] == true then
+				local PlayerDataController = Knit.GetController("PlayerDataController")
+				PlayerDataController:SetSetting(autoEnableSetting, true)
+			elseif autoEnableSetting and (retryCount or 0) < 3 then
+				task.delay(0.5, function()
+					self:refreshMonetizationEntitlements(autoEnableSetting, (retryCount or 0) + 1)
+				end)
+			end
+
+			self:applyEntitlementsToOwnTycoon(autoEnableSetting)
+		end)
+		:catch(function(err)
+			warn("[TycoonController] Failed to refresh entitlements:", err)
+		end)
 end
 
 function TycoonController:updateGroupRewardDisplay(tycoon: Instance)
@@ -839,16 +900,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 		local MonetizationService = Knit.GetService("MonetizationService")
 		MonetizationService:GetEntitlements():andThen(function(entitlements)
 			monetizationEntitlements = entitlements or {}
-			local PlayerDataController = Knit.GetController("PlayerDataController")
-			local settings = PlayerDataController:Get("Settings")
-			local entry = renderers[tycoon]
-			if entry then
-				entry.lastAutoCollect = settings and settings.AutoCollect == true
-				entry.lastAutoDeposit = settings and settings.AutoDeposit == true
-			end
-
-			renderer:setEntitlements(mergeEntitlementsWithSettings(monetizationEntitlements, settings))
-			self:updateProcesserDisplay(tycoon)
+			self:applyEntitlementsToOwnTycoon()
 		end)
 
 		self:setupButtonActions(tycoon)
@@ -868,6 +920,17 @@ function TycoonController:rebuildTycoon(tycoon: Instance, units: { { Tier: numbe
 	end
 
 	entry.renderer:rebuild(units)
+end
+
+function TycoonController:ClearOwnDrops()
+	table.clear(pendingManaPickups)
+	manaPickupFlushScheduled = false
+
+	for _, entry in renderers do
+		if entry.isOwn and entry.renderer then
+			entry.renderer:clearDrops()
+		end
+	end
 end
 
 function TycoonController:setupOwnTycoon(): boolean
@@ -950,7 +1013,7 @@ function TycoonController:setupOtherTycoons()
 		end
 
 		lastOtherTycoonStreamAt = now
-		self:refreshOtherTycoons()
+		self:refreshOtherTycoons(false)
 	end)
 
 	local lastShowOtherTycoons: boolean? = nil
@@ -961,78 +1024,131 @@ function TycoonController:setupOtherTycoons()
 		end
 
 		lastShowOtherTycoons = showOtherTycoons
-		self:updateAllDefaultProcesserDisplays()
-		self:refreshOtherTycoons()
+		self:refreshOtherTycoons(true)
 	end, PlayerDataController:NewJanitor())
 
-	self:refreshOtherTycoons()
+	self:refreshOtherTycoons(true)
 end
 
-function TycoonController:refreshOtherTycoons()
+function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
 	if not tycoonsFolder then
 		return
 	end
 
+	if forceRestart then
+		otherTycoonRefreshToken += 1
+	elseif otherTycoonRefreshRunning then
+		return
+	end
+
+	otherTycoonRefreshRunning = true
+	local refreshToken = otherTycoonRefreshToken
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local ownName = PlayerDataController:Get("TycoonName")
-	local settings = PlayerDataController:Get("Settings")
-	local shouldShowOthers = ShowOther.shouldRenderOthers(settings)
 	local TycoonService = Knit.GetService("TycoonService")
+	local tycoons = tycoonsFolder:GetChildren()
 
-	for _, tycoon in tycoonsFolder:GetChildren() do
-		if tycoon.Name == ownName then
-			continue
-		end
-
-		self:setDefaultProcesserDisplay(tycoon)
-
-		local entry = renderers[tycoon]
-		local shouldLoad = shouldShowOthers and tycoon:GetAttribute("Claimed") == true and not entry
-		local shouldUnload = entry
-			and not entry.isOwn
-			and (not shouldShowOthers or tycoon:GetAttribute("Claimed") ~= true)
-
-		if shouldUnload then
-			entry.renderer:destroy()
-			entry.janitor:Destroy()
-			renderers[tycoon] = nil
-		elseif shouldLoad then
-			if self:setupTycoon(tycoon, false) then
-				TycoonService:GetTycoonVisualData(tycoon.Name)
-					:andThen(function(success, payload)
-						local currentEntry = renderers[tycoon]
-						if not success or not currentEntry or currentEntry.isOwn then
-							return
-						end
-
-						currentEntry.lastVisualRefreshAt = os.clock()
-						self:rebuildTycoon(tycoon, payload.Units or {})
-					end)
-					:catch(function(err)
-						warn("[TycoonController] Failed to load tycoon visuals:", err)
-					end)
-			end
-		elseif entry and not entry.isOwn and shouldShowOthers then
-			local now = os.clock()
-			if now - (entry.lastVisualRefreshAt or 0) >= OTHER_TYCOON_VISUAL_REFRESH_INTERVAL then
-				entry.lastVisualRefreshAt = now
-				TycoonService:GetTycoonVisualData(tycoon.Name)
-					:andThen(function(success, payload)
-						local currentEntry = renderers[tycoon]
-						if not success or not currentEntry or currentEntry.isOwn then
-							return
-						end
-
-						currentEntry.lastVisualRefreshAt = os.clock()
-						self:rebuildTycoon(tycoon, payload.Units or {})
-					end)
-					:catch(function(err)
-						warn("[TycoonController] Failed to refresh tycoon visuals:", err)
-					end)
-			end
-		end
+	local function shouldShowOtherTycoons(): boolean
+		return ShowOther.shouldRenderOthers(PlayerDataController:Get("Settings"))
 	end
+
+	local function isRefreshCurrent(): boolean
+		return refreshToken == otherTycoonRefreshToken
+	end
+
+	task.spawn(function()
+		local processedThisBatch = 0
+
+		local function stepBatch()
+			processedThisBatch += 1
+			if processedThisBatch >= OTHER_TYCOON_BATCH_SIZE then
+				processedThisBatch = 0
+				task.wait(OTHER_TYCOON_BATCH_DELAY)
+			end
+		end
+
+		for _, tycoon in tycoons do
+			if not isRefreshCurrent() then
+				return
+			end
+
+			if tycoon.Name == ownName then
+				continue
+			end
+
+			local shouldShowOthers = shouldShowOtherTycoons()
+			self:setDefaultProcesserDisplay(tycoon)
+
+			local entry = renderers[tycoon]
+			local isClaimed = tycoon:GetAttribute("Claimed") == true
+			local shouldLoad = shouldShowOthers and isClaimed and not entry
+			local shouldUnload = entry and not entry.isOwn and (not shouldShowOthers or not isClaimed)
+
+			if shouldUnload then
+				entry.renderer:destroy()
+				entry.janitor:Destroy()
+				renderers[tycoon] = nil
+				stepBatch()
+			elseif shouldLoad then
+				if self:setupTycoon(tycoon, false) then
+					local requestedTycoon = tycoon
+					TycoonService:GetTycoonVisualData(tycoon.Name)
+						:andThen(function(success, payload)
+							local currentEntry = renderers[requestedTycoon]
+							if
+								not success
+								or not currentEntry
+								or currentEntry.isOwn
+								or not isRefreshCurrent()
+								or not shouldShowOtherTycoons()
+							then
+								return
+							end
+
+							currentEntry.lastVisualRefreshAt = os.clock()
+							self:rebuildTycoon(requestedTycoon, payload.Units or {})
+						end)
+						:catch(function(err)
+							warn("[TycoonController] Failed to load tycoon visuals:", err)
+						end)
+				end
+
+				stepBatch()
+			elseif entry and not entry.isOwn and shouldShowOthers then
+				local now = os.clock()
+				if now - (entry.lastVisualRefreshAt or 0) >= OTHER_TYCOON_VISUAL_REFRESH_INTERVAL then
+					entry.lastVisualRefreshAt = now
+					local requestedTycoon = tycoon
+					TycoonService:GetTycoonVisualData(tycoon.Name)
+						:andThen(function(success, payload)
+							local currentEntry = renderers[requestedTycoon]
+							if
+								not success
+								or not currentEntry
+								or currentEntry.isOwn
+								or not isRefreshCurrent()
+								or not shouldShowOtherTycoons()
+							then
+								return
+							end
+
+							currentEntry.lastVisualRefreshAt = os.clock()
+							self:rebuildTycoon(requestedTycoon, payload.Units or {})
+						end)
+						:catch(function(err)
+							warn("[TycoonController] Failed to refresh tycoon visuals:", err)
+						end)
+
+					stepBatch()
+				end
+			end
+		end
+
+		if isRefreshCurrent() then
+			otherTycoonRefreshRunning = false
+		end
+	end)
 end
 
 function TycoonController:KnitStart()
@@ -1052,6 +1168,17 @@ function TycoonController:KnitStart()
 
 			resetProductPromptState()
 		end
+	end)
+
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gamePassId, wasPurchased)
+		if player ~= localPlayer or wasPurchased ~= true then
+			return
+		end
+
+		local gamePassKey = getGamePassKeyFromId(gamePassId)
+		local autoEnableSetting = if gamePassKey == "AutoCollect" or gamePassKey == "AutoDeposit" then gamePassKey else nil
+
+		self:refreshMonetizationEntitlements(autoEnableSetting)
 	end)
 
 	local function init()

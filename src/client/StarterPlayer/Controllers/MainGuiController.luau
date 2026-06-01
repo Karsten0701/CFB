@@ -47,6 +47,9 @@ local settingsToggleTextCache: { [GuiObject]: { TextLabel | TextButton } } = {}
 local musicSoundCache: { Sound } = {}
 local lastMusicScanAt = -math.huge
 local musicEnabledCache = true
+local settingsEntitlements: { [string]: boolean } = {}
+local settingsEntitlementsLoaded = false
+local lastShowOtherTycoonToggleAt = -math.huge
 local lastAppliedMusicVolume: number? = nil
 local lastAppliedMusicEnabled: boolean? = nil
 local lastAppliedSfxVolume: number? = nil
@@ -63,6 +66,15 @@ local SHOP_GAMEPASS_ALIASES = {
 	DoubleDeposit = "DoubleDeposit",
 	DoubleDropSpeed = "DoubleDropSpeed",
 	DoubleMana = "DoubleMana",
+}
+
+local SETTING_GAMEPASS_REQUIREMENTS = {
+	AutoCollect = "AutoCollect",
+	AutoDeposit = "AutoDeposit",
+}
+
+local SETTING_TOGGLE_COOLDOWNS = {
+	ShowOtherTycoons = 3,
 }
 
 local animationTokens = {
@@ -391,6 +403,14 @@ function MainGuiController:ShowRobuxUnitsMessage(amount: number)
 	)
 end
 
+function MainGuiController:ShowMissingGamePassMessage()
+	self:showMessage("MissingGamePass", "You don't own this gamepass!")
+end
+
+function MainGuiController:ShowSettingCooldownMessage(seconds: number)
+	self:showMessage("SettingCooldown", "Please wait " .. tostring(math.ceil(seconds)) .. "s before switching again.")
+end
+
 function MainGuiController:ShowMissingRebirthTierMessage()
 	self:showMessage("RebirthMissingTier", "You dont have the Required Tier neccesary to rebirth.")
 end
@@ -472,6 +492,73 @@ function MainGuiController:setSetting(settingName: string, value: any)
 	PlayerDataController:SetSetting(settingName, value)
 end
 
+function MainGuiController:ownsSettingGamePass(settingName: string): boolean
+	local gamePassKey = SETTING_GAMEPASS_REQUIREMENTS[settingName]
+	if not gamePassKey then
+		return true
+	end
+
+	return settingsEntitlements[gamePassKey] == true
+end
+
+function MainGuiController:refreshGamePassSettings()
+	if not settingsEntitlementsLoaded then
+		return
+	end
+
+	for settingName in SETTING_GAMEPASS_REQUIREMENTS do
+		local row = self:getSettingsRow(settingName)
+		local ownsGamePass = self:ownsSettingGamePass(settingName)
+		if not ownsGamePass and self:getSettingsValue(settingName, false) == true then
+			self:setSetting(settingName, false)
+		end
+
+		if row then
+			local enabled = ownsGamePass and self:getSettingsValue(settingName, false) == true
+			self:setToggleVisual(row, enabled)
+		end
+	end
+end
+
+function MainGuiController:refreshSettingsToggleVisuals(settings: any)
+	if type(settings) ~= "table" then
+		return
+	end
+
+	local toggleRows = {
+		AutoCollect = { Setting = "AutoCollect", Fallback = false },
+		AutoDeposit = { Setting = "AutoDeposit", Fallback = false },
+		ShowOtherTycoon = { Setting = "ShowOtherTycoons", Fallback = true },
+	}
+
+	for rowName, info in toggleRows do
+		local row = settingsRowCache[rowName]
+		if not row or not row.Parent then
+			continue
+		end
+
+		local enabled = if settings[info.Setting] == nil then info.Fallback else settings[info.Setting] == true
+		if SETTING_GAMEPASS_REQUIREMENTS[info.Setting] and settingsEntitlementsLoaded then
+			enabled = enabled and self:ownsSettingGamePass(info.Setting)
+		end
+
+		self:setToggleVisual(row, enabled)
+	end
+end
+
+function MainGuiController:refreshSettingsEntitlements()
+	local MonetizationService = Knit.GetService("MonetizationService")
+	MonetizationService:GetEntitlements()
+		:andThen(function(entitlements)
+			settingsEntitlements = entitlements or {}
+			settingsEntitlementsLoaded = true
+			self:refreshGamePassSettings()
+		end)
+		:catch(function(err)
+			warn("[MainGuiController] Failed to refresh settings gamepasses:", err)
+		end)
+end
+
 function MainGuiController:setToggleVisual(row: GuiObject, enabled: boolean)
 	row:SetAttribute("Enabled", enabled)
 	row.BackgroundTransparency = if enabled then 0.05 else 0.25
@@ -528,12 +615,40 @@ function MainGuiController:setupSettingsToggle(rowName: string, settingName: str
 	end
 
 	local function refresh()
-		self:setToggleVisual(row, self:getSettingsValue(settingName, fallback) == true)
+		local enabled = self:getSettingsValue(settingName, fallback) == true
+		if SETTING_GAMEPASS_REQUIREMENTS[settingName] and settingsEntitlementsLoaded then
+			enabled = enabled and self:ownsSettingGamePass(settingName)
+		end
+
+		self:setToggleVisual(row, enabled)
 	end
 
 	refresh()
 	self:connectSettingsActivated(row, function()
+		local toggleCooldown = SETTING_TOGGLE_COOLDOWNS[settingName]
+		if toggleCooldown then
+			local now = os.clock()
+			local lastToggleAt = if settingName == "ShowOtherTycoons" then lastShowOtherTycoonToggleAt else -math.huge
+			local remaining = toggleCooldown - (now - lastToggleAt)
+			if remaining > 0 then
+				self:ShowSettingCooldownMessage(remaining)
+				refresh()
+				return
+			end
+
+			if settingName == "ShowOtherTycoons" then
+				lastShowOtherTycoonToggleAt = now
+			end
+		end
+
 		local nextValue = self:getSettingsValue(settingName, fallback) ~= true
+		if nextValue and SETTING_GAMEPASS_REQUIREMENTS[settingName] and not self:ownsSettingGamePass(settingName) then
+			self:ShowMissingGamePassMessage()
+			self:setToggleVisual(row, false)
+			self:refreshSettingsEntitlements()
+			return
+		end
+
 		self:setSetting(settingName, nextValue)
 		self:setToggleVisual(row, nextValue)
 		if settingName == "Sound" then
@@ -763,6 +878,7 @@ function MainGuiController:setupSettingsFrame()
 	self:setupAutoMergeSetting()
 	self:setupVolumeSlider("Music", "musicVolume", "SetMusicVolume")
 	self:setupVolumeSlider("SoundsFX", "sfxVolume", "SetSfxVolume")
+	self:refreshGamePassSettings()
 end
 
 function MainGuiController:setupHomeIcon()
@@ -1055,6 +1171,8 @@ function MainGuiController:setupRebirthFrame()
 				:andThen(function(success, err, rebirths, tokenReward)
 					rebirthRequestOpen = false
 					if success then
+						local TycoonController = Knit.GetController("TycoonController")
+						TycoonController:ClearOwnDrops()
 						self:ShowRebirthMessage(rebirths or 0, tokenReward or 0)
 						self:updateRebirthFrame(rebirths)
 						OpenFrame.Toggle(frame, false)
@@ -1308,6 +1426,7 @@ function MainGuiController:KnitStart()
 		if player == localPlayer then
 			if wasPurchased == true then
 				SoundUtil.Robux()
+				self:refreshSettingsEntitlements()
 			end
 
 			gamePassPromptOpen = false
@@ -1317,6 +1436,7 @@ function MainGuiController:KnitStart()
 	task.spawn(function()
 		PlayerDataController:WaitForData()
 		self:updateAll()
+		self:refreshSettingsEntitlements()
 		self:setupFavoritePrompt()
 
 		PlayerDataController:Observe("ManaInBag", function()
@@ -1337,6 +1457,7 @@ function MainGuiController:KnitStart()
 
 		PlayerDataController:Observe("Settings", function(settings)
 			self:applySettingsEffects(settings)
+			self:refreshSettingsToggleVisuals(settings)
 		end)
 	end)
 

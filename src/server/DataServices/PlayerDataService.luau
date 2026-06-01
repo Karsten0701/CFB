@@ -32,6 +32,30 @@ local function isValidVolume(volume: any): boolean
 	return type(volume) == "number" and volume == volume and volume >= 0 and volume <= 1
 end
 
+local function deepEqual(left: any, right: any): boolean
+	if left == right then
+		return true
+	end
+
+	if type(left) ~= "table" or type(right) ~= "table" then
+		return false
+	end
+
+	for key, value in left do
+		if not deepEqual(value, right[key]) then
+			return false
+		end
+	end
+
+	for key in right do
+		if left[key] == nil then
+			return false
+		end
+	end
+
+	return true
+end
+
 local function getStarterUnits(): { { Tier: number } }
 	local configuredStarterUnits = TycoonConfig.StarterUnits
 	if type(configuredStarterUnits) ~= "table" then
@@ -231,6 +255,15 @@ local function setupLeaderstats(player: Player)
 end
 
 function PlayerDataService:KnitInit()
+	local ProfileStore = require(ReplicatedStorage.Packages._Index["leifstout_dataservice@1.0.0"].ProfileStore)
+	ProfileStore.OnCriticalToggle:Connect(function(isCritical: boolean)
+		if isCritical then
+			warn("[PlayerDataService] Roblox DataStore is in a critical state; ProfileStore will retry saves.")
+		else
+			warn("[PlayerDataService] Roblox DataStore recovered from critical state.")
+		end
+	end)
+
 	function DataService:onPlayerInit(player: Player, data: any)
 		ensureManaData(data)
 		setupLeaderstats(player)
@@ -275,12 +308,23 @@ end
 
 function PlayerDataService:Set(player: Player, path: Path, value: any)
 	self:WaitForData(player)
+	if deepEqual(DataService:get(player, path), value) then
+		return
+	end
+
 	DataService:set(player, path, value)
 end
 
 function PlayerDataService:Update(player: Player, path: Path, callback: (any) -> any)
 	self:WaitForData(player)
-	return DataService:update(player, path, callback)
+	local currentValue = DataService:get(player, path)
+	local nextValue = callback(currentValue)
+	if deepEqual(currentValue, nextValue) then
+		return currentValue
+	end
+
+	DataService:set(player, path, nextValue)
+	return nextValue
 end
 
 function PlayerDataService:AddYen(player: Player, amount: number)
@@ -378,6 +422,14 @@ end
 function PlayerDataService.Client:SetSetting(player: Player, settingName: string, value: any): boolean
 	if not isValidSetting(settingName, value) then
 		return false
+	end
+
+	if value == true and (settingName == "AutoCollect" or settingName == "AutoDeposit") then
+		local MonetizationService = Knit.GetService("MonetizationService")
+		if not MonetizationService:OwnsGamePass(player, settingName) then
+			self.Server:Set(player, { "Settings", settingName }, false)
+			return false
+		end
 	end
 
 	if settingName == "AutoMergeAt" then
