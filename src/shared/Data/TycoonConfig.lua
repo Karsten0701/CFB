@@ -33,14 +33,14 @@ return {
 		Cooldown = 600,
 		BaseYen = 500,
 		YenPerBaseUnit = 50,
-		GrowthMultiplier = 1.05,
+		GrowthMultiplier = 1.03,
 		GrowthUnitsPerStep = 100,
 		MaxGrowthMultiplier = 250,
 	},
 	OfflineReward = {
 		MinimumOfflineSeconds = 60 * 60,
 		ClaimPopupDelay = 5,
-		RewardMultiplier = 0.1,
+		RewardMultiplier = 0.25,
 		MaxOfflineSeconds = 24 * 60 * 60,
 	},
 	FavoritePrompt = {

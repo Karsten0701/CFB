@@ -27,7 +27,7 @@ Monetization.DeveloperProducts = {
 	},
 	Unit9999 = {
 		ProductId = 3601588290,
-		Price = 699,
+		Price = 3999,
 		Kind = "Units",
 		Amount = 9999,
 	},

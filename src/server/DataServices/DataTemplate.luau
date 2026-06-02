@@ -13,6 +13,9 @@ return {
 	Units = {
 		{ Tier = 1 },
 	},
+	UnlockedAnimeDroppers = {
+		[1] = true,
+	},
 	ProcessedReceipts = {},
 	PurchasedProducts = {},
 	TycoonName = "",

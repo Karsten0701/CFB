@@ -115,6 +115,28 @@ local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
 	return normalizedUnits
 end
 
+local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { Tier: number } }): { [number]: boolean }
+	local normalized = {}
+
+	if type(unlockedDroppers) == "table" then
+		for tier, unlocked in unlockedDroppers do
+			local normalizedTier = math.floor(tonumber(tier) or 0)
+			if unlocked == true and AnimeDroppers.Tiers[normalizedTier] then
+				normalized[normalizedTier] = true
+			end
+		end
+	end
+
+	for _, unit in units do
+		local tier = math.floor(tonumber(unit.Tier) or 0)
+		if AnimeDroppers.Tiers[tier] then
+			normalized[tier] = true
+		end
+	end
+
+	return normalized
+end
+
 local function ensureManaData(data: { [string]: any })
 	migrateNumberFieldInData(data, "Money", "Yen", TycoonConfig.StarterYen or 0)
 	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
@@ -209,6 +231,8 @@ local function ensureManaData(data: { [string]: any })
 	if #data.Units <= 0 then
 		data.Units = normalizeUnits(getStarterUnits())
 	end
+
+	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers(data.UnlockedAnimeDroppers, data.Units)
 end
 
 local function syncLeaderstats(player: Player)
@@ -385,7 +409,12 @@ function PlayerDataService:GetUnits(player: Player): { { Tier: number, Slot: num
 end
 
 function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } })
-	self:Set(player, "Units", normalizeUnits(units))
+	local normalizedUnits = normalizeUnits(units)
+	self:Set(player, "Units", normalizedUnits)
+
+	self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)
+		return normalizeUnlockedAnimeDroppers(currentUnlocked, normalizedUnits)
+	end)
 end
 
 function PlayerDataService:Observe(player: Player, path: Path, callback: (any, any?) -> ())
