@@ -16,6 +16,8 @@ TycoonRenderer.__index = TycoonRenderer
 local DROP_INTERVAL = 6
 local DOUBLE_DROP_SPEED_INTERVAL = 3
 local MAX_ACTIVE_DROPS = 150
+local MAX_DROP_SPAWNS_PER_FRAME = 4
+local DROP_STAGGER_HASH = 0.61803398875
 local PICKUP_ANIMATION_TIME = 0.42
 local PICKUP_POPUP_LIFETIME = 0.72
 local PICKUP_POPUP_RISE = 1.65
@@ -312,8 +314,9 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.autoCollectPart = nil
 	self.autoCollectVisuals = nil
 	self.pickupConnection = nil
+	self.pickupAnimationConnection = nil
+	self.pickupAnimations = {}
 	self.dropLoopConnection = nil
-	self.nextDropAt = os.clock() + self:getDropInterval()
 	self.nextMutationAt = os.clock()
 		+ (TycoonConfig.Mutations and TycoonConfig.Mutations.Interval or DEFAULT_MUTATION_INTERVAL)
 	return self
@@ -324,12 +327,40 @@ function TycoonRenderer:setIsOwn(isOwn: boolean)
 end
 
 function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
+	local oldInterval = self:getDropInterval()
 	self.entitlements = entitlements or {}
 	self:updateAutoCollectPad()
+
+	local newInterval = self:getDropInterval()
+	if oldInterval ~= newInterval then
+		local now = os.clock()
+		for unitIndex, entry in self.unitEntries do
+			self:scheduleUnitDrop(entry, unitIndex, now, true)
+		end
+	end
 end
 
 function TycoonRenderer:getDropInterval(): number
 	return if self.entitlements.DoubleDropSpeed then DOUBLE_DROP_SPEED_INTERVAL else DROP_INTERVAL
+end
+
+function TycoonRenderer:getUnitDropPhase(unitIndex: number, interval: number): number
+	local phase = (unitIndex * DROP_STAGGER_HASH) % 1
+	return phase * interval
+end
+
+function TycoonRenderer:scheduleUnitDrop(entry, unitIndex: number, now: number?, force: boolean?)
+	if not entry then
+		return
+	end
+
+	now = now or os.clock()
+	if entry.NextDropAt and not force then
+		return
+	end
+
+	local interval = self:getDropInterval()
+	entry.NextDropAt = now + self:getUnitDropPhase(unitIndex, interval)
 end
 
 function TycoonRenderer:getDropperHolder(): Instance?
@@ -737,6 +768,13 @@ function TycoonRenderer:clearDrops()
 		connection:Disconnect()
 	end
 	table.clear(self.dropTouchConnections)
+
+	for orb in self.pickupAnimations do
+		if orb.Parent then
+			orb:Destroy()
+		end
+	end
+	table.clear(self.pickupAnimations)
 end
 
 function TycoonRenderer:findDropPart(spotPart: BasePart): BasePart?
@@ -929,6 +967,46 @@ function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
 	end)
 end
 
+function TycoonRenderer:ensurePickupAnimationLoop()
+	if self.pickupAnimationConnection then
+		return
+	end
+
+	self.pickupAnimationConnection = RunService.Heartbeat:Connect(function()
+		local root = self:getLocalRoot()
+		local hasAnimations = false
+		local now = os.clock()
+
+		for orb, animation in self.pickupAnimations do
+			if not orb.Parent or not root then
+				self.pickupAnimations[orb] = nil
+				orb:Destroy()
+				continue
+			end
+
+			hasAnimations = true
+			local alpha = math.clamp((now - animation.StartTime) / PICKUP_ANIMATION_TIME, 0, 1)
+			local easedAlpha = 1 - (1 - alpha) ^ 3
+			local endPosition = root.Position + Vector3.new(0, 0.5, 0)
+			local pulse = math.sin(alpha * math.pi)
+
+			orb.Position = quadraticBezier(animation.StartPosition, animation.ControlPosition, endPosition, easedAlpha)
+			orb.Size = animation.StartSize:Lerp(Vector3.new(0.12, 0.12, 0.12), easedAlpha) * (1 + pulse * 0.22)
+			orb.Transparency = easedAlpha * 0.45
+
+			if alpha >= 1 then
+				self.pickupAnimations[orb] = nil
+				orb:Destroy()
+			end
+		end
+
+		if not hasAnimations and self.pickupAnimationConnection then
+			self.pickupAnimationConnection:Disconnect()
+			self.pickupAnimationConnection = nil
+		end
+	end)
+end
+
 function TycoonRenderer:animatePickupOrb(orb: BasePart)
 	local root = self:getLocalRoot()
 	if not root then
@@ -936,42 +1014,20 @@ function TycoonRenderer:animatePickupOrb(orb: BasePart)
 		return
 	end
 
-	local startPosition = orb.Position
-	local startSize = orb.Size
-	local controlPosition = startPosition:Lerp(root.Position, 0.45)
-		+ Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0)
-	local startTime = os.clock()
-
 	orb.Anchored = true
 	orb.CanCollide = false
 	orb.CanQuery = false
 	orb.CanTouch = false
 
-	local connection: RBXScriptConnection?
-	connection = RunService.Heartbeat:Connect(function()
-		if not orb.Parent then
-			if connection then
-				connection:Disconnect()
-			end
-			return
-		end
-
-		local alpha = math.clamp((os.clock() - startTime) / PICKUP_ANIMATION_TIME, 0, 1)
-		local easedAlpha = 1 - (1 - alpha) ^ 3
-		local endPosition = root.Position + Vector3.new(0, 0.5, 0)
-		local pulse = math.sin(alpha * math.pi)
-
-		orb.Position = quadraticBezier(startPosition, controlPosition, endPosition, easedAlpha)
-		orb.Size = startSize:Lerp(Vector3.new(0.12, 0.12, 0.12), easedAlpha) * (1 + pulse * 0.22)
-		orb.Transparency = easedAlpha * 0.45
-
-		if alpha >= 1 then
-			if connection then
-				connection:Disconnect()
-			end
-			orb:Destroy()
-		end
-	end)
+	local startPosition = orb.Position
+	self.pickupAnimations[orb] = {
+		StartPosition = startPosition,
+		StartSize = orb.Size,
+		ControlPosition = startPosition:Lerp(root.Position, 0.45)
+			+ Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0),
+		StartTime = os.clock(),
+	}
+	self:ensurePickupAnimationLoop()
 end
 
 function TycoonRenderer:getLocalRoot(): BasePart?
@@ -1013,13 +1069,13 @@ function TycoonRenderer:isLocalCharacterPart(part: BasePart): boolean
 	return character ~= nil and part:IsDescendantOf(character)
 end
 
-function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: number)
+function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: number, skipPrune: boolean?): boolean
 	if not self.isOwn then
-		return
+		return false
 	end
 
-	if self:pruneActiveDrops() >= MAX_ACTIVE_DROPS then
-		return
+	if not skipPrune and self:pruneActiveDrops() >= MAX_ACTIVE_DROPS then
+		return false
 	end
 
 	self:ensurePickupLoop()
@@ -1028,7 +1084,7 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 	local template = getDropTemplate(tier)
 	if not template then
 		warn("[TycoonRenderer] No drop template found for tier:", tier)
-		return
+		return false
 	end
 
 	local dropInstance = template:Clone()
@@ -1040,7 +1096,7 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 	if not pickupPart then
 		dropInstance:Destroy()
 		warn("[TycoonRenderer] Drop template has no BasePart:", template:GetFullName())
-		return
+		return false
 	end
 
 	for _, descendant in dropInstance:GetDescendants() do
@@ -1084,29 +1140,31 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 			self:pickupOrb(pickupPart)
 		end
 	end)
+
+	return true
 end
 
-function TycoonRenderer:spawnMutatedDrop()
-	if not self.isOwn or self:pruneActiveDrops() >= MAX_ACTIVE_DROPS then
-		return
+function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
+	if not self.isOwn or (not skipPrune and self:pruneActiveDrops() >= MAX_ACTIVE_DROPS) then
+		return false
 	end
 
 	self:ensurePickupLoop()
 
 	local entry = self:getWeightedMutationEntry()
 	if not entry then
-		return
+		return false
 	end
 
 	local tierData = AnimeDroppers.Tiers[entry.Tier]
 	if not tierData then
-		return
+		return false
 	end
 
 	local template = getGoldDropTemplate()
 	if not template then
 		warn("[TycoonRenderer] No gold mutation drop template found")
-		return
+		return false
 	end
 
 	local multiplier = self:getRandomGoldMultiplier()
@@ -1125,7 +1183,7 @@ function TycoonRenderer:spawnMutatedDrop()
 	if not pickupPart then
 		dropInstance:Destroy()
 		warn("[TycoonRenderer] Gold mutation drop template has no BasePart:", template:GetFullName())
-		return
+		return false
 	end
 
 	for _, descendant in dropInstance:GetDescendants() do
@@ -1173,6 +1231,8 @@ function TycoonRenderer:spawnMutatedDrop()
 			self:pickupOrb(pickupPart)
 		end
 	end)
+
+	return true
 end
 
 function TycoonRenderer:ensureDropLoop()
@@ -1180,11 +1240,13 @@ function TycoonRenderer:ensureDropLoop()
 		return
 	end
 
-	self.nextDropAt = os.clock() + self:getDropInterval()
 	self.nextMutationAt = os.clock() + self:getMutationInterval()
 	self.dropLoopConnection = RunService.Heartbeat:Connect(function()
 		local now = os.clock()
 		local interval = self:getDropInterval()
+		local activeDropCount = self:pruneActiveDrops()
+		local spawnBudget = math.max(MAX_ACTIVE_DROPS - activeDropCount, 0)
+		local spawnedThisFrame = 0
 
 		if now >= self.nextMutationAt then
 			self.nextMutationAt += self:getMutationInterval()
@@ -1192,24 +1254,49 @@ function TycoonRenderer:ensureDropLoop()
 				self.nextMutationAt = now + self:getMutationInterval()
 			end
 
-			self:spawnMutatedDrop()
+			if spawnBudget > 0 and self:spawnMutatedDrop(true) then
+				activeDropCount += 1
+				spawnBudget -= 1
+				spawnedThisFrame += 1
+			end
 		end
 
-		if now >= self.nextDropAt then
-			self.nextDropAt += interval
-			if self.nextDropAt < now then
-				self.nextDropAt = now + interval
+		if spawnBudget <= 0 or spawnedThisFrame >= MAX_DROP_SPAWNS_PER_FRAME then
+			return
+		end
+
+		for unitIndex, entry in self.unitEntries do
+			if spawnedThisFrame >= MAX_DROP_SPAWNS_PER_FRAME or spawnBudget <= 0 then
+				break
 			end
 
-			for _, entry in self.unitEntries do
-				if not entry.Model or not entry.Model.Parent or not entry.DropPart then
-					continue
-				end
+			if not entry.Model or not entry.Model.Parent or not entry.DropPart then
+				continue
+			end
 
-				local tierData = AnimeDroppers.Tiers[entry.Tier]
-				if tierData then
-					self:spawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1)
-				end
+			self:scheduleUnitDrop(entry, unitIndex, now)
+			if now < (entry.NextDropAt or now + interval) then
+				continue
+			end
+
+			local tierData = AnimeDroppers.Tiers[entry.Tier]
+			if not tierData then
+				entry.NextDropAt = now + interval
+				continue
+			end
+
+			if self:spawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1, true) then
+				spawnedThisFrame += 1
+				activeDropCount += 1
+				spawnBudget -= 1
+			end
+
+			repeat
+				entry.NextDropAt += interval
+			until entry.NextDropAt > now
+
+			if entry.NextDropAt - now > interval then
+				entry.NextDropAt = now + interval
 			end
 		end
 	end)
@@ -1235,6 +1322,7 @@ end
 function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: BasePart)
 	entry.Model:PivotTo(spotPart.CFrame)
 	entry.DropPart = self:findDropPart(spotPart)
+	self:scheduleUnitDrop(entry, unitIndex, os.clock())
 	self:setUnitModelVisible(entry.Model, true)
 	self:setUnitModelAssignment(entry.Model, unitIndex, entry.Tier, false)
 
@@ -1402,6 +1490,7 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 				Tier = tier,
 				DropPart = dropPart,
 			}
+			self:scheduleUnitDrop(self.unitEntries[unitIndex], unitIndex, os.clock())
 
 			renderOperationsThisBatch += 1
 			if renderOperationsThisBatch >= UNIT_SPAWN_BATCH_SIZE then
@@ -1420,6 +1509,12 @@ function TycoonRenderer:destroy()
 		self.pickupConnection:Disconnect()
 		self.pickupConnection = nil
 	end
+
+	if self.pickupAnimationConnection then
+		self.pickupAnimationConnection:Disconnect()
+		self.pickupAnimationConnection = nil
+	end
+	table.clear(self.pickupAnimations)
 
 	if self.dropLoopConnection then
 		self.dropLoopConnection:Disconnect()
