@@ -27,9 +27,9 @@ local localPlayer = Players.LocalPlayer
 local renderers: { [Instance]: any } = {}
 local buttonActions: { [BasePart]: { kind: string, amount: number?, buttonName: string } } = {}
 local buttonModelsByTycoon: { [Instance]: { Model } } = {}
-local buttonDisplayCache: { [Instance]: any } = setmetatable({}, { __mode = "k" })
-local buttonInfoCache: { [Instance]: any } = setmetatable({}, { __mode = "k" })
-local buyUnitTierCache: { [Instance]: number } = setmetatable({}, { __mode = "k" })
+local buttonDisplayCache: { [Instance]: { [string]: any } } = {}
+local buttonInfoCache: { [Instance]: { [string]: any } } = {}
+local buyUnitTierCache: { [Instance]: { [string]: number } } = {}
 local lastActionAt: { [BasePart]: number } = {}
 local wasStandingOnButton: { [BasePart]: boolean } = {}
 local standingLoopConnection: RBXScriptConnection? = nil
@@ -360,7 +360,7 @@ local function getBuyUnitTier(buttonModel: Instance?): number
 		return tier
 	end
 
-	buyUnitTierCache[buttonModel] = 1
+	buyUnitTierCache[buttonModel] = { ["Default"] = 1 }
 	return 1
 end
 
@@ -372,13 +372,6 @@ local function getBuyUnitText(amount: number, tier: number): string
 	end
 
 	return "+" .. FormatUtil.formatNumber(amount) .. " " .. displayName
-end
-
-local function updateBuyUnitLabel(buttonModel: Instance, billboard: BillboardGui?, amount: number)
-	local amountLabel = getButtonAmountLabel(billboard)
-	if amountLabel then
-		amountLabel.Text = getBuyUnitText(amount, getBuyUnitTier(buttonModel))
-	end
 end
 
 local function getGroupRewardConfig(): { [string]: any }
@@ -448,7 +441,10 @@ local function promptJoinRewardGroup()
 	end)
 end
 
-local function mergeEntitlementsWithSettings(entitlements: { [string]: boolean }, settings: { [string]: any }?): { [string]: boolean }
+local function mergeEntitlementsWithSettings(
+	entitlements: { [string]: boolean },
+	settings: { [string]: any }?
+): { [string]: boolean }
 	local merged = table.clone(entitlements or {})
 	if type(settings) == "table" then
 		merged.AutoCollect = settings.AutoCollect == true
@@ -666,7 +662,9 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			end
 
 			if display.Rate and display.Rate.Parent then
-				display.Rate.Text = "+" .. FormatUtil.formatNumber(Pricing.getRateGain(rateAmount, rateLevel)) .. " Rate"
+				display.Rate.Text = "+"
+					.. FormatUtil.formatNumber(Pricing.getRateGain(rateAmount, rateLevel))
+					.. " Rate"
 			end
 		end
 	end
@@ -1269,7 +1267,9 @@ function TycoonController:KnitStart()
 		end
 
 		local gamePassKey = getGamePassKeyFromId(gamePassId)
-		local autoEnableSetting = if gamePassKey == "AutoCollect" or gamePassKey == "AutoDeposit" then gamePassKey else nil
+		local autoEnableSetting = if gamePassKey == "AutoCollect" or gamePassKey == "AutoDeposit"
+			then gamePassKey
+			else nil
 
 		self:refreshMonetizationEntitlements(autoEnableSetting)
 	end)

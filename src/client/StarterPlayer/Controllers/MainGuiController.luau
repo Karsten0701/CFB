@@ -117,34 +117,34 @@ local function setMessageTransparency(instance: Instance, transparency: number)
 	end
 
 	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-		instance.TextTransparency = transparency
-		instance.TextStrokeTransparency = math.clamp(transparency, 0, 1)
+		instance:SetAttribute("TextTransparency", transparency)
+		instance:SetAttribute("TextStrokeTransparency", math.clamp(transparency, 0, 1))
 	elseif instance:IsA("ImageLabel") or instance:IsA("ImageButton") then
-		instance.ImageTransparency = transparency
+		instance:SetAttribute("ImageTransparency", transparency)
 	end
 end
 
 local function setRichText(instance: Instance, enabled: boolean)
 	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-		instance.RichText = enabled
+		instance:SetAttribute("RichText", enabled)
 	end
 
 	for _, descendant in instance:GetDescendants() do
 		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-			descendant.RichText = enabled
+			descendant:SetAttribute("RichText", enabled)
 		end
 	end
 end
 
 local function setFirstMessageText(instance: Instance, text: string)
 	if instance:IsA("TextLabel") or instance:IsA("TextButton") then
-		instance.Text = text
+		instance:SetAttribute("Text", text)
 		return
 	end
 
 	for _, descendant in instance:GetDescendants() do
 		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then
-			descendant.Text = text
+			descendant:SetAttribute("Text", text)
 			return
 		end
 	end
@@ -1420,13 +1420,13 @@ function MainGuiController:isDoubleYenCandidate(instance: Instance): boolean
 		return true
 	end
 
-	local normalizedName = string.lower(string.gsub(instance.Name, "%s+", ""))
+	local normalizedName = string.lower(string.gsub(instance.Name, "%s+", "") or "")
 	if normalizedName == "doubleyen" or normalizedName == "2xyen" or normalizedName == "yen2x" then
 		return true
 	end
 
 	if instance.Name == "Amount" and instance:IsA("TextLabel") then
-		local normalizedText = string.lower(string.gsub(instance.Text, "%s+", ""))
+		local normalizedText = string.lower(string.gsub(instance.Text, "%s+", "") or "")
 		return string.find(normalizedText, "2xyen", 1, true) ~= nil
 	end
 
