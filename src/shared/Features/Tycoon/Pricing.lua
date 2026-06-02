@@ -8,11 +8,11 @@ local RATE_EARLY_BASE_PRICE = 10
 local RATE_EARLY_INCREMENT = 5
 local RATE_STEP_SIZE = 5
 local RATE_GAIN_EXPONENT = 1.75
-local RATE_PRICE_LINEAR_INCREMENT = 15
-local RATE_PRICE_GAIN_MULTIPLIER = 11
-local RATE_PRICE_STEP_MULTIPLIER = 12.5
-local RATE_PRICE_STEP_EXPONENT = 2.25
-local MAX_RATE_BUY_AMOUNT = 100_000
+local RATE_PRICE_LINEAR_INCREMENT = 10
+local RATE_PRICE_GAIN_MULTIPLIER = 10
+local RATE_PRICE_STEP_MULTIPLIER = 10
+local RATE_PRICE_STEP_EXPONENT = 2
+local MAX_RATE_BUY_AMOUNT = 100_000_000_000
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
@@ -101,21 +101,6 @@ end
 local function getRateStepGain(rateLevel: number): number
 	local step = math.floor(rateLevel / RATE_STEP_SIZE) + 1
 	return math.max(math.floor(step ^ RATE_GAIN_EXPONENT + 0.5), 1)
-end
-
-local function getSingleRateUpgradePrice(rateLevel: number): number
-	if rateLevel < RATE_EARLY_LEVELS then
-		return RATE_EARLY_BASE_PRICE + rateLevel * RATE_EARLY_INCREMENT
-	end
-
-	local step = math.floor(rateLevel / RATE_STEP_SIZE) + 1
-	local gain = getRateStepGain(rateLevel)
-	return math.floor(
-		TycoonConfig.RateUpgradeBasePrice
-			+ rateLevel * RATE_PRICE_LINEAR_INCREMENT
-			+ gain * RATE_PRICE_GAIN_MULTIPLIER
-			+ (step ^ RATE_PRICE_STEP_EXPONENT) * RATE_PRICE_STEP_MULTIPLIER
-	)
 end
 
 local function getRateSequentialPrice(rateLevel: number, amount: number): number

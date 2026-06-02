@@ -3,6 +3,7 @@ return {
 	Rebirths = 0,
 	RebirthTokens = 0,
 	LastGroupRewardClaimAt = 0,
+	LastLogoutAt = 0,
 	FavoritePromptShown = false,
 	ManaInBag = 0,
 	ManaInDeposit = 0,

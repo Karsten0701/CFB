@@ -26,6 +26,7 @@ local manaFlushScheduled: { [Player]: boolean } = {}
 local processElapsed: { [Player]: number } = {}
 local visualDataRequestAt: { [Player]: { [string]: number } } = {}
 local pickupBlockedUntil: { [Player]: number } = {}
+local pendingOfflineRewards: { [Player]: any } = {}
 
 local PROCESS_INTERVAL = 1
 local DROP_INTERVAL = 6
@@ -134,6 +135,76 @@ local function getYenMultiplier(player: Player): number
 	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
 
 	return multiplier
+end
+
+local function getOfflineYenMultiplier(player: Player): number
+	local MonetizationService = Knit.GetService("MonetizationService")
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local multiplier = 1
+
+	if MonetizationService:OwnsProductEntitlement(player, "DoubleYen") then
+		multiplier *= 2
+	end
+
+	local rebirths = math.max(math.floor(PlayerDataService:Get(player, "Rebirths") or 0), 0)
+	local rebirthConfig = TycoonConfig.Rebirth
+	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
+
+	return multiplier
+end
+
+local function getUnitManaPerSecond(units: { { Tier: number } }): number
+	local total = 0
+	for _, unit in units do
+		local tierData = AnimeDroppers.Tiers[unit.Tier or 1]
+		if tierData then
+			total += (tierData.DropValue or 1) / DROP_INTERVAL
+		end
+	end
+
+	return math.max(total, 0)
+end
+
+local function getOfflineRewardPayload(player: Player)
+	local cached = pendingOfflineRewards[player]
+	if cached ~= nil then
+		return cached
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local offlineConfig = TycoonConfig.OfflineReward or {}
+	local minimumOfflineSeconds = math.max(math.floor(tonumber(offlineConfig.MinimumOfflineSeconds) or 3600), 0)
+	local rewardMultiplier = math.clamp(tonumber(offlineConfig.RewardMultiplier) or 0.75, 0, 1)
+	local maxOfflineSeconds = math.max(math.floor(tonumber(offlineConfig.MaxOfflineSeconds) or 24 * 60 * 60), minimumOfflineSeconds)
+	local now = os.time()
+	local lastLogoutAt = math.max(math.floor(PlayerDataService:Get(player, "LastLogoutAt") or 0), 0)
+	local offlineSeconds = math.max(now - lastLogoutAt, 0)
+
+	if lastLogoutAt <= 0 or offlineSeconds < minimumOfflineSeconds then
+		pendingOfflineRewards[player] = false
+		return false
+	end
+
+	local rewardedSeconds = math.min(offlineSeconds, maxOfflineSeconds)
+	local units = PlayerDataService:GetUnits(player)
+	local yenPerSecond = getUnitManaPerSecond(units) * getOfflineYenMultiplier(player)
+	local reward = math.max(math.floor(yenPerSecond * rewardedSeconds * rewardMultiplier), 0)
+	if reward <= 0 then
+		pendingOfflineRewards[player] = false
+		return false
+	end
+
+	local payload = {
+		OfflineSeconds = offlineSeconds,
+		RewardedSeconds = rewardedSeconds,
+		Reward = reward,
+		YenPerHour = yenPerSecond * 60 * 60,
+		RewardMultiplier = rewardMultiplier,
+	}
+	pendingOfflineRewards[player] = payload
+	return payload
 end
 
 local function getRebirthRequiredTier(rebirths: number): number
@@ -401,6 +472,7 @@ function TycoonService:ReleaseTycoon(player: Player)
 	processElapsed[player] = nil
 	visualDataRequestAt[player] = nil
 	pickupBlockedUntil[player] = nil
+	pendingOfflineRewards[player] = nil
 
 	local characterConnection = playerCharacterConnections[player]
 	if characterConnection then
@@ -505,6 +577,38 @@ function TycoonService.Client:TeleportHome(player: Player): (boolean, string?)
 
 	TycoonUtil.teleportToSpawn(player, tycoon)
 	return true
+end
+
+function TycoonService.Client:GetOfflineReward(player: Player): (boolean, any)
+	local payload = getOfflineRewardPayload(player)
+	if not payload then
+		return true, {
+			Eligible = false,
+			OfflineSeconds = 0,
+			Reward = 0,
+		}
+	end
+
+	return true, {
+		Eligible = true,
+		OfflineSeconds = payload.OfflineSeconds,
+		RewardedSeconds = payload.RewardedSeconds,
+		Reward = payload.Reward,
+		YenPerHour = payload.YenPerHour,
+		RewardMultiplier = payload.RewardMultiplier,
+	}
+end
+
+function TycoonService.Client:ClaimOfflineReward(player: Player): (boolean, string?, number?)
+	local payload = getOfflineRewardPayload(player)
+	if not payload then
+		return false, "No reward", 0
+	end
+
+	pendingOfflineRewards[player] = false
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:AddYen(player, payload.Reward)
+	return true, nil, payload.Reward
 end
 
 function TycoonService.Client:GetTycoonVisualData(player: Player, tycoonName: string): (boolean, any)

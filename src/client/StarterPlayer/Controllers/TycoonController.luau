@@ -26,6 +26,10 @@ local TycoonController = Knit.CreateController({
 local localPlayer = Players.LocalPlayer
 local renderers: { [Instance]: any } = {}
 local buttonActions: { [BasePart]: { kind: string, amount: number?, buttonName: string } } = {}
+local buttonModelsByTycoon: { [Instance]: { Model } } = {}
+local buttonDisplayCache: { [Instance]: any } = setmetatable({}, { __mode = "k" })
+local buttonInfoCache: { [Instance]: any } = setmetatable({}, { __mode = "k" })
+local buyUnitTierCache: { [Instance]: number } = setmetatable({}, { __mode = "k" })
 local lastActionAt: { [BasePart]: number } = {}
 local wasStandingOnButton: { [BasePart]: boolean } = {}
 local standingLoopConnection: RBXScriptConnection? = nil
@@ -206,16 +210,35 @@ local function getButtonHead(buttonModel: Model, taggedObject: Instance?): BaseP
 	return if head and head:IsA("BasePart") then head else nil
 end
 
-local function shouldRegisterButtonModel(buttonModel: Model): boolean
-	return TycoonUtil.getRobuxBuyAmount(buttonModel) ~= nil
-		or TycoonUtil.isSellAllButton(buttonModel)
-		or TycoonUtil.isGroupRewardButton(buttonModel)
-		or TycoonUtil.isBuyMaxUnitsButton(buttonModel)
-		or TycoonUtil.getBuyAmount(buttonModel) ~= nil
-		or TycoonUtil.isRateMaxButton(buttonModel)
-		or TycoonUtil.getRateAmount(buttonModel) ~= nil
-		or TycoonUtil.isMergeButton(buttonModel)
-		or TycoonUtil.isDepositButton(buttonModel)
+local function getButtonInfo(buttonModel: Instance)
+	local cached = buttonInfoCache[buttonModel]
+	if cached then
+		return cached
+	end
+
+	local info = {
+		RobuxBuyAmount = TycoonUtil.getRobuxBuyAmount(buttonModel),
+		IsSellAll = TycoonUtil.isSellAllButton(buttonModel),
+		IsGroupReward = TycoonUtil.isGroupRewardButton(buttonModel),
+		IsBuyMaxUnits = TycoonUtil.isBuyMaxUnitsButton(buttonModel),
+		BuyAmount = TycoonUtil.getBuyAmount(buttonModel),
+		IsRateMax = TycoonUtil.isRateMaxButton(buttonModel),
+		RateAmount = TycoonUtil.getRateAmount(buttonModel),
+		IsMerge = TycoonUtil.isMergeButton(buttonModel),
+		IsDeposit = TycoonUtil.isDepositButton(buttonModel),
+	}
+	info.ShouldRegister = info.RobuxBuyAmount ~= nil
+		or info.IsSellAll
+		or info.IsGroupReward
+		or info.IsBuyMaxUnits
+		or info.BuyAmount ~= nil
+		or info.IsRateMax
+		or info.RateAmount ~= nil
+		or info.IsMerge
+		or info.IsDeposit
+
+	buttonInfoCache[buttonModel] = info
+	return info
 end
 
 local function getProcesserLabels(tycoon: Instance): (TextLabel?, TextLabel?)
@@ -242,16 +265,36 @@ local function getProcesserLabels(tycoon: Instance): (TextLabel?, TextLabel?)
 end
 
 local function getButtonBillboard(buttonModel: Instance): BillboardGui?
+	local cached = buttonDisplayCache[buttonModel]
+	if cached and cached.Billboard and cached.Billboard.Parent then
+		return cached.Billboard
+	end
+	if cached and cached.BillboardScanned then
+		return nil
+	end
+
 	local head = buttonModel:FindFirstChild("Head")
 	if head then
 		local billboard = head:FindFirstChild("BillboardGui")
 		if billboard and billboard:IsA("BillboardGui") then
+			buttonDisplayCache[buttonModel] = buttonDisplayCache[buttonModel] or {}
+			buttonDisplayCache[buttonModel].Billboard = billboard
+			buttonDisplayCache[buttonModel].BillboardScanned = true
 			return billboard
 		end
 	end
 
 	local billboard = buttonModel:FindFirstChild("BillboardGui", true)
-	return if billboard and billboard:IsA("BillboardGui") then billboard else nil
+	if billboard and billboard:IsA("BillboardGui") then
+		buttonDisplayCache[buttonModel] = buttonDisplayCache[buttonModel] or {}
+		buttonDisplayCache[buttonModel].Billboard = billboard
+		buttonDisplayCache[buttonModel].BillboardScanned = true
+		return billboard
+	end
+
+	buttonDisplayCache[buttonModel] = buttonDisplayCache[buttonModel] or {}
+	buttonDisplayCache[buttonModel].BillboardScanned = true
+	return nil
 end
 
 local function getBillboardTextLabel(billboard: BillboardGui?, labelName: string): TextLabel?
@@ -270,22 +313,54 @@ local function getButtonAmountLabel(billboard: BillboardGui?): TextLabel?
 		or getBillboardTextLabel(billboard, "TextLabel")
 end
 
+local function getButtonDisplay(buttonModel: Instance)
+	local cached = buttonDisplayCache[buttonModel]
+	if cached and cached.Billboard and cached.Billboard.Parent then
+		return cached
+	end
+	if cached and cached.DisplayScanned then
+		return cached
+	end
+
+	local billboard = getButtonBillboard(buttonModel)
+	cached = buttonDisplayCache[buttonModel] or {}
+	cached.Billboard = billboard
+	cached.Amount = getButtonAmountLabel(billboard)
+	cached.Price = getBillboardTextLabel(billboard, "Price")
+	cached.Rate = getBillboardTextLabel(billboard, "Rate")
+	cached.Reward = getBillboardTextLabel(billboard, "Reward")
+	cached.Timer = getBillboardTextLabel(billboard, "Group/Timer")
+	cached.DisplayScanned = true
+	buttonDisplayCache[buttonModel] = cached
+	return cached
+end
+
 local function getBuyUnitTier(buttonModel: Instance?): number
 	if not buttonModel then
 		return 1
 	end
 
+	local cached = buyUnitTierCache[buttonModel]
+	if cached then
+		return cached
+	end
+
 	local unitTier = buttonModel:GetAttribute("UnitTier") or buttonModel:GetAttribute("BuyTier")
 	if type(unitTier) == "number" then
-		return math.clamp(math.floor(unitTier), 1, AnimeDroppers.MaxTier)
+		local tier = math.clamp(math.floor(unitTier), 1, AnimeDroppers.MaxTier)
+		buyUnitTierCache[buttonModel] = tier
+		return tier
 	end
 
 	local head = buttonModel:FindFirstChild("Head", true)
 	local headTier = head and (head:GetAttribute("UnitTier") or head:GetAttribute("BuyTier"))
 	if type(headTier) == "number" then
-		return math.clamp(math.floor(headTier), 1, AnimeDroppers.MaxTier)
+		local tier = math.clamp(math.floor(headTier), 1, AnimeDroppers.MaxTier)
+		buyUnitTierCache[buttonModel] = tier
+		return tier
 	end
 
+	buyUnitTierCache[buttonModel] = 1
 	return 1
 end
 
@@ -466,26 +541,26 @@ function TycoonController:updateGroupRewardDisplay(tycoon: Instance)
 	local isInGroup = isLocalPlayerInRewardGroup()
 	local remaining = getGroupRewardRemaining()
 	local reward = getGroupRewardAmount()
+	local buttonModels = buttonModelsByTycoon[tycoon] or {}
 
-	for _, child in tycoon:GetChildren() do
-		if not TycoonUtil.isGroupRewardButton(child) then
+	for _, child in buttonModels do
+		local info = getButtonInfo(child)
+		if not child.Parent or not info.IsGroupReward then
 			continue
 		end
 
-		local billboard = getButtonBillboard(child)
-		local rewardLabel = getBillboardTextLabel(billboard, "Reward")
-		if rewardLabel then
-			rewardLabel.Text = Pricing.formatYen(reward)
+		local display = getButtonDisplay(child)
+		if display.Reward and display.Reward.Parent then
+			display.Reward.Text = Pricing.formatYen(reward)
 		end
 
-		local timerLabel = getBillboardTextLabel(billboard, "Group/Timer")
-		if timerLabel then
+		if display.Timer and display.Timer.Parent then
 			if not isInGroup then
-				timerLabel.Text = "Join Group!"
+				display.Timer.Text = "Join Group!"
 			elseif remaining <= 0 then
-				timerLabel.Text = "Ready!"
+				display.Timer.Text = "Ready!"
 			else
-				timerLabel.Text = formatCountdown(remaining)
+				display.Timer.Text = formatCountdown(remaining)
 			end
 		end
 	end
@@ -512,77 +587,86 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 	local baseUnitCount = Pricing.getBaseUnitCount(PlayerDataController:Get("Units") or {})
 	local rateLevel = PlayerDataController:Get("RateLevel") or 0
 	local yen = PlayerDataController:Get("Yen") or 0
+	local buttonModels = buttonModelsByTycoon[tycoon]
+	if not buttonModels then
+		return
+	end
 
 	self:updateGroupRewardDisplay(tycoon)
 
-	for _, child in tycoon:GetDescendants() do
-		if not child:IsA("Model") then
+	for index = #buttonModels, 1, -1 do
+		local child = buttonModels[index]
+		if not child.Parent then
+			table.remove(buttonModels, index)
 			continue
 		end
 
-		if TycoonUtil.isGroupRewardButton(child) then
+		local info = getButtonInfo(child)
+
+		if info.IsGroupReward then
 			continue
 		end
 
-		local robuxBuyAmount = TycoonUtil.getRobuxBuyAmount(child)
+		local robuxBuyAmount = info.RobuxBuyAmount
 		if robuxBuyAmount then
-			updateBuyUnitLabel(child, getButtonBillboard(child), robuxBuyAmount)
+			local display = getButtonDisplay(child)
+			if display.Amount and display.Amount.Parent then
+				display.Amount.Text = getBuyUnitText(robuxBuyAmount, getBuyUnitTier(child))
+			end
 			continue
 		end
 
-		if TycoonUtil.isBuyMaxUnitsButton(child) then
+		if info.IsBuyMaxUnits then
 			local maxAmount, maxPrice = Pricing.getMaxAffordableUnitPurchase(baseUnitCount, yen)
-			local billboard = getButtonBillboard(child)
-			local priceLabel = getBillboardTextLabel(billboard, "Price")
-			if priceLabel then
+			local display = getButtonDisplay(child)
+			if display.Price and display.Price.Parent then
 				local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getUnitBulkPrice(baseUnitCount, 1)
-				priceLabel.Text = Pricing.formatYen(displayPrice)
+				display.Price.Text = Pricing.formatYen(displayPrice)
 			end
 
-			updateBuyUnitLabel(child, billboard, maxAmount)
+			if display.Amount and display.Amount.Parent then
+				display.Amount.Text = getBuyUnitText(maxAmount, getBuyUnitTier(child))
+			end
 
 			continue
 		end
 
-		local buyAmount = TycoonUtil.getBuyAmount(child)
+		local buyAmount = info.BuyAmount
 		if buyAmount then
-			local billboard = getButtonBillboard(child)
-			local priceLabel = getBillboardTextLabel(billboard, "Price")
-			if priceLabel then
-				priceLabel.Text = Pricing.formatYen(Pricing.getUnitBulkPrice(baseUnitCount, buyAmount))
+			local display = getButtonDisplay(child)
+			if display.Price and display.Price.Parent then
+				display.Price.Text = Pricing.formatYen(Pricing.getUnitBulkPrice(baseUnitCount, buyAmount))
 			end
 
-			updateBuyUnitLabel(child, billboard, buyAmount)
+			if display.Amount and display.Amount.Parent then
+				display.Amount.Text = getBuyUnitText(buyAmount, getBuyUnitTier(child))
+			end
 		end
 
-		if TycoonUtil.isRateMaxButton(child) then
+		if info.IsRateMax then
 			local maxAmount, maxPrice, maxGain = Pricing.getMaxAffordableRateUpgrade(rateLevel, yen)
-			local billboard = getButtonBillboard(child)
-			local priceLabel = getBillboardTextLabel(billboard, "Price")
-			if priceLabel then
+			local display = getButtonDisplay(child)
+			if display.Price and display.Price.Parent then
 				local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getRateUpgradePrice(rateLevel, 1)
-				priceLabel.Text = Pricing.formatYen(displayPrice)
+				display.Price.Text = Pricing.formatYen(displayPrice)
 			end
 
-			local rateLabel = getBillboardTextLabel(billboard, "Rate")
-			if rateLabel then
-				rateLabel.Text = "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
+			if display.Rate and display.Rate.Parent then
+				display.Rate.Text = "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
 			end
 
 			continue
 		end
 
-		local rateAmount = TycoonUtil.getRateAmount(child)
+		local rateAmount = info.RateAmount
 		if rateAmount then
-			local billboard = getButtonBillboard(child)
-			local priceLabel = getBillboardTextLabel(billboard, "Price")
-			if priceLabel then
-				priceLabel.Text = Pricing.formatYen(Pricing.getRateUpgradePrice(rateLevel, rateAmount))
+			local display = getButtonDisplay(child)
+			if display.Price and display.Price.Parent then
+				display.Price.Text = Pricing.formatYen(Pricing.getRateUpgradePrice(rateLevel, rateAmount))
 			end
 
-			local rateLabel = getBillboardTextLabel(billboard, "Rate")
-			if rateLabel then
-				rateLabel.Text = "+" .. FormatUtil.formatNumber(Pricing.getRateGain(rateAmount, rateLevel)) .. " Rate"
+			if display.Rate and display.Rate.Parent then
+				display.Rate.Text = "+" .. FormatUtil.formatNumber(Pricing.getRateGain(rateAmount, rateLevel)) .. " Rate"
 			end
 		end
 	end
@@ -706,9 +790,15 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 	actionTycoon = tycoon
 	local seenButtons: { [Model]: boolean } = {}
 	local nextButtonActions: { [BasePart]: { kind: string, amount: number?, buttonName: string } } = {}
+	local nextButtonModels: { Model } = {}
 
 	local function registerButtonModel(buttonModel: Model, taggedObject: Instance?)
-		if seenButtons[buttonModel] or not shouldRegisterButtonModel(buttonModel) then
+		if seenButtons[buttonModel] then
+			return
+		end
+
+		local info = getButtonInfo(buttonModel)
+		if not info.ShouldRegister then
 			return
 		end
 
@@ -719,9 +809,11 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
+		table.insert(nextButtonModels, buttonModel)
+		getButtonDisplay(buttonModel)
 		ButtonPress.SetupButton(head)
 
-		if TycoonUtil.isSellAllButton(buttonModel) then
+		if info.IsSellAll then
 			nextButtonActions[head] = {
 				kind = "sell_all_product",
 				buttonName = buttonModel.Name,
@@ -729,7 +821,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		if TycoonUtil.isGroupRewardButton(buttonModel) then
+		if info.IsGroupReward then
 			nextButtonActions[head] = {
 				kind = "group_reward",
 				buttonName = buttonModel.Name,
@@ -737,7 +829,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		local robuxBuyAmount = TycoonUtil.getRobuxBuyAmount(buttonModel)
+		local robuxBuyAmount = info.RobuxBuyAmount
 		if robuxBuyAmount then
 			nextButtonActions[head] = {
 				kind = "robux_buy",
@@ -747,7 +839,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		if TycoonUtil.isBuyMaxUnitsButton(buttonModel) then
+		if info.IsBuyMaxUnits then
 			nextButtonActions[head] = {
 				kind = "buy_max",
 				buttonName = buttonModel.Name,
@@ -755,7 +847,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		local buyAmount = TycoonUtil.getBuyAmount(buttonModel)
+		local buyAmount = info.BuyAmount
 		if buyAmount then
 			nextButtonActions[head] = {
 				kind = "buy",
@@ -765,7 +857,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		if TycoonUtil.isRateMaxButton(buttonModel) then
+		if info.IsRateMax then
 			nextButtonActions[head] = {
 				kind = "rate_max",
 				buttonName = buttonModel.Name,
@@ -773,7 +865,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		local rateAmount = TycoonUtil.getRateAmount(buttonModel)
+		local rateAmount = info.RateAmount
 		if rateAmount then
 			nextButtonActions[head] = {
 				kind = "rate",
@@ -783,7 +875,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		if TycoonUtil.isMergeButton(buttonModel) then
+		if info.IsMerge then
 			nextButtonActions[head] = {
 				kind = "merge",
 				buttonName = buttonModel.Name,
@@ -791,7 +883,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 			return
 		end
 
-		if TycoonUtil.isDepositButton(buttonModel) then
+		if info.IsDeposit then
 			nextButtonActions[head] = {
 				kind = "deposit",
 				buttonName = buttonModel.Name,
@@ -823,6 +915,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 	end
 
 	buttonActions = nextButtonActions
+	buttonModelsByTycoon[tycoon] = nextButtonModels
 
 	for head in wasStandingOnButton do
 		if not buttonActions[head] then

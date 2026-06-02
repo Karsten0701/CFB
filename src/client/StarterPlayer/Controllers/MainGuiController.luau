@@ -32,6 +32,8 @@ local displayedValues = {
 
 local doubleYenClickConnection: RBXScriptConnection? = nil
 local doubleYenPromptOpen = false
+local doubleYenOfferCache: GuiObject? = nil
+local doubleYenOfferScannedGui: Instance? = nil
 local settingsIcon = nil
 local homeIcon = nil
 local boundSettingsFrame: GuiObject? = nil
@@ -40,6 +42,7 @@ local activeMessages = {}
 local nextMessageLayoutOrder = 0
 local shopConnections: { RBXScriptConnection } = {}
 local rebirthConnections: { RBXScriptConnection } = {}
+local offlineRewardConnections: { RBXScriptConnection } = {}
 local settingsConnections: { RBXScriptConnection } = {}
 local settingsRowCache: { [string]: GuiObject } = {}
 local settingsSliderCache: { [string]: { Frame: GuiObject?, Slider: GuiObject?, Label: TextLabel? } } = {}
@@ -56,6 +59,8 @@ local lastAppliedSfxVolume: number? = nil
 local lastAppliedSoundEnabled: boolean? = nil
 local gamePassPromptOpen = false
 local rebirthRequestOpen = false
+local offlineRewardRequestOpen = false
+local offlineRewardClaimed = false
 
 local SHOP_GAMEPASS_ALIASES = {
 	AutoCollect = "AutoCollect",
@@ -182,6 +187,16 @@ function MainGuiController:getShopFrame(): GuiObject?
 
 	local shopFrame = mainGui:FindFirstChild("ShopFrame")
 	return if shopFrame and shopFrame:IsA("GuiObject") then shopFrame else nil
+end
+
+function MainGuiController:getOfflineEarningFrame(): GuiObject?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	local frame = mainGui:FindFirstChild("OfflineEarning")
+	return if frame and frame:IsA("GuiObject") then frame else nil
 end
 
 function MainGuiController:getMessageHolder(): Instance?
@@ -386,6 +401,18 @@ function MainGuiController:ShowGroupRewardMessage(amount: number)
 	self:showMessage(
 		"GroupReward:" .. amount,
 		'You claimed <font color="#FFD86B">' .. Pricing.formatYen(amount) .. "</font>"
+	)
+end
+
+function MainGuiController:ShowOfflineRewardMessage(amount: number)
+	amount = math.max(math.floor(amount), 0)
+	if amount <= 0 then
+		return
+	end
+
+	self:showMessage(
+		"OfflineReward:" .. amount,
+		'You claimed <font color="#FFD86B">' .. Pricing.formatYen(amount) .. "</font> offline earnings"
 	)
 end
 
@@ -945,8 +972,15 @@ function MainGuiController:isDoubleYenCandidate(instance: Instance): boolean
 end
 
 function MainGuiController:getDoubleYenOffer(): GuiObject?
+	if doubleYenOfferCache and doubleYenOfferCache.Parent then
+		return doubleYenOfferCache
+	end
+
 	local mainGui = self:getMainGui()
 	if not mainGui then
+		return nil
+	end
+	if doubleYenOfferScannedGui == mainGui then
 		return nil
 	end
 
@@ -954,6 +988,7 @@ function MainGuiController:getDoubleYenOffer(): GuiObject?
 		if self:isDoubleYenCandidate(descendant) then
 			local root = self:getDoubleYenOfferRootFromDescendant(mainGui, descendant)
 			if root then
+				doubleYenOfferCache = root
 				return root
 			end
 		end
@@ -965,12 +1000,14 @@ function MainGuiController:getDoubleYenOffer(): GuiObject?
 			if descendant.Name == "Amount" and descendant:IsA("TextLabel") then
 				local root = self:getDoubleYenOfferRootFromDescendant(mainGui, descendant)
 				if root then
+					doubleYenOfferCache = root
 					return root
 				end
 			end
 		end
 	end
 
+	doubleYenOfferScannedGui = mainGui
 	return nil
 end
 
@@ -1072,6 +1109,30 @@ function MainGuiController:clearRebirthConnections()
 	end
 
 	table.clear(rebirthConnections)
+end
+
+function MainGuiController:clearOfflineRewardConnections()
+	for _, connection in offlineRewardConnections do
+		connection:Disconnect()
+	end
+
+	table.clear(offlineRewardConnections)
+end
+
+function MainGuiController:connectOfflineRewardGuiActivated(guiObject: GuiObject, callback: () -> ())
+	local clickable = self:getClickableGui(guiObject)
+	if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+		table.insert(offlineRewardConnections, clickable.Activated:Connect(callback))
+	else
+		table.insert(
+			offlineRewardConnections,
+			clickable.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					callback()
+				end
+			end)
+		)
+	end
 end
 
 function MainGuiController:getRebirthFrame(): GuiObject?
@@ -1196,6 +1257,133 @@ function MainGuiController:setupRebirthFrame()
 			OpenFrame.Toggle(frame)
 		end)
 	end
+end
+
+function MainGuiController:formatOfflineDuration(seconds: number): string
+	seconds = math.max(math.floor(seconds or 0), 0)
+	local totalMinutes = math.floor(seconds / 60 + 0.5)
+	local hours = math.floor(totalMinutes / 60)
+	local minutes = totalMinutes % 60
+
+	if hours <= 0 then
+		local minuteLabel = if minutes == 1 then " minute" else " minutes"
+		return tostring(minutes) .. minuteLabel
+	end
+
+	if minutes <= 0 then
+		local hourLabel = if hours == 1 then " hour" else " hours"
+		return tostring(hours) .. hourLabel
+	end
+
+	local hourLabel = if hours == 1 then " hour and " else " hours and "
+	local minuteLabel = if minutes == 1 then " minute" else " minutes"
+	return tostring(hours) .. hourLabel .. tostring(minutes) .. minuteLabel
+end
+
+function MainGuiController:updateOfflineEarningFrame(payload: any)
+	local frame = self:getOfflineEarningFrame()
+	if not frame or type(payload) ~= "table" then
+		return
+	end
+
+	local offlineSeconds = math.max(math.floor(payload.OfflineSeconds or 0), 0)
+	local reward = math.max(math.floor(payload.Reward or 0), 0)
+	self:setNamedText(frame, "OfflineTime", "You were offline for " .. self:formatOfflineDuration(offlineSeconds))
+	self:setNamedText(frame, "OfflineTimer", "You were offline for " .. self:formatOfflineDuration(offlineSeconds))
+	self:setNamedText(frame, "OfflienTime", "You were offline for " .. self:formatOfflineDuration(offlineSeconds))
+	self:setNamedText(frame, "OfflineReward", Pricing.formatYen(reward))
+end
+
+function MainGuiController:claimOfflineReward(frame: GuiObject?)
+	if offlineRewardClaimed or offlineRewardRequestOpen then
+		if frame then
+			OpenFrame.Toggle(frame, false)
+		end
+		return
+	end
+
+	offlineRewardRequestOpen = true
+	local TycoonService = Knit.GetService("TycoonService")
+	TycoonService:ClaimOfflineReward()
+		:andThen(function(success, err, reward)
+			offlineRewardRequestOpen = false
+			offlineRewardClaimed = true
+			if frame then
+				OpenFrame.Toggle(frame, false)
+			end
+
+			if success then
+				self:ShowOfflineRewardMessage(reward or 0)
+			elseif err and err ~= "No reward" then
+				warn("[MainGuiController] Offline reward failed:", err)
+			end
+		end)
+		:catch(function(err)
+			offlineRewardRequestOpen = false
+			if frame then
+				OpenFrame.Toggle(frame, false)
+			end
+			warn("[MainGuiController] Offline reward failed:", err)
+		end)
+end
+
+function MainGuiController:setupOfflineEarningFrame()
+	self:clearOfflineRewardConnections()
+
+	local frame = self:getOfflineEarningFrame()
+	if not frame then
+		return
+	end
+
+	frame.Visible = false
+	OpenFrame.SetupFrame(frame)
+
+	local topBar = frame:FindFirstChild("TopBar")
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true)
+	if closeButton and closeButton:IsA("GuiObject") then
+		self:connectOfflineRewardGuiActivated(closeButton, function()
+			self:claimOfflineReward(frame)
+		end)
+	end
+
+	local claimButton = frame:FindFirstChild("Claim", true)
+	if claimButton and claimButton:IsA("GuiObject") then
+		self:connectOfflineRewardGuiActivated(claimButton, function()
+			self:claimOfflineReward(frame)
+		end)
+	end
+end
+
+function MainGuiController:showOfflineEarningAfterDelay()
+	if offlineRewardClaimed then
+		return
+	end
+
+	local offlineConfig = TycoonConfig.OfflineReward or {}
+	task.delay(tonumber(offlineConfig.ClaimPopupDelay) or 20, function()
+		if offlineRewardClaimed then
+			return
+		end
+
+		local frame = self:getOfflineEarningFrame()
+		if not frame then
+			return
+		end
+
+		local TycoonService = Knit.GetService("TycoonService")
+		TycoonService:GetOfflineReward()
+			:andThen(function(success, payload)
+				if not success or type(payload) ~= "table" or payload.Eligible ~= true then
+					return
+				end
+
+				self:updateOfflineEarningFrame(payload)
+				OpenFrame.Toggle(frame, true)
+			end)
+			:catch(function(err)
+				warn("[MainGuiController] Failed to get offline reward:", err)
+			end)
+	end)
 end
 
 function MainGuiController:setupShopFrame()
@@ -1386,6 +1574,7 @@ function MainGuiController:updateAll(instant: boolean?)
 	self:setupHomeIcon()
 	self:setupShopFrame()
 	self:setupRebirthFrame()
+	self:setupOfflineEarningFrame()
 
 	if instant then
 		animationTokens.ManaBag += 1
@@ -1410,6 +1599,7 @@ function MainGuiController:KnitStart()
 	self:setupHomeIcon()
 	self:setupShopFrame()
 	self:setupRebirthFrame()
+	self:setupOfflineEarningFrame()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, productId, wasPurchased)
 		if isLocalProductPromptFinished(firstArg) then
@@ -1438,6 +1628,7 @@ function MainGuiController:KnitStart()
 		self:updateAll()
 		self:refreshSettingsEntitlements()
 		self:setupFavoritePrompt()
+		self:showOfflineEarningAfterDelay()
 
 		PlayerDataController:Observe("ManaInBag", function()
 			self:updateManaBag()
@@ -1465,11 +1656,14 @@ function MainGuiController:KnitStart()
 	playerGui.ChildAdded:Connect(function(child)
 		if child.Name == "MainGui" then
 			task.defer(function()
+				doubleYenOfferCache = nil
+				doubleYenOfferScannedGui = nil
 				self:updateAll(true)
 				self:setupSettingsIcon()
 				self:setupSettingsFrame()
 				self:setupShopFrame()
 				self:setupRebirthFrame()
+				self:setupOfflineEarningFrame()
 			end)
 		end
 	end)

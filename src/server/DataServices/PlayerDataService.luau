@@ -141,6 +141,11 @@ local function ensureManaData(data: { [string]: any })
 	end
 	data.LastGroupRewardClaimAt = math.max(math.floor(data.LastGroupRewardClaimAt), 0)
 
+	if type(data.LastLogoutAt) ~= "number" then
+		data.LastLogoutAt = 0
+	end
+	data.LastLogoutAt = math.max(math.floor(data.LastLogoutAt), 0)
+
 	if type(data.FavoritePromptShown) ~= "boolean" then
 		data.FavoritePromptShown = false
 	end
@@ -287,12 +292,15 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.8",
+		profileStoreIndex = "CFB_PlayerData.9",
 	})
 end
 
 function PlayerDataService:KnitStart()
 	game:GetService("Players").PlayerRemoving:Connect(function(player)
+		pcall(function()
+			PlayerDataService:Set(player, "LastLogoutAt", os.time())
+		end)
 		leaderstatValues[player] = nil
 	end)
 end
