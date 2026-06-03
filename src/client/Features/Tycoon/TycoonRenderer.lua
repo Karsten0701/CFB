@@ -344,6 +344,15 @@ function TycoonRenderer:getDropInterval(): number
 	return if self.entitlements.DoubleDropSpeed then DOUBLE_DROP_SPEED_INTERVAL else DROP_INTERVAL
 end
 
+function TycoonRenderer:getManaRewardMultiplier(): number
+	local multiplier = tonumber(self.entitlements.ManaMultiplier) or 1
+	if multiplier <= 0 then
+		return 1
+	end
+
+	return multiplier
+end
+
 function TycoonRenderer:getUnitDropPhase(unitIndex: number, interval: number): number
 	local phase = (unitIndex * DROP_STAGGER_HASH) % 1
 	return phase * interval
@@ -876,7 +885,7 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 
 	local value = tonumber(orb:GetAttribute("DropValue") or orb:GetAttribute("Value") or entry.Value) or 1
 	local container = entry.Instance or orb
-	local displayValue = if self.entitlements.DoubleMana then value * 2 else value
+	local displayValue = value * self:getManaRewardMultiplier()
 	SoundUtil.Pickup()
 	self:showPickupBillboard(orb.Position, displayValue)
 	self:animatePickupOrb(orb)

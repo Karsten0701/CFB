@@ -11,9 +11,11 @@ local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Loading = require(ReplicatedStorage.Shared.Performance.Loading)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
 local ShowOther = require(ReplicatedStorage.Shared.Performance.ShowOther)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
+local DepositVFX = require(script.Parent.Parent.Parent.Features.Tycoon.DepositVFX)
 local TycoonRenderer = require(script.Parent.Parent.Parent.Features.Tycoon.TycoonRenderer)
 local TycoonUtil = require(ReplicatedStorage.Shared.Features.Tycoon.TycoonUtil)
 local Janitor = require(ReplicatedStorage.Packages.janitor)
@@ -29,7 +31,7 @@ local buttonActions: { [BasePart]: { kind: string, amount: number?, buttonName: 
 local buttonModelsByTycoon: { [Instance]: { Model } } = {}
 local buttonDisplayCache: { [Instance]: { [string]: any } } = {}
 local buttonInfoCache: { [Instance]: { [string]: any } } = {}
-local buyUnitTierCache: { [Instance]: { [string]: number } } = {}
+local buyUnitTierCache: { [Instance]: number } = {}
 local lastActionAt: { [BasePart]: number } = {}
 local wasStandingOnButton: { [BasePart]: boolean } = {}
 local standingLoopConnection: RBXScriptConnection? = nil
@@ -360,7 +362,7 @@ local function getBuyUnitTier(buttonModel: Instance?): number
 		return tier
 	end
 
-	buyUnitTierCache[buttonModel] = { ["Default"] = 1 }
+	buyUnitTierCache[buttonModel] = 1
 	return 1
 end
 
@@ -446,12 +448,31 @@ local function mergeEntitlementsWithSettings(
 	settings: { [string]: any }?
 ): { [string]: boolean }
 	local merged = table.clone(entitlements or {})
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local upgrades = PlayerDataController:Get("RebirthUpgrades")
+	local moreManaLevel = if type(upgrades) == "table" then upgrades.MoreMana else 0
+	local purchasedProducts = PlayerDataController:Get("PurchasedProducts")
+	merged.ManaMultiplier = RebirthUpgrades.getManaMultiplier(moreManaLevel)
+	if merged.DoubleMana == true or (type(purchasedProducts) == "table" and purchasedProducts.DoubleMana == true) then
+		merged.ManaMultiplier *= 2
+	end
+
 	if type(settings) == "table" then
 		merged.AutoCollect = settings.AutoCollect == true
 		merged.AutoDeposit = settings.AutoDeposit == true
 	end
 
 	return merged
+end
+
+local function getCurrentUnitSpawnTier(PlayerDataController): number
+	local upgrades = PlayerDataController:Get("RebirthUpgrades")
+	local unitSpawnTierLevel = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
+	return RebirthUpgrades.getUnitSpawnTier(unitSpawnTierLevel)
+end
+
+local function getDepositProcessInterval(): number
+	return if monetizationEntitlements.DoubleDeposit then 0.5 else 1
 end
 
 function TycoonController:updateProcesserDisplay(tycoon: Instance)
@@ -469,8 +490,30 @@ function TycoonController:updateProcesserDisplay(tycoon: Instance)
 	end
 
 	if rateLabel then
-		local intervalText = if monetizationEntitlements.DoubleDeposit then "0.5s" else "1s"
+		local intervalText = tostring(getDepositProcessInterval()) .. "s"
 		rateLabel.Text = "Rate: " .. FormatUtil.formatNumber(math.floor(rate)) .. "/" .. intervalText
+	end
+end
+
+function TycoonController:updateDepositVFX(tycoon: Instance, newDepositValue: number?)
+	local entry = renderers[tycoon]
+	if not entry or not entry.depositVFX then
+		return
+	end
+
+	local newDeposit = math.max(math.floor(newDepositValue or 0), 0)
+	local previousDeposit = entry.lastObservedDeposit
+	entry.lastObservedDeposit = newDeposit
+
+	if previousDeposit == nil then
+		entry.depositVFX:setProcessorActive(newDeposit > 0, getDepositProcessInterval())
+		return
+	end
+
+	entry.depositVFX:setProcessorActive(newDeposit > 0, getDepositProcessInterval())
+
+	if newDeposit > previousDeposit then
+		entry.depositVFX:playDeposit(newDeposit - previousDeposit)
 	end
 end
 
@@ -506,6 +549,11 @@ function TycoonController:applyEntitlementsToOwnTycoon(autoEnableSetting: string
 			entry.lastAutoCollect = autoCollect
 			entry.lastAutoDeposit = autoDeposit
 			entry.renderer:setEntitlements(mergeEntitlementsWithSettings(monetizationEntitlements, settings))
+		end
+
+		if entry.depositVFX then
+			local deposit = PlayerDataController:Get("ManaInDeposit") or 0
+			entry.depositVFX:setProcessorActive(deposit > 0, getDepositProcessInterval())
 		end
 
 		self:updateProcesserDisplay(tycoon)
@@ -580,7 +628,8 @@ end
 
 function TycoonController:updateButtonPrices(tycoon: Instance)
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local baseUnitCount = Pricing.getBaseUnitCount(PlayerDataController:Get("Units") or {})
+	local baseUnitCount = math.max(math.floor(PlayerDataController:Get("TotalUnitsPurchased") or 0), 0)
+	local buyUnitTier = getCurrentUnitSpawnTier(PlayerDataController)
 	local rateLevel = PlayerDataController:Get("RateLevel") or 0
 	local yen = PlayerDataController:Get("Yen") or 0
 	local buttonModels = buttonModelsByTycoon[tycoon]
@@ -607,7 +656,7 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 		if robuxBuyAmount then
 			local display = getButtonDisplay(child)
 			if display.Amount and display.Amount.Parent then
-				display.Amount.Text = getBuyUnitText(robuxBuyAmount, getBuyUnitTier(child))
+				display.Amount.Text = getBuyUnitText(robuxBuyAmount, buyUnitTier)
 			end
 			continue
 		end
@@ -621,7 +670,7 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			end
 
 			if display.Amount and display.Amount.Parent then
-				display.Amount.Text = getBuyUnitText(maxAmount, getBuyUnitTier(child))
+				display.Amount.Text = getBuyUnitText(maxAmount, buyUnitTier)
 			end
 
 			continue
@@ -635,7 +684,7 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			end
 
 			if display.Amount and display.Amount.Parent then
-				display.Amount.Text = getBuyUnitText(buyAmount, getBuyUnitTier(child))
+				display.Amount.Text = getBuyUnitText(buyAmount, buyUnitTier)
 			end
 		end
 
@@ -749,10 +798,10 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "rate" and action.amount then
-		TycoonService:UpgradeRate(action.amount, action.buttonName):andThen(function(success, err, gain)
+		TycoonService:UpgradeRate(action.amount, action.buttonName):andThen(function(success, err, boughtAmount, gain)
 			if success then
 				local MainGuiController = Knit.GetController("MainGuiController")
-				MainGuiController:ShowRateUpgradeMessage(gain or 0)
+				MainGuiController:ShowRateUpgradeMessage(gain or 0, boughtAmount or action.amount)
 			elseif err == "Not enough yen" then
 				SoundUtil.Error()
 			elseif err then
@@ -760,10 +809,10 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "rate_max" then
-		TycoonService:UpgradeRateMax(action.buttonName):andThen(function(success, err, _amount, gain)
+		TycoonService:UpgradeRateMax(action.buttonName):andThen(function(success, err, amount, gain)
 			if success then
 				local MainGuiController = Knit.GetController("MainGuiController")
-				MainGuiController:ShowRateUpgradeMessage(gain or 0)
+				MainGuiController:ShowRateUpgradeMessage(gain or 0, amount or 0)
 			elseif err == "Not enough yen" then
 				SoundUtil.Error()
 			elseif err and err ~= "Not enough yen" then
@@ -771,14 +820,12 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "deposit" then
-		local PlayerDataController = Knit.GetController("PlayerDataController")
-		local depositAmount = PlayerDataController:Get("ManaInBag") or 0
-		TycoonService:DepositMana():andThen(function(success, err)
+		TycoonService:DepositMana():andThen(function(success, err, depositedAmount)
 			if not success and err and err ~= "Nothing to deposit" then
 				warn("[TycoonController] Deposit failed:", err)
 			elseif success then
 				local MainGuiController = Knit.GetController("MainGuiController")
-				MainGuiController:ShowDepositMessage(depositAmount)
+				MainGuiController:ShowDepositMessage(depositedAmount or 0)
 			end
 		end)
 	end
@@ -980,11 +1027,13 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 	renderer:setIsOwn(isOwn)
 	renderers[tycoon] = {
 		renderer = renderer,
+		depositVFX = if isOwn then DepositVFX.new(tycoon, janitor) else nil,
 		janitor = janitor,
 		isOwn = isOwn,
 		lastVisualRefreshAt = 0,
 		lastAutoCollect = nil,
 		lastAutoDeposit = nil,
+		lastObservedDeposit = nil,
 	}
 
 	if isOwn then
@@ -1045,6 +1094,11 @@ function TycoonController:setupOwnTycoon(): boolean
 	self:rebuildTycoon(tycoon, units)
 
 	local janitor = renderers[tycoon].janitor
+	local currentDeposit = math.max(math.floor(PlayerDataController:Get("ManaInDeposit") or 0), 0)
+	renderers[tycoon].lastObservedDeposit = currentDeposit
+	if renderers[tycoon].depositVFX then
+		renderers[tycoon].depositVFX:setProcessorActive(currentDeposit > 0, getDepositProcessInterval())
+	end
 
 	PlayerDataController:Observe("Units", function(newUnits)
 		self:rebuildTycoon(tycoon, newUnits or {})
@@ -1059,11 +1113,28 @@ function TycoonController:setupOwnTycoon(): boolean
 		self:updateButtonPrices(tycoon)
 	end, janitor)
 
+	PlayerDataController:Observe("TotalUnitsPurchased", function()
+		self:updateButtonPrices(tycoon)
+	end, janitor)
+
+	PlayerDataController:Observe({ "RebirthUpgrades", "UnitSpawnTier" }, function()
+		self:updateButtonPrices(tycoon)
+	end, janitor)
+
+	PlayerDataController:Observe({ "RebirthUpgrades", "MoreMana" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe({ "PurchasedProducts", "DoubleMana" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
 	PlayerDataController:Observe("LastGroupRewardClaimAt", function()
 		self:updateGroupRewardDisplay(tycoon)
 	end, janitor)
 
-	PlayerDataController:Observe("ManaInDeposit", function()
+	PlayerDataController:Observe("ManaInDeposit", function(newDeposit)
+		self:updateDepositVFX(tycoon, newDeposit)
 		self:updateProcesserDisplay(tycoon)
 	end, janitor)
 

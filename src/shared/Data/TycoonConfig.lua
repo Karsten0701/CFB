@@ -7,8 +7,6 @@ return {
 	AutoMergeThreshold = 100,
 	UnitPriceBase = 3,
 	UnitPriceIncrement = 3,
-	RateUpgradeBasePrice = 5,
-	RateUpgradeScale = 1.35,
 	StarterYen = 0,
 	StarterUnits = { { Tier = 1 } },
 	Rebirth = {

@@ -43,6 +43,18 @@ Monetization.DeveloperProducts = {
 		EntitlementKey = "DoubleYen",
 		DisplayName = "2x Yen",
 	},
+	StarterPack = {
+		ProductId = 3602430060,
+		Price = 79,
+		Kind = "StarterPack",
+		Units = {
+			{ Tier = 4 },
+		},
+		Gamepasses = {
+			"DoubleYen",
+		},
+		Yen = 10000,
+	},
 }
 
 Monetization.GamePasses = {

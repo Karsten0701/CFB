@@ -2,6 +2,7 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
 local MonetizationService = Knit.CreateService({
@@ -10,6 +11,12 @@ local MonetizationService = Knit.CreateService({
 })
 
 local gamePassCache: { [Player]: { [string]: boolean } } = {}
+
+local function setCachedProductEntitlement(player: Player, entitlementKey: string)
+	gamePassCache[player] = gamePassCache[player] or {}
+	gamePassCache[player][entitlementKey] = true
+	gamePassCache[player][entitlementKey .. "Product"] = true
+end
 
 function MonetizationService:GetEntitlements(player: Player): { [string]: boolean }
 	local cached = gamePassCache[player]
@@ -114,10 +121,48 @@ function MonetizationService:KnitStart()
 			success = true
 		elseif product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
 			PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
-			gamePassCache[player] = gamePassCache[player] or {}
-			gamePassCache[player][product.EntitlementKey] = true
-			gamePassCache[player][product.EntitlementKey .. "Product"] = true
+			setCachedProductEntitlement(player, product.EntitlementKey)
 			success = true
+		elseif product.Kind == "StarterPack" then
+			if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
+				success = true
+			else
+				local currentUnits = PlayerDataService:GetUnits(player)
+				local nextUnits = table.clone(currentUnits)
+				if type(product.Units) == "table" then
+					for _, unit in product.Units do
+						if type(unit) ~= "table" or #nextUnits >= TycoonConfig.MaxUnits then
+							continue
+						end
+
+						table.insert(nextUnits, {
+							Tier = unit.Tier or 1,
+						})
+					end
+				end
+
+				if #nextUnits ~= #currentUnits then
+					PlayerDataService:SetUnits(player, nextUnits)
+				end
+
+				if type(product.Yen) == "number" and product.Yen > 0 then
+					PlayerDataService:AddYen(player, product.Yen)
+				end
+
+				if type(product.Gamepasses) == "table" then
+					for _, entitlementKey in product.Gamepasses do
+						if type(entitlementKey) ~= "string" then
+							continue
+						end
+
+						PlayerDataService:Set(player, { "PurchasedProducts", entitlementKey }, true)
+						setCachedProductEntitlement(player, entitlementKey)
+					end
+				end
+
+				PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+				success = true
+			end
 		end
 
 		if not success then

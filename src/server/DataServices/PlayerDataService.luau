@@ -188,6 +188,12 @@ local function ensureManaData(data: { [string]: any })
 		data.PurchasedProducts = {}
 	end
 
+	if type(data.RebirthUpgrades) ~= "table" then
+		data.RebirthUpgrades = {}
+	end
+	data.RebirthUpgrades.UnitSpawnTier = math.max(math.floor(tonumber(data.RebirthUpgrades.UnitSpawnTier) or 0), 0)
+	data.RebirthUpgrades.MoreMana = math.max(math.floor(tonumber(data.RebirthUpgrades.MoreMana) or 0), 0)
+
 	if type(data.Settings) ~= "table" then
 		data.Settings = {}
 	end
@@ -316,7 +322,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.9",
+		profileStoreIndex = "CFB_PlayerData.11",
 	})
 end
 
@@ -427,7 +433,14 @@ local function isValidSetting(path: any, value: any): boolean
 		return false
 	end
 
-	if path == "AutoCollect" or path == "AutoDeposit" or path == "ShowOtherTycoons" or path == "ShowOthers" or path == "Sound" or path == "Music" then
+	if
+		path == "AutoCollect"
+		or path == "AutoDeposit"
+		or path == "ShowOtherTycoons"
+		or path == "ShowOthers"
+		or path == "Sound"
+		or path == "Music"
+	then
 		return type(value) == "boolean"
 	elseif path == "AutoMergeAt" then
 		return type(value) == "number" and value == value and value >= 0 and value <= 100

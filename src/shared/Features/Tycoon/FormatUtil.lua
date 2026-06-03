@@ -1,6 +1,6 @@
 local FormatUtil = {}
 
-local COMPACT_THRESHOLD = 1_000_000_000
+local COMPACT_THRESHOLD = 100_000_000
 local SUFFIXES = {
 	{ Value = 1e54, Suffix = "SpDe" },
 	{ Value = 1e51, Suffix = "SxDe" },
