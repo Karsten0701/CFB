@@ -1025,6 +1025,12 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 
 	local renderer = TycoonRenderer.new(tycoon, janitor, onPickup)
 	renderer:setIsOwn(isOwn)
+	if isOwn then
+		local CapsuleController = Knit.GetController("CapsuleController")
+		renderer:setOnManaDropSpawned(function(dropPart: BasePart, onResult: (boolean) -> (), isCancelled: () -> boolean)
+			CapsuleController:trySpawnCapsuleFromDrop(dropPart, onResult, isCancelled)
+		end)
+	end
 	renderers[tycoon] = {
 		renderer = renderer,
 		depositVFX = if isOwn then DepositVFX.new(tycoon, janitor) else nil,
@@ -1060,6 +1066,22 @@ function TycoonController:rebuildTycoon(tycoon: Instance, units: { { Tier: numbe
 	end
 
 	entry.renderer:rebuild(units)
+end
+
+function TycoonController:GetOwnRenderer(): any?
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local tycoonName = PlayerDataController:Get("TycoonName")
+	if type(tycoonName) ~= "string" or tycoonName == "" then
+		return nil
+	end
+
+	local tycoon = TycoonUtil.getPlayerTycoon(localPlayer, tycoonName)
+	if not tycoon then
+		return nil
+	end
+
+	local entry = renderers[tycoon]
+	return if entry then entry.renderer else nil
 end
 
 function TycoonController:ClearOwnDrops()
@@ -1118,7 +1140,9 @@ function TycoonController:setupOwnTycoon(): boolean
 	end, janitor)
 
 	PlayerDataController:Observe({ "RebirthUpgrades", "UnitSpawnTier" }, function()
+		table.clear(buyUnitTierCache)
 		self:updateButtonPrices(tycoon)
+		self:rebuildTycoon(tycoon, PlayerDataController:Get("Units") or {})
 	end, janitor)
 
 	PlayerDataController:Observe({ "RebirthUpgrades", "MoreMana" }, function()

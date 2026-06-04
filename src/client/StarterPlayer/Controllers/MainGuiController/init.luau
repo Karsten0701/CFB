@@ -14,6 +14,8 @@ local OfflineFeature = require(script.Offline)
 local RebirthFeature = require(script.Rebirth)
 local SettingsFeature = require(script.Settings)
 local ShopFeature = require(script.Shop)
+local CapsuleFeature = require(script.Capsule)
+local TeleportFeature = require(script.Teleport)
 
 local MainGuiController = Knit.CreateController({
 	Name = "MainGuiController",
@@ -113,6 +115,8 @@ OfflineFeature.Install(MainGuiController)
 RebirthFeature.Install(MainGuiController)
 SettingsFeature.Install(MainGuiController)
 ShopFeature.Install(MainGuiController)
+CapsuleFeature.Install(MainGuiController)
+TeleportFeature.Install(MainGuiController)
 
 function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 	local mainGui = self:getMainGui()
@@ -328,6 +332,18 @@ function MainGuiController:ShowBoughtUnitsMessage(amount: number)
 	self:showMessage(
 		"BoughtUnits:" .. amount,
 		'You bought <font color="#47FF6A">' .. FormatUtil.formatNumber(amount) .. " Anime Units</font>"
+	)
+end
+
+function MainGuiController:ShowCapsuleRewardMessage(rewardTier: number?)
+	local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+	local tier = math.max(math.floor(rewardTier or 1), 1)
+	local tierData = AnimeDroppers.Tiers[tier]
+	local displayName = if tierData then tierData.DisplayName else ("Tier " .. tier)
+
+	self:showMessage(
+		"CapsuleReward:" .. tier,
+		'Capsule opened! You received <font color="#FF8BE7">' .. displayName .. "</font>"
 	)
 end
 
@@ -617,6 +633,8 @@ function MainGuiController:KnitStart()
 	self:setupUpgradesFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
+	self:setupOpenCapsuleFrame()
+	self:setupTeleportFrame()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, productId, wasPurchased)
 		self:onShopProductPromptFinished(firstArg, productId, wasPurchased)
@@ -697,6 +715,8 @@ function MainGuiController:KnitStart()
 				self:setupUpgradesFrame()
 				self:setupOfflineEarningFrame()
 				self:setupIndexFrame()
+				self:setupOpenCapsuleFrame()
+				self:setupTeleportFrame()
 			end)
 		end
 	end)

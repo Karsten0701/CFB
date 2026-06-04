@@ -179,6 +179,26 @@ local function setDropPhysics(part: BasePart, value: number)
 	part.CustomPhysicalProperties = PhysicalProperties.new(0.4, 0.35, 0.15)
 end
 
+local function prepareDropPickup(dropInstance: Instance, pickupPart: BasePart, value: number)
+	setDropPhysics(pickupPart, value)
+
+	for _, descendant in dropInstance:GetDescendants() do
+		if descendant:IsA("BasePart") and descendant ~= pickupPart then
+			descendant.Anchored = false
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.Massless = true
+			descendant.CollisionGroup = DROP_COLLISION_GROUP
+
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = "DropAssemblyWeld"
+			weld.Part0 = pickupPart
+			weld.Part1 = descendant
+			weld.Parent = pickupPart
+		end
+	end
+end
+
 local function getAdorneePart(model: Model): BasePart?
 	local head = model:FindFirstChild("Head", true)
 	if head and head:IsA("BasePart") then
@@ -317,6 +337,7 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.pickupAnimationConnection = nil
 	self.pickupAnimations = {}
 	self.dropLoopConnection = nil
+	self.onManaDropSpawned = nil
 	self.nextMutationAt = os.clock()
 		+ (TycoonConfig.Mutations and TycoonConfig.Mutations.Interval or DEFAULT_MUTATION_INTERVAL)
 	return self
@@ -870,7 +891,42 @@ function TycoonRenderer:getWeightedMutationEntry()
 	return candidates[#candidates].Entry
 end
 
+function TycoonRenderer:registerPossibleDrop(pickupPart: BasePart, container: Instance, dropPart: BasePart?)
+	if not self.isOwn or not pickupPart or not pickupPart.Parent then
+		return
+	end
+
+	self:ensurePickupLoop()
+	pickupPart:SetAttribute("IsPossibleDrop", true)
+	pickupPart:SetAttribute("IsCapsule", true)
+	pickupPart:SetAttribute("DropValue", nil)
+	pickupPart:SetAttribute("Value", nil)
+
+	self.activeOrbs[pickupPart] = {
+		Instance = container,
+		IsPossibleDrop = true,
+		DropPart = dropPart,
+	}
+end
+
+function TycoonRenderer:unregisterPossibleDrop(pickupPart: BasePart?)
+	if not pickupPart then
+		return
+	end
+
+	self.activeOrbs[pickupPart] = nil
+	local touchConnection = self.dropTouchConnections[pickupPart]
+	if touchConnection then
+		touchConnection:Disconnect()
+		self.dropTouchConnections[pickupPart] = nil
+	end
+end
+
 function TycoonRenderer:pickupOrb(orb: BasePart)
+	if orb:GetAttribute("IsCapsule") == true or orb:GetAttribute("IsPossibleDrop") == true then
+		return
+	end
+
 	local entry = self.activeOrbs[orb]
 	if not entry then
 		return
@@ -1073,6 +1129,10 @@ function TycoonRenderer:ensurePickupLoop()
 	end)
 end
 
+function TycoonRenderer:setOnManaDropSpawned(handler: ((BasePart, (boolean) -> (), () -> boolean) -> ())?)
+	self.onManaDropSpawned = handler
+end
+
 function TycoonRenderer:isLocalCharacterPart(part: BasePart): boolean
 	local character = Players.LocalPlayer.Character
 	return character ~= nil and part:IsDescendantOf(character)
@@ -1108,14 +1168,7 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 		return false
 	end
 
-	for _, descendant in dropInstance:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			setDropPhysics(descendant, value)
-		end
-	end
-	if dropInstance:IsA("BasePart") then
-		setDropPhysics(dropInstance, value)
-	end
+	prepareDropPickup(dropInstance, pickupPart, value)
 
 	if dropInstance:IsA("Model") then
 		dropInstance:PivotTo(dropPart.CFrame + Vector3.new(0, 1.5, 0))
@@ -1135,6 +1188,10 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 			return
 		end
 
+		if hit:GetAttribute("IsCapsule") == true or hit:GetAttribute("IsPossibleDrop") == true then
+			return
+		end
+
 		if self:isLocalCharacterPart(hit) then
 			self:pickupOrb(pickupPart)
 			return
@@ -1151,6 +1208,43 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 	end)
 
 	return true
+end
+
+function TycoonRenderer:trySpawnManaDrop(dropPart: BasePart, tier: number, value: number, skipPrune: boolean?): boolean
+	if not self.onManaDropSpawned then
+		return self:spawnManaDrop(dropPart, tier, value, skipPrune)
+	end
+
+	local settled = false
+	local spawnCapsule = false
+
+	local function settle(replaced: boolean)
+		if settled then
+			return
+		end
+
+		settled = true
+		spawnCapsule = replaced
+	end
+
+	self.onManaDropSpawned(dropPart, settle, function()
+		return settled
+	end)
+
+	local deadline = os.clock() + 0.35
+	while not settled and os.clock() < deadline do
+		RunService.Heartbeat:Wait()
+	end
+
+	if not settled then
+		settled = true
+	end
+
+	if spawnCapsule then
+		return true
+	end
+
+	return self:spawnManaDrop(dropPart, tier, value, skipPrune)
 end
 
 function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
@@ -1195,14 +1289,7 @@ function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
 		return false
 	end
 
-	for _, descendant in dropInstance:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			setDropPhysics(descendant, value)
-		end
-	end
-	if dropInstance:IsA("BasePart") then
-		setDropPhysics(dropInstance, value)
-	end
+	prepareDropPickup(dropInstance, pickupPart, value)
 
 	local spawnCFrame = entry.DropPart.CFrame + Vector3.new(0, 1.5, 0)
 	if dropInstance:IsA("Model") then
@@ -1223,6 +1310,10 @@ function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
 	}
 	self.dropTouchConnections[pickupPart] = pickupPart.Touched:Connect(function(hit)
 		if not self.activeOrbs[pickupPart] then
+			return
+		end
+
+		if hit:GetAttribute("IsCapsule") == true or hit:GetAttribute("IsPossibleDrop") == true then
 			return
 		end
 
@@ -1284,7 +1375,7 @@ function TycoonRenderer:ensureDropLoop()
 			end
 
 			self:scheduleUnitDrop(entry, unitIndex, now)
-			if now < (entry.NextDropAt or now + interval) then
+			if entry.DropSpawnPending or now < (entry.NextDropAt or now + interval) then
 				continue
 			end
 
@@ -1294,19 +1385,16 @@ function TycoonRenderer:ensureDropLoop()
 				continue
 			end
 
-			if self:spawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1, true) then
+			entry.DropSpawnPending = true
+			entry.NextDropAt = now + interval
+
+			if self:trySpawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1, true) then
 				spawnedThisFrame += 1
 				activeDropCount += 1
 				spawnBudget -= 1
 			end
 
-			repeat
-				entry.NextDropAt += interval
-			until entry.NextDropAt > now
-
-			if entry.NextDropAt - now > interval then
-				entry.NextDropAt = now + interval
-			end
+			entry.DropSpawnPending = false
 		end
 	end)
 end

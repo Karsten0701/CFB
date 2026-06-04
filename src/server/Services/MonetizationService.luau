@@ -123,6 +123,8 @@ function MonetizationService:KnitStart()
 			PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
 			setCachedProductEntitlement(player, product.EntitlementKey)
 			success = true
+		elseif product.Kind == "OpenCapsule" then
+			success = TycoonService:OpenPendingCapsulePurchase(player)
 		elseif product.Kind == "StarterPack" then
 			if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
 				success = true

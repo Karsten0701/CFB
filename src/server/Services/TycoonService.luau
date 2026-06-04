@@ -1,9 +1,11 @@
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local PhysicsService = game:GetService("PhysicsService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
 local Merge = require(ReplicatedStorage.Shared.Features.Tycoon.Merge)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
@@ -28,6 +30,11 @@ local processElapsed: { [Player]: number } = {}
 local visualDataRequestAt: { [Player]: { [string]: number } } = {}
 local pickupBlockedUntil: { [Player]: number } = {}
 local pendingOfflineRewards: { [Player]: any } = {}
+local activeCapsules: { [Player]: { [string]: any } } = {}
+local lastCapsuleSpawnAt: { [Player]: number } = {}
+local lastAmbientCapsuleAt: { [Player]: number } = {}
+local pendingCapsuleRobux: { [Player]: string } = {}
+local lastCapsuleRewardTier: { [Player]: number } = {}
 
 local PROCESS_INTERVAL = 1
 local DROP_INTERVAL = 6
@@ -354,9 +361,10 @@ local function addTierOneUnits(
 		end
 
 		local count = counts[tier] or 0
-		local mergeCount = math.floor(count / TycoonConfig.MergeRatio)
+		local mergeRatio = AnimeDroppers.getMergeRatio(tier)
+		local mergeCount = math.floor(count / mergeRatio)
 		if mergeCount > 0 then
-			counts[tier] = count - mergeCount * TycoonConfig.MergeRatio
+			counts[tier] = count - mergeCount * mergeRatio
 			counts[targetTier] = (counts[targetTier] or 0) + mergeCount
 		end
 	end
@@ -613,6 +621,25 @@ function TycoonService.Client:TeleportHome(player: Player): (boolean, string?)
 
 	if not tycoon then
 		return false, "No tycoon"
+	end
+
+	TycoonUtil.teleportToSpawn(player, tycoon)
+	return true
+end
+
+function TycoonService.Client:TeleportToTycoon(player: Player, tycoonName: string): (boolean, string?)
+	if type(tycoonName) ~= "string" or tycoonName == "" then
+		return false, "Invalid tycoon"
+	end
+
+	local tycoon = TycoonUtil.getTycoonByName(tycoonName)
+	if not tycoon or tycoon:GetAttribute("Claimed") ~= true then
+		return false, "Not available"
+	end
+
+	local ownerUserId = tonumber(tycoon:GetAttribute("Owner")) or 0
+	if ownerUserId <= 0 then
+		return false, "Not available"
 	end
 
 	TycoonUtil.teleportToSpawn(player, tycoon)
@@ -976,18 +1003,10 @@ function TycoonService.Client:BuyRebirthUpgrade(player: Player, upgradeKey: stri
 	PlayerDataService:Set(player, { "RebirthUpgrades", upgradeKey }, nextLevel)
 
 	if upgradeKey == "UnitSpawnTier" then
-		local spawnTier = RebirthUpgrades.getUnitSpawnTier(nextLevel)
 		local units = PlayerDataService:GetUnits(player)
-		local changed = false
-		for _, unit in units do
-			if (unit.Tier or 1) < spawnTier then
-				unit.Tier = spawnTier
-				changed = true
-			end
-		end
-
+		local upgradedUnits, changed = RebirthUpgrades.upgradeUnitsForSpawnTier(units, currentLevel, nextLevel)
 		if changed then
-			PlayerDataService:SetUnits(player, units)
+			PlayerDataService:SetUnits(player, upgradedUnits)
 		end
 	end
 
@@ -1111,6 +1130,184 @@ function TycoonService.Client:ClaimGroupReward(player: Player, buttonName: strin
 	return true, nil, reward, getGroupRewardRemaining(now, now)
 end
 
+local function getCapsuleConfig()
+	return TycoonConfig.Capsules or {}
+end
+
+local function getActiveCapsuleCount(player: Player): number
+	local capsules = activeCapsules[player]
+	if not capsules then
+		return 0
+	end
+
+	local count = 0
+	for _, capsule in capsules do
+		if capsule ~= nil then
+			count += 1
+		end
+	end
+
+	return count
+end
+
+local function grantCapsuleUnit(player: Player, tier: number): (boolean, string?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local currentUnits = PlayerDataService:GetUnits(player)
+	if #currentUnits >= TycoonConfig.MaxUnits then
+		return false, "Unit cap reached"
+	end
+
+	local normalizedTier = math.clamp(math.floor(tier), 1, AnimeDroppers.MaxTier)
+	local nextUnits = Merge.makeRoom(currentUnits, 1)
+	table.insert(nextUnits, {
+		Tier = normalizedTier,
+	})
+	nextUnits = Merge.autoMerge(nextUnits)
+	PlayerDataService:SetUnits(player, nextUnits)
+	return true
+end
+
+local function createCapsuleEntry(player: Player): (boolean, any?)
+	local config = getCapsuleConfig()
+	local maxActive = math.max(math.floor(tonumber(config.MaxActiveCapsules) or 6), 1)
+	if getActiveCapsuleCount(player) >= maxActive then
+		return false
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local units = PlayerDataService:GetUnits(player)
+	local highestTier = CapsuleUtil.getHighestUnitTier(units)
+	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
+	local capsuleId = HttpService:GenerateGUID(false)
+
+	activeCapsules[player] = activeCapsules[player] or {}
+	activeCapsules[player][capsuleId] = {
+		HighestTier = highestTier,
+		PreviewTiers = previewTiers,
+		OpenPrice = CapsuleUtil.getOpenPrice(highestTier),
+		CreatedAt = os.clock(),
+	}
+
+	return true, {
+		Id = capsuleId,
+		PreviewTiers = previewTiers,
+		OpenPrice = CapsuleUtil.getOpenPrice(highestTier),
+		HighestTier = highestTier,
+	}
+end
+
+function TycoonService:OpenCapsuleForPlayer(player: Player, capsuleId: string, spentYen: boolean): (boolean, string?, number?)
+	local capsules = activeCapsules[player]
+	local capsule = if capsules then capsules[capsuleId] else nil
+	if not capsule then
+		return false, "Unknown capsule"
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	if spentYen then
+		if not PlayerDataService:TrySpendYen(player, capsule.OpenPrice) then
+			return false, "Not enough yen"
+		end
+	end
+
+	local rewardTier = CapsuleUtil.rollRewardTier(capsule.HighestTier)
+	local granted, grantErr = grantCapsuleUnit(player, rewardTier)
+	if not granted then
+		if spentYen then
+			PlayerDataService:AddYen(player, capsule.OpenPrice)
+		end
+		return false, grantErr
+	end
+
+	capsules[capsuleId] = nil
+	lastCapsuleRewardTier[player] = rewardTier
+	return true, nil, rewardTier
+end
+
+function TycoonService.Client:GetLastCapsuleReward(player: Player): number?
+	return lastCapsuleRewardTier[player]
+end
+
+function TycoonService:OpenPendingCapsulePurchase(player: Player): boolean
+	local capsuleId = pendingCapsuleRobux[player]
+	pendingCapsuleRobux[player] = nil
+	if not capsuleId then
+		return false
+	end
+
+	local success = self:OpenCapsuleForPlayer(player, capsuleId, false)
+	return success
+end
+
+function TycoonService.Client:RequestCapsuleDrop(player: Player): (boolean, any?)
+	local config = getCapsuleConfig()
+	local now = os.clock()
+	local cooldown = tonumber(config.SpawnCooldown) or 30
+	if now - (lastCapsuleSpawnAt[player] or 0) < cooldown then
+		return false
+	end
+
+	local spawnChance = tonumber(config.SpawnChance) or 0.01
+	if math.random() > spawnChance then
+		return false
+	end
+
+	lastCapsuleSpawnAt[player] = now
+	return createCapsuleEntry(player)
+end
+
+function TycoonService.Client:RequestAmbientCapsule(player: Player): (boolean, any?)
+	local config = getCapsuleConfig()
+	local now = os.clock()
+	local interval = tonumber(config.AmbientSpawnInterval) or 120
+	if now - (lastAmbientCapsuleAt[player] or 0) < interval then
+		return false
+	end
+
+	lastAmbientCapsuleAt[player] = now
+	return createCapsuleEntry(player)
+end
+
+function TycoonService.Client:PrepareCapsuleRobuxOpen(player: Player, capsuleId: string): boolean
+	if type(capsuleId) ~= "string" or capsuleId == "" then
+		return false
+	end
+
+	local capsules = activeCapsules[player]
+	if not capsules or not capsules[capsuleId] then
+		return false
+	end
+
+	pendingCapsuleRobux[player] = capsuleId
+	return true
+end
+
+function TycoonService.Client:OpenCapsule(player: Player, capsuleId: string): (boolean, string?, number?)
+	if type(capsuleId) ~= "string" or capsuleId == "" then
+		return false, "Invalid capsule"
+	end
+
+	return self.Server:OpenCapsuleForPlayer(player, capsuleId, true)
+end
+
+function TycoonService.Client:DismissCapsule(player: Player, capsuleId: string): boolean
+	if type(capsuleId) ~= "string" or capsuleId == "" then
+		return false
+	end
+
+	local capsules = activeCapsules[player]
+	if not capsules or not capsules[capsuleId] then
+		return false
+	end
+
+	capsules[capsuleId] = nil
+	if pendingCapsuleRobux[player] == capsuleId then
+		pendingCapsuleRobux[player] = nil
+	end
+
+	return true
+end
+
 function TycoonService:KnitStart()
 	setupCollisionGroups()
 
@@ -1134,6 +1331,11 @@ function TycoonService:KnitStart()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
+		activeCapsules[player] = nil
+		lastCapsuleSpawnAt[player] = nil
+		lastAmbientCapsuleAt[player] = nil
+		pendingCapsuleRobux[player] = nil
+		lastCapsuleRewardTier[player] = nil
 		self:ReleaseTycoon(player)
 	end)
 

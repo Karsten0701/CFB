@@ -15,6 +15,40 @@ function RebirthUpgrades.getUnitSpawnTier(level: number): number
 	return math.clamp(math.floor(level or 0) + 1, 1, RebirthUpgrades.UnitSpawnTier.MaxLevel + 1)
 end
 
+function RebirthUpgrades.upgradeUnitsForSpawnTier(
+	units: { { Tier: number, Slot: number? } },
+	previousLevel: number,
+	nextLevel: number
+): ({ { Tier: number, Slot: number? } }, boolean)
+	local previousSpawnTier = RebirthUpgrades.getUnitSpawnTier(previousLevel)
+	local newSpawnTier = RebirthUpgrades.getUnitSpawnTier(nextLevel)
+	if newSpawnTier <= previousSpawnTier then
+		return units, false
+	end
+
+	local changed = false
+	local nextUnits = table.create(#units)
+
+	for _, unit in units do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		local tier = math.clamp(math.floor(tonumber(unit.Tier) or 1), 1, newSpawnTier)
+		if tier == previousSpawnTier and tier < newSpawnTier then
+			tier = newSpawnTier
+			changed = true
+		end
+
+		table.insert(nextUnits, {
+			Tier = tier,
+			Slot = unit.Slot,
+		})
+	end
+
+	return nextUnits, changed
+end
+
 function RebirthUpgrades.getManaMultiplier(level: number): number
 	level = math.clamp(math.floor(level or 0), 0, RebirthUpgrades.MoreMana.MaxLevel)
 	return 1 + level * RebirthUpgrades.MoreMana.MultiplierPerLevel

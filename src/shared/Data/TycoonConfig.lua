@@ -38,7 +38,7 @@ return {
 	OfflineReward = {
 		MinimumOfflineSeconds = 60 * 60,
 		ClaimPopupDelay = 5,
-		RewardMultiplier = 0.25,
+		RewardMultiplier = 0.05,
 		MaxOfflineSeconds = 24 * 60 * 60,
 	},
 	FavoritePrompt = {
@@ -50,4 +50,26 @@ return {
 	ButtonTag = "Button",
 	BuyButtonPrefix = "Buy",
 	RateButtonPrefix = "Rate",
+	Capsules = {
+		SpawnChance = 0.01,
+		SpawnCooldown = 30,
+		AmbientSpawnInterval = 120,
+		UnitScale = 0.2,
+		RevealScale = 0.5,
+		MaxActiveCapsules = 4,
+		CapsuleLifetime = 180,
+		OpenDistance = 14,
+		OpenPriceMultiplier = 50,
+		MinOpenPrice = 250,
+		AssetsPath = { "Assets", "Drops" },
+		CapsuleModelName = "Capsule",
+		AssemblyRootName = "Capsule",
+		SpawnYOffset = 1.5,
+		SlotNames = { "unit1", "unit2", "unit3" },
+		TierWeights = {
+			{ Offset = -1, Chance = 0.75 },
+			{ Offset = 0, Chance = 0.20 },
+			{ Offset = 1, Chance = 0.05 },
+		},
+	},
 }

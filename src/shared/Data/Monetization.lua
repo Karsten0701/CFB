@@ -36,6 +36,11 @@ Monetization.DeveloperProducts = {
 		Price = 19,
 		Kind = "SellAll",
 	},
+	OpenCapsule = {
+		ProductId = 3605000000,
+		Price = 49,
+		Kind = "OpenCapsule",
+	},
 	DoubleYen = {
 		ProductId = 3601297598,
 		Price = 5,

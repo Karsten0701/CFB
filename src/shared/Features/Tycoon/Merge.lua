@@ -47,11 +47,12 @@ function Merge.runOnce(units: { { Tier: number } }): ({ { Tier: number } }, bool
 		end
 
 		local count = counts[tier] or 0
-		local mergeCount = math.floor(count / TycoonConfig.MergeRatio)
+		local mergeRatio = AnimeDroppers.getMergeRatio(tier)
+		local mergeCount = math.floor(count / mergeRatio)
 		if mergeCount > 0 then
-			counts[tier] = count - mergeCount * TycoonConfig.MergeRatio
+			counts[tier] = count - mergeCount * mergeRatio
 			counts[targetTier] = (counts[targetTier] or 0) + mergeCount
-			mergedUnitCount += mergeCount * TycoonConfig.MergeRatio
+			mergedUnitCount += mergeCount * mergeRatio
 			changed = true
 		end
 	end

@@ -1,4 +1,5 @@
 local _Players = game:GetService("Players")
+local player = _Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
@@ -10,6 +11,8 @@ local SprintController = Knit.CreateController({
 })
 
 local sprinting = false
+local NormalWalkSpeed = 16
+local SprintWalkSpeed = 24
 
 function SprintController:KnitStart()
 	UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
@@ -18,6 +21,8 @@ function SprintController:KnitStart()
 		end
 		if input.KeyCode == Enum.KeyCode.LeftShift then
 			sprinting = true
+			local Humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+			Humanoid.WalkSpeed = SprintWalkSpeed
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input, gameProcessedEvent)
@@ -26,6 +31,8 @@ function SprintController:KnitStart()
 		end
 		if input.KeyCode == Enum.KeyCode.LeftShift then
 			sprinting = false
+			local Humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+			Humanoid.WalkSpeed = NormalWalkSpeed
 		end
 	end)
 end

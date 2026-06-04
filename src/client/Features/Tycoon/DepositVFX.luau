@@ -15,6 +15,10 @@ local BEAM_THICKNESS = 2.5
 local MIN_BEAM_INTERVAL = 0.42
 local DEFAULT_PROCESS_INTERVAL = 1
 
+local TRAIL_COLOR_START = Color3.fromRGB(140, 220, 255)
+local TRAIL_COLOR_MID = Color3.fromRGB(70, 165, 255)
+local TRAIL_COLOR_END = Color3.fromRGB(25, 95, 210)
+
 local templateCache: { [number]: Instance? } = {}
 
 local function getDropTemplate(tier: number): Instance?
@@ -105,6 +109,70 @@ local function randomUnitVector(): Vector3
 	return vector.Unit
 end
 
+local function getOrbAnchorPart(orb: Instance): BasePart?
+	if orb:IsA("BasePart") then
+		return orb
+	end
+
+	if orb:IsA("Model") then
+		local primary = orb.PrimaryPart
+		if primary and primary:IsA("BasePart") then
+			return primary
+		end
+
+		return orb:FindFirstChildWhichIsA("BasePart", true)
+	end
+
+	return nil
+end
+
+local function attachDepositTrail(orb: Instance)
+	local part = getOrbAnchorPart(orb)
+	if not part then
+		return
+	end
+
+	local attachment0 = Instance.new("Attachment")
+	attachment0.Name = "DepositTrail0"
+	attachment0.Position = Vector3.new(0, 0.05, 0.18)
+	attachment0.Parent = part
+
+	local attachment1 = Instance.new("Attachment")
+	attachment1.Name = "DepositTrail1"
+	attachment1.Position = Vector3.new(0, -0.05, -0.42)
+	attachment1.Parent = part
+
+	local trail = Instance.new("Trail")
+	trail.Name = "DepositTrail"
+	trail.Attachment0 = attachment0
+	trail.Attachment1 = attachment1
+	trail.Lifetime = 0.5
+	trail.MinLength = 0.04
+	trail.MaxLength = 28
+	trail.FaceCamera = true
+	trail.LightEmission = 1
+	trail.LightInfluence = 0.15
+	trail.Texture = ""
+	trail.TextureMode = Enum.TextureMode.Stretch
+	trail.WidthScale = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(0.35, 0.7),
+		NumberSequenceKeypoint.new(0.75, 0.28),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	trail.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(0.45, 0.2),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	trail.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, TRAIL_COLOR_START),
+		ColorSequenceKeypoint.new(0.45, TRAIL_COLOR_MID),
+		ColorSequenceKeypoint.new(1, TRAIL_COLOR_END),
+	})
+	trail.Parent = part
+end
+
 local function getLocalRoot(): BasePart?
 	local character = Players.LocalPlayer.Character
 	if not character then
@@ -180,6 +248,7 @@ function DepositVFX:createOrb(): Instance
 	prepareVisual(orb)
 	setVisualScale(orb, 0.75 + math.random() * 0.25)
 	orb.Parent = self.folder
+	attachDepositTrail(orb)
 	return orb
 end
 
