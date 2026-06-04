@@ -38,7 +38,7 @@ return {
 	OfflineReward = {
 		MinimumOfflineSeconds = 60 * 60,
 		ClaimPopupDelay = 5,
-		RewardMultiplier = 0.05,
+		RewardMultiplier = 0.01,
 		MaxOfflineSeconds = 24 * 60 * 60,
 	},
 	FavoritePrompt = {
@@ -60,11 +60,14 @@ return {
 		CapsuleLifetime = 180,
 		OpenDistance = 14,
 		OpenPriceMultiplier = 50,
+		OpenPriceUnitCostDiscount = 0.55,
+		OpenPriceUnitCostExponent = 0.8,
 		MinOpenPrice = 250,
 		AssetsPath = { "Assets", "Drops" },
 		CapsuleModelName = "Capsule",
 		AssemblyRootName = "Capsule",
 		SpawnYOffset = 1.5,
+		DebugPhysics = false,
 		SlotNames = { "unit1", "unit2", "unit3" },
 		TierWeights = {
 			{ Offset = -1, Chance = 0.75 },

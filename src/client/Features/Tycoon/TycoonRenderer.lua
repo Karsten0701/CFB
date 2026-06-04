@@ -14,7 +14,6 @@ local TycoonRenderer = {}
 TycoonRenderer.__index = TycoonRenderer
 
 local DROP_INTERVAL = 6
-local DOUBLE_DROP_SPEED_INTERVAL = 3
 local MAX_ACTIVE_DROPS = 150
 local MAX_DROP_SPAWNS_PER_FRAME = 4
 local DROP_STAGGER_HASH = 0.61803398875
@@ -33,6 +32,7 @@ local UNIT_POOL_CFRAME = CFrame.new(0, -10000, 0)
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
 local DROP_WALL_COLLISION_GROUP = "DropWalls"
+local CAPSULE_COLLISION_GROUP = "CapsuleDrops"
 local DEFAULT_MUTATION_INTERVAL = 60
 local DEFAULT_MUTATION_WEIGHT_POWER = 4
 local DEFAULT_GOLD_MULTIPLIERS = { 2, 5, 10, 25, 100 }
@@ -47,6 +47,9 @@ pcall(function()
 	PhysicsService:RegisterCollisionGroup(DROP_WALL_COLLISION_GROUP)
 end)
 pcall(function()
+	PhysicsService:RegisterCollisionGroup(CAPSULE_COLLISION_GROUP)
+end)
+pcall(function()
 	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
 end)
 pcall(function()
@@ -54,6 +57,18 @@ pcall(function()
 end)
 pcall(function()
 	PhysicsService:CollisionGroupSetCollidable(PLAYER_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, CAPSULE_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
 end)
 
 local function getAssetsFolder(): Folder?
@@ -120,15 +135,6 @@ local function getUnitModel(tier: number): Model?
 	return nil
 end
 
-local function getOverheadTemplate(): Instance?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	if not assets then
-		return nil
-	end
-
-	return assets:FindFirstChild("OverheadTemplateUnit")
-end
-
 local function getPickupTemplate(): Instance?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	if not assets then
@@ -187,7 +193,7 @@ local function prepareDropPickup(dropInstance: Instance, pickupPart: BasePart, v
 			descendant.Anchored = false
 			descendant.CanCollide = false
 			descendant.CanTouch = false
-			descendant.Massless = true
+			descendant.Massless = false
 			descendant.CollisionGroup = DROP_COLLISION_GROUP
 
 			local weld = Instance.new("WeldConstraint")
@@ -196,26 +202,6 @@ local function prepareDropPickup(dropInstance: Instance, pickupPart: BasePart, v
 			weld.Part1 = descendant
 			weld.Parent = pickupPart
 		end
-	end
-end
-
-local function getAdorneePart(model: Model): BasePart?
-	local head = model:FindFirstChild("Head", true)
-	if head and head:IsA("BasePart") then
-		return head
-	end
-
-	if model.PrimaryPart then
-		return model.PrimaryPart
-	end
-
-	return model:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function setOverheadLabel(overhead: Instance, labelName: string, text: string)
-	local label = overhead:FindFirstChild(labelName, true)
-	if label and label:IsA("TextLabel") then
-		label.Text = text
 	end
 end
 
@@ -284,26 +270,6 @@ local function quadraticBezier(
 	return inverse * inverse * startPosition + 2 * inverse * alpha * controlPosition + alpha * alpha * endPosition
 end
 
-local function addOverhead(unitModel: Model, displayName: string, tier: number)
-	local template = getOverheadTemplate()
-	if not template then
-		return
-	end
-
-	local overhead = template:Clone()
-	overhead.Name = "Overhead"
-	setOverheadLabel(overhead, "Name", displayName)
-	setOverheadLabel(overhead, "Tier", "Tier " .. tier)
-
-	if overhead:IsA("BillboardGui") then
-		local adorneePart = getAdorneePart(unitModel)
-		overhead.Adornee = adorneePart
-		overhead.Parent = adorneePart or unitModel
-	else
-		overhead.Parent = unitModel
-	end
-end
-
 local function anchorModel(model: Model)
 	for _, descendant in model:GetDescendants() do
 		if descendant:IsA("BasePart") then
@@ -362,7 +328,9 @@ function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
 end
 
 function TycoonRenderer:getDropInterval(): number
-	return if self.entitlements.DoubleDropSpeed then DOUBLE_DROP_SPEED_INTERVAL else DROP_INTERVAL
+	local multiplier = if self.entitlements.DoubleDropSpeed then 2 else 1
+	multiplier *= math.max(tonumber(self.entitlements.DropSpeedMultiplier) or 1, 0.1)
+	return DROP_INTERVAL / multiplier
 end
 
 function TycoonRenderer:getManaRewardMultiplier(): number
@@ -737,8 +705,6 @@ function TycoonRenderer:getOrCreateUnitModel(tier: number, unitIndex: number): M
 	unitModel = template:Clone()
 	unitModel.Name = template.Name .. "_" .. unitIndex
 	anchorModel(unitModel)
-	local tierData = AnimeDroppers.Tiers[tier]
-	addOverhead(unitModel, tierData and tierData.DisplayName or template.Name, tier)
 	self:getUnitModelInfo(unitModel)
 	self:setUnitModelAssignment(unitModel, unitIndex, tier, false)
 	return unitModel
@@ -807,13 +773,32 @@ function TycoonRenderer:clearDrops()
 	table.clear(self.pickupAnimations)
 end
 
-function TycoonRenderer:findDropPart(spotPart: BasePart): BasePart?
-	local dropPart = spotPart:FindFirstChild("DropPart")
+local function findNamedBasePart(root: Instance, targetName: string): BasePart?
+	local lowerTarget = string.lower(targetName)
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("BasePart") and string.lower(descendant.Name) == lowerTarget then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+function TycoonRenderer:findDropPart(spotPart: BasePart, unitModel: Model?): BasePart?
+	if unitModel and unitModel.Parent then
+		local unitDropPart = findNamedBasePart(unitModel, "DropPart") or findNamedBasePart(unitModel, "Droppart")
+		if unitDropPart then
+			return unitDropPart
+		end
+	end
+
+	local dropPart = spotPart:FindFirstChild("DropPart") or spotPart:FindFirstChild("Droppart")
 	if dropPart and dropPart:IsA("BasePart") then
 		return dropPart
 	end
 
-	return spotPart
+	local nestedDropPart = findNamedBasePart(spotPart, "DropPart") or findNamedBasePart(spotPart, "Droppart")
+	return nestedDropPart or spotPart
 end
 
 function TycoonRenderer:getMutationInterval(): number
@@ -944,6 +929,21 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 	local displayValue = value * self:getManaRewardMultiplier()
 	SoundUtil.Pickup()
 	self:showPickupBillboard(orb.Position, displayValue)
+
+	if self.entitlements.ShowVFX == false then
+		if container.Parent then
+			container:Destroy()
+		elseif orb.Parent then
+			orb:Destroy()
+		end
+
+		if self.onPickup then
+			self.onPickup(value)
+		end
+
+		return
+	end
+
 	self:animatePickupOrb(orb)
 
 	if container ~= orb and container.Parent then
@@ -960,6 +960,10 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 end
 
 function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
+	if self.entitlements.ShowManaPopup == false then
+		return
+	end
+
 	local template = getPickupTemplate()
 	if not template then
 		return
@@ -1418,7 +1422,7 @@ end
 
 function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: BasePart)
 	entry.Model:PivotTo(spotPart.CFrame)
-	entry.DropPart = self:findDropPart(spotPart)
+	entry.DropPart = self:findDropPart(spotPart, entry.Model)
 	self:scheduleUnitDrop(entry, unitIndex, os.clock())
 	self:setUnitModelVisible(entry.Model, true)
 	self:setUnitModelAssignment(entry.Model, unitIndex, entry.Tier, false)
@@ -1580,7 +1584,7 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 
 			self.unitModels[unitIndex] = unitModel
 
-			local dropPart = self:findDropPart(spotPart)
+			local dropPart = self:findDropPart(spotPart, unitModel)
 
 			self.unitEntries[unitIndex] = {
 				Model = unitModel,

@@ -1,7 +1,7 @@
 local Tiers = {
 	[1] = {
 		ModelName = "Luffy",
-		DisplayName = "Rubber Pirate",
+		DisplayName = "Liffy",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://95938107469749",
 		DropValue = 1,
@@ -11,7 +11,7 @@ local Tiers = {
 	},
 	[2] = {
 		ModelName = "Tanjiro",
-		DisplayName = "Water Slayer",
+		DisplayName = "Tajiro",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://90326362320371",
 		DropValue = 6,
@@ -21,7 +21,7 @@ local Tiers = {
 	},
 	[3] = {
 		ModelName = "Naruto",
-		DisplayName = "Orange Ninja",
+		DisplayName = "Noruta",
 		AnimeGroup = "Ninja",
 		IconId = "rbxassetid://79353333458716",
 		DropValue = 28,
@@ -31,7 +31,7 @@ local Tiers = {
 	},
 	[4] = {
 		ModelName = "Zenitsu",
-		DisplayName = "Thunder Slayer",
+		DisplayName = "Zentisa",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://109591741677037",
 		DropValue = 150,
@@ -41,7 +41,7 @@ local Tiers = {
 	},
 	[5] = {
 		ModelName = "Zoro",
-		DisplayName = "Green Swordsman",
+		DisplayName = "Zaro",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://81864711669175",
 		DropValue = 690,
@@ -51,7 +51,7 @@ local Tiers = {
 	},
 	[6] = {
 		ModelName = "Denji",
-		DisplayName = "Chainsaw Hunter",
+		DisplayName = "Danji",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://89486841791029",
 		DropValue = 3150,
@@ -61,7 +61,7 @@ local Tiers = {
 	},
 	[7] = {
 		ModelName = "Saitama",
-		DisplayName = "Bald Hero",
+		DisplayName = "Saikama",
 		AnimeGroup = "One Punch",
 		IconId = "rbxassetid://75376321796564",
 		DropValue = 14200,
@@ -71,7 +71,7 @@ local Tiers = {
 	},
 	[8] = {
 		ModelName = "Meliodas",
-		DisplayName = "Dragon Sin",
+		DisplayName = "Meliados",
 		AnimeGroup = "Sins",
 		IconId = "rbxassetid://113520628907754",
 		DropValue = 64000,
@@ -81,7 +81,7 @@ local Tiers = {
 	},
 	[9] = {
 		ModelName = "Deku",
-		DisplayName = "Green Hero",
+		DisplayName = "Duke",
 		AnimeGroup = "Heroes",
 		IconId = "rbxassetid://104188303861136",
 		DropValue = 288000,
@@ -91,7 +91,7 @@ local Tiers = {
 	},
 	[10] = {
 		ModelName = "Madara",
-		DisplayName = "Ghost Warrior",
+		DisplayName = "Midira",
 		AnimeGroup = "Ninja",
 		IconId = "rbxassetid://85526664824938",
 		DropValue = 1300000,
@@ -101,7 +101,7 @@ local Tiers = {
 	},
 	[11] = {
 		ModelName = "Megumi",
-		DisplayName = "Megumi Fushiguro",
+		DisplayName = "Meguma",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://80336807101668",
 		DropValue = 4000000,
@@ -111,7 +111,7 @@ local Tiers = {
 	},
 	[12] = {
 		ModelName = "Yuji",
-		DisplayName = "Curse Vessel",
+		DisplayName = "Juyi",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://80336807101668",
 		DropValue = 14200000,
@@ -121,7 +121,7 @@ local Tiers = {
 	},
 	[13] = {
 		ModelName = "Rimuru",
-		DisplayName = "Slime Demon Lord",
+		DisplayName = "Rumira",
 		AnimeGroup = "Isekai",
 		IconId = "rbxassetid://114826765552479",
 		DropValue = 48000000,
@@ -131,7 +131,7 @@ local Tiers = {
 	},
 	[14] = {
 		ModelName = "Killua",
-		DisplayName = "Lightning Assassin",
+		DisplayName = "Kullia",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://112624919123182",
 		DropValue = 531000000,
@@ -141,7 +141,7 @@ local Tiers = {
 	},
 	[15] = {
 		ModelName = "Sanji",
-		DisplayName = "Black Leg Chef",
+		DisplayName = "Jansi",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://77261310168633",
 		DropValue = 2390000000,
@@ -151,7 +151,7 @@ local Tiers = {
 	},
 	[16] = {
 		ModelName = "Vegeta",
-		DisplayName = "Saiyan Prince",
+		DisplayName = "Vageta",
 		AnimeGroup = "Saiyans",
 		IconId = "rbxassetid://103694110031649",
 		DropValue = 10700000000,
@@ -161,7 +161,7 @@ local Tiers = {
 	},
 	[17] = {
 		ModelName = "Giyu",
-		DisplayName = "Water Hashira",
+		DisplayName = "Yigu",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://73644041899341",
 		DropValue = 48200000000,
@@ -171,7 +171,7 @@ local Tiers = {
 	},
 	[18] = {
 		ModelName = "Makima",
-		DisplayName = "Control Lady",
+		DisplayName = "Mikama",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://117136473255872",
 		DropValue = 217000000000,
@@ -181,7 +181,7 @@ local Tiers = {
 	},
 	[19] = {
 		ModelName = "Mikasa",
-		DisplayName = "Scout Warrior",
+		DisplayName = "Makisa",
 		AnimeGroup = "Scouts",
 		IconId = "rbxassetid://125234501254599",
 		DropValue = 976000000000,
@@ -191,7 +191,7 @@ local Tiers = {
 	},
 	[20] = {
 		ModelName = "Gabimaru",
-		DisplayName = "Hollow Ninja",
+		DisplayName = "Gibamara",
 		AnimeGroup = "Shinobi",
 		IconId = "rbxassetid://139146857043514",
 		DropValue = 4390000000000,
@@ -201,7 +201,7 @@ local Tiers = {
 	},
 	[21] = {
 		ModelName = "Ban",
-		DisplayName = "Immortal Thief",
+		DisplayName = "Ben",
 		AnimeGroup = "Sins",
 		IconId = "rbxassetid://70622283643922",
 		DropValue = 1.97e13,
@@ -211,7 +211,7 @@ local Tiers = {
 	},
 	[22] = {
 		ModelName = "Goku",
-		DisplayName = "Ultra Saiyan",
+		DisplayName = "Guko",
 		AnimeGroup = "Saiyans",
 		IconId = "rbxassetid://114526172950539",
 		DropValue = 8.88e13,
@@ -221,7 +221,7 @@ local Tiers = {
 	},
 	[23] = {
 		ModelName = "Kokushibo",
-		DisplayName = "Moon Demon",
+		DisplayName = "Kikoshibo",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://92544163407156",
 		DropValue = 4.0e14,
@@ -231,7 +231,7 @@ local Tiers = {
 	},
 	[24] = {
 		ModelName = "Ichigo",
-		DisplayName = "Soul Reaper",
+		DisplayName = "Ichagi",
 		AnimeGroup = "Soul Reapers",
 		IconId = "rbxassetid://79641026591513",
 		DropValue = 1.8e15,
@@ -241,7 +241,7 @@ local Tiers = {
 	},
 	[25] = {
 		ModelName = "Levi Ackerman",
-		DisplayName = "Blade Captain",
+		DisplayName = "Kaptain Live",
 		AnimeGroup = "Scouts",
 		IconId = "rbxassetid://123475869659213",
 		DropValue = 8.1e15,
@@ -251,7 +251,7 @@ local Tiers = {
 	},
 	[26] = {
 		ModelName = "Law",
-		DisplayName = "Room Doctor",
+		DisplayName = "Lawyer",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://136761379074773",
 		DropValue = 3.65e16,
@@ -261,7 +261,7 @@ local Tiers = {
 	},
 	[27] = {
 		ModelName = "Shoto Todoroki",
-		DisplayName = "Half Ice Hero",
+		DisplayName = "Shotoriko",
 		AnimeGroup = "Heroes",
 		IconId = "rbxassetid://100730607428895",
 		DropValue = 1.64e17,
@@ -271,7 +271,7 @@ local Tiers = {
 	},
 	[28] = {
 		ModelName = "Toji Fushiguro",
-		DisplayName = "Cursed Fighter",
+		DisplayName = "Tijo",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://120378945068145",
 		DropValue = 7.38e17,
@@ -281,7 +281,7 @@ local Tiers = {
 	},
 	[29] = {
 		ModelName = "Asta",
-		DisplayName = "Anti Magic Knight",
+		DisplayName = "Esta",
 		AnimeGroup = "Magic Knights",
 		IconId = "rbxassetid://74149124589958",
 		DropValue = 3.6e18,
@@ -291,7 +291,7 @@ local Tiers = {
 	},
 	[30] = {
 		ModelName = "Genos",
-		DisplayName = "Cyborg Hero",
+		DisplayName = "Gones",
 		AnimeGroup = "One Punch",
 		IconId = "rbxassetid://132398113776714",
 		DropValue = 1.58e19,
@@ -301,7 +301,7 @@ local Tiers = {
 	},
 	[31] = {
 		ModelName = "ChainSawMan",
-		DisplayName = "Chainsaw Warrior",
+		DisplayName = "Chainsaw Woman",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://129496625515571",
 		DropValue = 8.1e19,
@@ -311,7 +311,7 @@ local Tiers = {
 	},
 	[32] = {
 		ModelName = "Itachi Uchiha",
-		DisplayName = "Crow Ninja",
+		DisplayName = "Itai",
 		AnimeGroup = "Ninja",
 		IconId = "rbxassetid://98450967449427",
 		DropValue = 3.4e20,
@@ -321,7 +321,7 @@ local Tiers = {
 	},
 	[33] = {
 		ModelName = "Obito Uchiha",
-		DisplayName = "Masked Ninja",
+		DisplayName = "Obita",
 		AnimeGroup = "Ninja",
 		IconId = "rbxassetid://139486061718773",
 		DropValue = 1.67e21,
@@ -331,7 +331,7 @@ local Tiers = {
 	},
 	[34] = {
 		ModelName = "Ken Kaneki",
-		DisplayName = "Ghoul Mask",
+		DisplayName = "Kenaka",
 		AnimeGroup = "Ghouls",
 		IconId = "rbxassetid://111401581379139",
 		DropValue = 8.2e21,
@@ -341,7 +341,7 @@ local Tiers = {
 	},
 	[35] = {
 		ModelName = "Sukuna",
-		DisplayName = "Curse King",
+		DisplayName = "Sakuna",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://135710906050148",
 		DropValue = 3.8e22,
@@ -351,7 +351,7 @@ local Tiers = {
 	},
 	[36] = {
 		ModelName = "All Might",
-		DisplayName = "Symbol Hero",
+		DisplayName = "Everything Might",
 		AnimeGroup = "Heroes",
 		IconId = "rbxassetid://136515468698054",
 		DropValue = 1.6e23,
@@ -361,7 +361,7 @@ local Tiers = {
 	},
 	[37] = {
 		ModelName = "Gojo",
-		DisplayName = "Blind Sorcerer",
+		DisplayName = "Jogo",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://127519749510891",
 		DropValue = 1.1e24,
@@ -371,7 +371,7 @@ local Tiers = {
 	},
 	[38] = {
 		ModelName = "Cha Hae In",
-		DisplayName = "Lightblade Hunter",
+		DisplayName = "Chahee",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://103653635822079",
 		DropValue = 3.8e24,
@@ -381,7 +381,7 @@ local Tiers = {
 	},
 	[39] = {
 		ModelName = "Whitebeard",
-		DisplayName = "Sea Emperor",
+		DisplayName = "White Mustache",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://80610034792001",
 		DropValue = 2.05e25,
@@ -391,7 +391,7 @@ local Tiers = {
 	},
 	[40] = {
 		ModelName = "Sung Jin-woo",
-		DisplayName = "Shadow Monarch",
+		DisplayName = "Sing Jun-boo",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://133772096039716",
 		DropValue = 1.025e26,
@@ -401,7 +401,7 @@ local Tiers = {
 	},
 	[41] = {
 		ModelName = "Escanor",
-		DisplayName = "Sun Lion",
+		DisplayName = "Esconar",
 		AnimeGroup = "Sins",
 		IconId = "rbxassetid://96543597921925",
 		DropValue = 1.75e27,

@@ -1,0 +1,118 @@
+return {
+	CycleSeconds = 15 * 60,
+	DefaultDurationSeconds = 5 * 60,
+	EmptyWindowName = "Preparing next event",
+	Events = {
+		{ -- V
+			Id = "saiyan_ascension",
+			Name = "Saiyan Ascension",
+			Icon = "rbxassetid://133962178231664",
+			VFXKey = "SaiyanAscension",
+			DurationSeconds = 5 * 60,
+			Description = "+1 spawn tier for 5 minutes.",
+			Effects = {
+				UnitSpawnTierBonus = 1,
+			},
+		},
+		{ -- V
+			Id = "infinite_void",
+			Name = "Domain Expansion: Infinite Void",
+			Icon = "rbxassetid://109160412449916",
+			VFXKey = "InfiniteVoid",
+			DurationSeconds = 5 * 60,
+			Description = "2x Mana and 1.5x process speed for 5 minutes.",
+			Effects = {
+				ManaMultiplier = 2,
+				ProcessSpeedMultiplier = 1.5,
+			},
+		},
+		{
+			Id = "pirate_kings_bounty",
+			Name = "Pirate King's Bounty",
+			Icon = "rbxassetid://96573285096968",
+			VFXKey = "PirateKingsBounty",
+			DurationSeconds = 5 * 60,
+			Description = "2x Yen for 5 minutes.",
+			Effects = {
+				YenMultiplier = 2,
+			},
+		},
+		{ -- V
+			Id = "chakra_overflow",
+			Name = "Chakra Overflow",
+			Icon = "rbxassetid://121705665379355",
+			VFXKey = "ChakraOverflow",
+			DurationSeconds = 5 * 60,
+			Description = "2x Mana for 5 minutes.",
+			Effects = {
+				ManaMultiplier = 2,
+			},
+		},
+		{
+			Id = "thunderclap_rush",
+			Name = "Thunderclap Rush",
+			Icon = "rbxassetid://115755999549909",
+			VFXKey = "ThunderclapRush",
+			DurationSeconds = 5 * 60,
+			Description = "1.5x drop speed for 5 minutes.",
+			Effects = {
+				DropSpeedMultiplier = 1.5,
+			},
+		},
+		{ -- V
+			Id = "alchemist_circle",
+			Name = "Alchemist Circle",
+			Icon = "rbxassetid://133030186915996",
+			VFXKey = "AlchemistCircle",
+			DurationSeconds = 5 * 60,
+			Description = "1.5x process speed for 5 minutes.",
+			Effects = {
+				ProcessSpeedMultiplier = 1.5,
+			},
+		},
+		{ -- V
+			Id = "dragon_radar_surge",
+			Name = "Dragon Radar Surge",
+			Icon = "rbxassetid://121064932379247",
+			VFXKey = "DragonRadarSurge",
+			DurationSeconds = 5 * 60,
+			Description = "5x capsule spawn chance for 5 minutes.",
+			Effects = {
+				CapsuleSpawnChanceMultiplier = 5,
+			},
+		},
+		{
+			Id = "meteor_capsule_rain",
+			Name = "Meteor Capsule Rain",
+			Icon = "rbxassetid://121064932379247",
+			VFXKey = "MeteorCapsuleRain",
+			DurationSeconds = 5 * 60,
+			Description = "Ambient capsules spawn twice as often for 5 minutes.",
+			Effects = {
+				AmbientCapsuleIntervalMultiplier = 0.5,
+			},
+		},
+		{ -- V
+			Id = "spirit_market",
+			Name = "Spirit Market",
+			Icon = "rbxassetid://96573285096968",
+			VFXKey = "SpiritMarket",
+			DurationSeconds = 5 * 60,
+			Description = "1.5x Yen for 5 minutes.",
+			Effects = {
+				YenMultiplier = 1.5,
+			},
+		},
+		{ -- V
+			Id = "cursed_energy_leak",
+			Name = "Cursed Energy Leak",
+			Icon = "rbxassetid://121705665379355",
+			VFXKey = "CursedEnergyLeak",
+			DurationSeconds = 5 * 60,
+			Description = "1.5x Mana for 5 minutes.",
+			Effects = {
+				ManaMultiplier = 1.5,
+			},
+		},
+	},
+}

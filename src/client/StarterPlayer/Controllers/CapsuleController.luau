@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CapsuleOpenAnimation = require(script.Parent.Parent.Parent.Features.Capsules.CapsuleOpenAnimation)
 local CapsuleRenderer = require(script.Parent.Parent.Parent.Features.Capsules.CapsuleRenderer)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
+local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local TycoonUtil = require(ReplicatedStorage.Shared.Features.Tycoon.TycoonUtil)
@@ -20,7 +21,9 @@ local ambientLoopRunning = false
 local robuxPromptOpen = false
 local openingCapsule = false
 local pendingRobuxCapsuleId: string? = nil
+local handledRobuxCapsules: { [string]: boolean } = {}
 local OPEN_CAPSULE_PRODUCT = Monetization.DeveloperProducts.OpenCapsule
+local ROBUX_REWARD_TIMEOUT = 8
 
 local function getCapsuleConfig()
 	return TycoonConfig.Capsules or {}
@@ -97,6 +100,7 @@ function CapsuleController:spawnCapsuleVisual(capsuleId: string, spawnCFrame: CF
 		if tycoonRenderer then
 			spawnOptions = {
 				parent = tycoonRenderer:getDropsFolder(),
+				rollDirection = dropPart.CFrame.LookVector,
 				registerPossibleDrop = function(pickupPart: BasePart, container: Instance)
 					tycoonRenderer:registerPossibleDrop(pickupPart, container, dropPart)
 				end,
@@ -174,6 +178,20 @@ function CapsuleController:finishOpen(capsuleId: string, rewardTier: number?)
 	end
 end
 
+function CapsuleController:claimRewardThenFinish(capsuleId: string, rewardTier: number?)
+	local TycoonService = Knit.GetService("TycoonService")
+	TycoonService:ClaimCapsuleReward(capsuleId):andThen(function(success: boolean, err: string?)
+		if not success then
+			warn("[CapsuleController] Claim capsule reward failed:", err)
+		end
+
+		self:finishOpen(capsuleId, rewardTier)
+	end):catch(function(err)
+		warn("[CapsuleController] Claim capsule reward request failed:", err)
+		self:finishOpen(capsuleId, rewardTier)
+	end)
+end
+
 function CapsuleController:playOpenAnimation(capsuleId: string, rewardTier: number, onComplete: (() -> ())?)
 	local entry = renderer and renderer:getEntry(capsuleId)
 	if not entry or not entry.root or not entry.instance then
@@ -222,14 +240,120 @@ function CapsuleController:openWithYen(capsuleId: string)
 			elseif err and err ~= "Unknown capsule" then
 				warn("[CapsuleController] Open capsule failed:", err)
 			end
+
+			local entry = renderer and renderer:getEntry(capsuleId)
+			if entry and entry.pickedUp then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:showOpenCapsuleUI(
+					capsuleId,
+					entry.previewTiers,
+					entry.openPrice,
+					entry.highestTier
+				)
+			end
+			return
+		end
+
+		if type(rewardTier) ~= "number" then
+			openingCapsule = false
+			warn("[CapsuleController] Open capsule returned no reward tier")
+			local entry = renderer and renderer:getEntry(capsuleId)
+			if entry and entry.pickedUp then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:showOpenCapsuleUI(
+					capsuleId,
+					entry.previewTiers,
+					entry.openPrice,
+					entry.highestTier
+				)
+			end
 			return
 		end
 
 		self:playOpenAnimation(capsuleId, rewardTier or 1, function()
 			openingCapsule = false
-			self:finishOpen(capsuleId, rewardTier)
+			self:claimRewardThenFinish(capsuleId, rewardTier)
 		end)
+	end):catch(function(err)
+		openingCapsule = false
+		warn("[CapsuleController] Open capsule request failed:", err)
 	end)
+end
+
+function CapsuleController:waitForRobuxReward(capsuleId: string, startedAt: number)
+	if handledRobuxCapsules[capsuleId] then
+		return
+	end
+
+	local TycoonService = Knit.GetService("TycoonService")
+	TycoonService:GetPendingCapsuleReward(capsuleId):andThen(function(rewardTier: number?)
+		if handledRobuxCapsules[capsuleId] then
+			return
+		end
+
+		local entry = renderer and renderer:getEntry(capsuleId)
+		if not entry then
+			openingCapsule = false
+			return
+		end
+
+		if type(rewardTier) == "number" then
+			handledRobuxCapsules[capsuleId] = true
+			openingCapsule = true
+			self:playOpenAnimation(capsuleId, rewardTier, function()
+				openingCapsule = false
+				self:claimRewardThenFinish(capsuleId, rewardTier)
+				handledRobuxCapsules[capsuleId] = nil
+			end)
+			return
+		end
+
+		if os.clock() - startedAt >= ROBUX_REWARD_TIMEOUT then
+			openingCapsule = false
+			warn("[CapsuleController] Timed out waiting for capsule robux reward")
+			if entry.pickedUp then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:showOpenCapsuleUI(
+					capsuleId,
+					entry.previewTiers,
+					entry.openPrice,
+					entry.highestTier
+				)
+			end
+			handledRobuxCapsules[capsuleId] = nil
+			return
+		end
+
+		task.delay(0.25, function()
+			self:waitForRobuxReward(capsuleId, startedAt)
+		end)
+	end):catch(function(err)
+		openingCapsule = false
+		warn("[CapsuleController] Get pending capsule reward failed:", err)
+	end)
+end
+
+function CapsuleController:onRobuxCapsuleOpened(capsuleId: string, rewardTier: number?)
+	if type(capsuleId) ~= "string" or capsuleId == "" or handledRobuxCapsules[capsuleId] then
+		return
+	end
+
+	handledRobuxCapsules[capsuleId] = true
+	robuxPromptOpen = false
+	pendingRobuxCapsuleId = nil
+
+	if type(rewardTier) == "number" then
+		openingCapsule = true
+		self:playOpenAnimation(capsuleId, rewardTier, function()
+			openingCapsule = false
+			self:claimRewardThenFinish(capsuleId, rewardTier)
+			handledRobuxCapsules[capsuleId] = nil
+		end)
+		return
+	end
+
+	openingCapsule = true
+	self:waitForRobuxReward(capsuleId, os.clock())
 end
 
 function CapsuleController:openWithRobux(capsuleId: string)
@@ -240,6 +364,8 @@ function CapsuleController:openWithRobux(capsuleId: string)
 	local TycoonService = Knit.GetService("TycoonService")
 	TycoonService:PrepareCapsuleRobuxOpen(capsuleId):andThen(function(prepared: boolean)
 		if not prepared then
+			SoundUtil.Error()
+			warn("[CapsuleController] Prepare capsule robux open failed")
 			return
 		end
 
@@ -253,8 +379,22 @@ function CapsuleController:openWithRobux(capsuleId: string)
 		if not ok then
 			robuxPromptOpen = false
 			pendingRobuxCapsuleId = nil
+			local MainGuiController = Knit.GetController("MainGuiController")
+			local entry = renderer and renderer:getEntry(capsuleId)
+			if entry and entry.pickedUp then
+				MainGuiController:showOpenCapsuleUI(
+					capsuleId,
+					entry.previewTiers,
+					entry.openPrice,
+					entry.highestTier
+				)
+			end
 			warn("[CapsuleController] Capsule robux prompt failed:", err)
 		end
+	end):catch(function(err)
+		robuxPromptOpen = false
+		pendingRobuxCapsuleId = nil
+		warn("[CapsuleController] Prepare capsule robux open request failed:", err)
 	end)
 end
 
@@ -330,6 +470,7 @@ function CapsuleController:startAmbientLoop()
 	task.spawn(function()
 		while ambientLoopRunning do
 			local interval = tonumber(getCapsuleConfig().AmbientSpawnInterval) or 120
+			interval *= math.max(EventUtil.getEffectMultiplier("AmbientCapsuleIntervalMultiplier", 1), 0.1)
 			task.wait(interval)
 			if ambientLoopRunning then
 				self:trySpawnAmbientCapsule()
@@ -340,7 +481,6 @@ end
 
 function CapsuleController:KnitStart()
 	self:ensureRenderer()
-	self:startAmbientLoop()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(player, productId, wasPurchased)
 		if player ~= localPlayer or productId ~= OPEN_CAPSULE_PRODUCT.ProductId then
@@ -353,19 +493,26 @@ function CapsuleController:KnitStart()
 
 		if not wasPurchased or not capsuleId then
 			openingCapsule = false
+			local entry = renderer and capsuleId and renderer:getEntry(capsuleId)
+			if entry and entry.pickedUp then
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:showOpenCapsuleUI(
+					capsuleId,
+					entry.previewTiers,
+					entry.openPrice,
+					entry.highestTier
+				)
+			end
 			return
 		end
 
-		task.delay(0.2, function()
-			local TycoonService = Knit.GetService("TycoonService")
-			TycoonService:GetLastCapsuleReward():andThen(function(rewardTier: number?)
-				openingCapsule = true
-				self:playOpenAnimation(capsuleId, rewardTier or 1, function()
-					openingCapsule = false
-					self:finishOpen(capsuleId, rewardTier)
-				end)
-			end)
-		end)
+		openingCapsule = true
+		self:waitForRobuxReward(capsuleId, os.clock())
+	end)
+
+	local TycoonService = Knit.GetService("TycoonService")
+	TycoonService.CapsuleRobuxOpened:Connect(function(capsuleId: string, rewardTier: number?)
+		self:onRobuxCapsuleOpened(capsuleId, rewardTier)
 	end)
 end
 

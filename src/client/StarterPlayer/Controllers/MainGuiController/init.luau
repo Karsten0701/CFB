@@ -16,6 +16,7 @@ local SettingsFeature = require(script.Settings)
 local ShopFeature = require(script.Shop)
 local CapsuleFeature = require(script.Capsule)
 local TeleportFeature = require(script.Teleport)
+local EventFeature = require(script.Event)
 
 local MainGuiController = Knit.CreateController({
 	Name = "MainGuiController",
@@ -117,6 +118,7 @@ SettingsFeature.Install(MainGuiController)
 ShopFeature.Install(MainGuiController)
 CapsuleFeature.Install(MainGuiController)
 TeleportFeature.Install(MainGuiController)
+EventFeature.Install(MainGuiController)
 
 function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 	local mainGui = self:getMainGui()
@@ -368,14 +370,14 @@ function MainGuiController:ShowRateUpgradeMessage(gain: number, upgradeAmount: n
 	upgradeAmount = math.max(math.floor(upgradeAmount or 0), 0)
 	local pluralSuffix = if upgradeAmount == 1 then "" else "s"
 	local upgradeText = if upgradeAmount > 0
-		then tostring(upgradeAmount) .. " Rate upgrade" .. pluralSuffix
+		then FormatUtil.formatNumber(upgradeAmount or 0) .. " Rate upgrade" .. pluralSuffix
 		else "+" .. FormatUtil.formatNumber(gain) .. " Rate"
 	local gainText = if upgradeAmount > 0
 		then ' <font color="#47FF6A">(+' .. FormatUtil.formatNumber(gain) .. " Rate)</font>"
 		else ""
 
 	self:showMessage(
-		"RateUpgrade:" .. tostring(gain) .. ":" .. tostring(upgradeAmount),
+		"RateUpgrade:" .. FormatUtil.formatNumber(gain or 0) .. ":" .. FormatUtil.formatNumber(upgradeAmount or 0),
 		"You bought " .. upgradeText .. gainText
 	)
 end
@@ -607,6 +609,7 @@ function MainGuiController:updateAll(instant: boolean?)
 	self:setupUpgradesFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
+	self:setupEventFrame()
 
 	if instant then
 		animationTokens.ManaBag += 1
@@ -635,6 +638,7 @@ function MainGuiController:KnitStart()
 	self:setupIndexFrame()
 	self:setupOpenCapsuleFrame()
 	self:setupTeleportFrame()
+	self:setupEventFeature()
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, productId, wasPurchased)
 		self:onShopProductPromptFinished(firstArg, productId, wasPurchased)
@@ -717,6 +721,7 @@ function MainGuiController:KnitStart()
 				self:setupIndexFrame()
 				self:setupOpenCapsuleFrame()
 				self:setupTeleportFrame()
+				self:setupEventFrame()
 			end)
 		end
 	end)

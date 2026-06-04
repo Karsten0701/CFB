@@ -37,8 +37,8 @@ Monetization.DeveloperProducts = {
 		Kind = "SellAll",
 	},
 	OpenCapsule = {
-		ProductId = 3605000000,
-		Price = 49,
+		ProductId = 3602659865,
+		Price = 39,
 		Kind = "OpenCapsule",
 	},
 	DoubleYen = {

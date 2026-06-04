@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 
 local CapsuleUtil = {}
@@ -83,11 +84,21 @@ end
 function CapsuleUtil.getOpenPrice(highestTier: number): number
 	highestTier = math.clamp(math.floor(highestTier or 1), 1, AnimeDroppers.MaxTier)
 	local config = getCapsuleConfig()
-	local tierData = AnimeDroppers.Tiers[highestTier]
-	local dropValue = if tierData then tonumber(tierData.DropValue) or 1 else 1
-	local multiplier = tonumber(config.OpenPriceMultiplier) or 50
 	local minPrice = tonumber(config.MinOpenPrice) or 100
-	return math.max(math.floor(dropValue * multiplier), minPrice)
+	local discount = math.clamp(tonumber(config.OpenPriceUnitCostDiscount) or 0.28, 0.01, 1)
+	local exponent = math.clamp(tonumber(config.OpenPriceUnitCostExponent) or 0.58, 0.25, 1)
+	local floorTier = highestTier
+
+	for _, tier in CapsuleUtil.getPreviewTiers(highestTier) do
+		floorTier = math.min(floorTier, tier)
+	end
+
+	local tierData = AnimeDroppers.Tiers[floorTier]
+	local requiredTierOneUnits = math.max(math.floor(tonumber(tierData and tierData.RequiredTier1) or 1), 1)
+	local directBuyCost = Pricing.getUnitBulkPrice(0, requiredTierOneUnits, true)
+	local price = math.floor((directBuyCost ^ exponent) * discount)
+
+	return math.max(price, minPrice)
 end
 
 function CapsuleUtil.getPreviewDisplayEntries(highestTier: number): { { Tier: number, DisplayName: string, Chance: number } }

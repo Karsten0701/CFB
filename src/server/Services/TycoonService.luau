@@ -6,6 +6,7 @@ local RunService = game:GetService("RunService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
+local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
 local Merge = require(ReplicatedStorage.Shared.Features.Tycoon.Merge)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
@@ -15,7 +16,9 @@ local Knit = require(ReplicatedStorage.Packages.knit)
 
 local TycoonService = Knit.CreateService({
 	Name = "TycoonService",
-	Client = {},
+	Client = {
+		CapsuleRobuxOpened = Knit.CreateSignal(),
+	},
 })
 
 local playerTycoons: { [Player]: Instance } = {}
@@ -35,6 +38,7 @@ local lastCapsuleSpawnAt: { [Player]: number } = {}
 local lastAmbientCapsuleAt: { [Player]: number } = {}
 local pendingCapsuleRobux: { [Player]: string } = {}
 local lastCapsuleRewardTier: { [Player]: number } = {}
+local pendingCapsuleRewards: { [Player]: { [string]: number } } = {}
 
 local PROCESS_INTERVAL = 1
 local DROP_INTERVAL = 6
@@ -42,6 +46,7 @@ local MAX_ACTIVE_DROPS = 150
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
 local DROP_WALL_COLLISION_GROUP = "DropWalls"
+local CAPSULE_COLLISION_GROUP = "CapsuleDrops"
 local VISUAL_DATA_REQUEST_COOLDOWN = 0.35
 local MUTATION_PICKUP_COOLDOWN_PADDING = 0.8
 
@@ -106,9 +111,16 @@ local function setupCollisionGroups()
 	pcall(function()
 		PhysicsService:RegisterCollisionGroup(DROP_WALL_COLLISION_GROUP)
 	end)
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(CAPSULE_COLLISION_GROUP)
+	end)
 	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
 	PhysicsService:CollisionGroupSetCollidable(DROP_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, true)
 	PhysicsService:CollisionGroupSetCollidable(PLAYER_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, CAPSULE_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, PLAYER_COLLISION_GROUP, false)
 end
 
 local function setCharacterCollisionGroup(character: Model)
@@ -141,6 +153,7 @@ local function getYenMultiplier(player: Player): number
 	local rebirths = math.max(math.floor(PlayerDataService:Get(player, "Rebirths") or 0), 0)
 	local rebirthConfig = TycoonConfig.Rebirth
 	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
+	multiplier *= EventUtil.getEffectMultiplier("YenMultiplier", 1)
 
 	return multiplier
 end
@@ -289,8 +302,14 @@ local function getManaMultiplier(player: Player): number
 	if MonetizationService:OwnsGamePass(player, "DoubleMana") then
 		multiplier *= 2
 	end
+	multiplier *= EventUtil.getEffectMultiplier("ManaMultiplier", 1)
 
 	return multiplier
+end
+
+local function getDropInterval(): number
+	local dropSpeedMultiplier = math.max(EventUtil.getEffectMultiplier("DropSpeedMultiplier", 1), 0.1)
+	return DROP_INTERVAL / dropSpeedMultiplier
 end
 
 local function getMaxMutationMultiplier(): number
@@ -317,7 +336,9 @@ end
 
 local function getDepositInterval(player: Player): number
 	local MonetizationService = Knit.GetService("MonetizationService")
-	return if MonetizationService:OwnsGamePass(player, "DoubleDeposit") then 0.5 else PROCESS_INTERVAL
+	local interval = if MonetizationService:OwnsGamePass(player, "DoubleDeposit") then 0.5 else PROCESS_INTERVAL
+	local processSpeedMultiplier = math.max(EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1), 0.1)
+	return interval / processSpeedMultiplier
 end
 
 local function getTycoonOwnerPlayer(tycoon: Instance): Player?
@@ -413,7 +434,8 @@ end
 local function getUnitSpawnTier(PlayerDataService, player: Player): number
 	local upgrades = PlayerDataService:Get(player, "RebirthUpgrades")
 	local level = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
-	return RebirthUpgrades.getUnitSpawnTier(level)
+	local eventBonus = math.max(math.floor(EventUtil.getEffectBonus("UnitSpawnTierBonus", 0)), 0)
+	return math.clamp(RebirthUpgrades.getUnitSpawnTier(level) + eventBonus, 1, AnimeDroppers.MaxTier)
 end
 
 local function getRebirthStarterUnits(PlayerDataService, player: Player): { { Tier: number } }
@@ -440,11 +462,12 @@ local function getRebirthStarterUnits(PlayerDataService, player: Player): { { Ti
 end
 
 local function getMaxPickupRate(units: { { Tier: number } }): number
+	local dropInterval = getDropInterval()
 	local total = 0
 	for _, unit in units do
 		local tierData = AnimeDroppers.Tiers[unit.Tier]
 		if tierData then
-			total += (tierData.DropValue or 1) / DROP_INTERVAL
+			total += (tierData.DropValue or 1) / dropInterval
 		end
 	end
 	return math.max(total, 1)
@@ -557,6 +580,7 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 
 	local units = PlayerDataService:GetUnits(player)
 	local maxRate = getMaxPickupRate(units)
+	local dropInterval = getDropInterval()
 	local now = os.clock()
 	local lastUpdated = pickupBudgetUpdatedAt[player] or now
 	local elapsed = math.max(now - lastUpdated, 0)
@@ -569,7 +593,7 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 		end
 	end
 
-	local maxStoredDropValue = math.max(maxRate * DROP_INTERVAL * MAX_ACTIVE_DROPS, maxDropValue * MAX_ACTIVE_DROPS)
+	local maxStoredDropValue = math.max(maxRate * dropInterval * MAX_ACTIVE_DROPS, maxDropValue * MAX_ACTIVE_DROPS)
 	pickupBudget[player] = math.min((pickupBudget[player] or 0) + maxRate * elapsed, maxStoredDropValue)
 	pickupBudgetUpdatedAt[player] = now
 
@@ -577,7 +601,7 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 	local remainingAmount = amount
 	local normalPickupAmount = math.min(availablePickupBudget, remainingAmount)
 	remainingAmount -= normalPickupAmount
-	local normalBurstAllowance = math.max(maxRate * DROP_INTERVAL + maxDropValue, maxDropValue)
+	local normalBurstAllowance = math.max(maxRate * dropInterval + maxDropValue, maxDropValue)
 	local burstPickupAmount = math.min(normalBurstAllowance, remainingAmount)
 	remainingAmount -= burstPickupAmount
 	local creditedAmount = normalPickupAmount + burstPickupAmount
@@ -1196,7 +1220,7 @@ local function createCapsuleEntry(player: Player): (boolean, any?)
 	}
 end
 
-function TycoonService:OpenCapsuleForPlayer(player: Player, capsuleId: string, spentYen: boolean): (boolean, string?, number?)
+function TycoonService:BeginOpenCapsuleForPlayer(player: Player, capsuleId: string, spentYen: boolean): (boolean, string?, number?)
 	local capsules = activeCapsules[player]
 	local capsule = if capsules then capsules[capsuleId] else nil
 	if not capsule then
@@ -1204,6 +1228,11 @@ function TycoonService:OpenCapsuleForPlayer(player: Player, capsuleId: string, s
 	end
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local currentUnits = PlayerDataService:GetUnits(player)
+	if #currentUnits >= TycoonConfig.MaxUnits then
+		return false, "Unit cap reached"
+	end
+
 	if spentYen then
 		if not PlayerDataService:TrySpendYen(player, capsule.OpenPrice) then
 			return false, "Not enough yen"
@@ -1211,21 +1240,45 @@ function TycoonService:OpenCapsuleForPlayer(player: Player, capsuleId: string, s
 	end
 
 	local rewardTier = CapsuleUtil.rollRewardTier(capsule.HighestTier)
-	local granted, grantErr = grantCapsuleUnit(player, rewardTier)
-	if not granted then
-		if spentYen then
-			PlayerDataService:AddYen(player, capsule.OpenPrice)
-		end
-		return false, grantErr
-	end
 
 	capsules[capsuleId] = nil
 	lastCapsuleRewardTier[player] = rewardTier
+	pendingCapsuleRewards[player] = pendingCapsuleRewards[player] or {}
+	pendingCapsuleRewards[player][capsuleId] = rewardTier
 	return true, nil, rewardTier
 end
 
 function TycoonService.Client:GetLastCapsuleReward(player: Player): number?
 	return lastCapsuleRewardTier[player]
+end
+
+function TycoonService.Client:GetPendingCapsuleReward(player: Player, capsuleId: string): number?
+	if type(capsuleId) ~= "string" or capsuleId == "" then
+		return nil
+	end
+
+	local rewards = pendingCapsuleRewards[player]
+	return rewards and rewards[capsuleId] or nil
+end
+
+function TycoonService.Client:ClaimCapsuleReward(player: Player, capsuleId: string): (boolean, string?)
+	if type(capsuleId) ~= "string" or capsuleId == "" then
+		return false, "Invalid capsule"
+	end
+
+	local rewards = pendingCapsuleRewards[player]
+	local rewardTier = rewards and rewards[capsuleId]
+	if type(rewardTier) ~= "number" then
+		return false, "No pending reward"
+	end
+
+	local granted, grantErr = grantCapsuleUnit(player, rewardTier)
+	if not granted then
+		return false, grantErr
+	end
+
+	rewards[capsuleId] = nil
+	return true
 end
 
 function TycoonService:OpenPendingCapsulePurchase(player: Player): boolean
@@ -1235,7 +1288,10 @@ function TycoonService:OpenPendingCapsulePurchase(player: Player): boolean
 		return false
 	end
 
-	local success = self:OpenCapsuleForPlayer(player, capsuleId, false)
+	local success, _, rewardTier = self:BeginOpenCapsuleForPlayer(player, capsuleId, false)
+	if success then
+		self.Client.CapsuleRobuxOpened:Fire(player, capsuleId, rewardTier)
+	end
 	return success
 end
 
@@ -1248,6 +1304,8 @@ function TycoonService.Client:RequestCapsuleDrop(player: Player): (boolean, any?
 	end
 
 	local spawnChance = tonumber(config.SpawnChance) or 0.01
+	spawnChance *= math.max(EventUtil.getEffectMultiplier("CapsuleSpawnChanceMultiplier", 1), 0)
+	spawnChance = math.clamp(spawnChance, 0, 1)
 	if math.random() > spawnChance then
 		return false
 	end
@@ -1260,6 +1318,7 @@ function TycoonService.Client:RequestAmbientCapsule(player: Player): (boolean, a
 	local config = getCapsuleConfig()
 	local now = os.clock()
 	local interval = tonumber(config.AmbientSpawnInterval) or 120
+	interval *= math.max(EventUtil.getEffectMultiplier("AmbientCapsuleIntervalMultiplier", 1), 0.1)
 	if now - (lastAmbientCapsuleAt[player] or 0) < interval then
 		return false
 	end
@@ -1278,7 +1337,13 @@ function TycoonService.Client:PrepareCapsuleRobuxOpen(player: Player, capsuleId:
 		return false
 	end
 
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	if #PlayerDataService:GetUnits(player) >= TycoonConfig.MaxUnits then
+		return false
+	end
+
 	pendingCapsuleRobux[player] = capsuleId
+	lastCapsuleRewardTier[player] = nil
 	return true
 end
 
@@ -1287,7 +1352,7 @@ function TycoonService.Client:OpenCapsule(player: Player, capsuleId: string): (b
 		return false, "Invalid capsule"
 	end
 
-	return self.Server:OpenCapsuleForPlayer(player, capsuleId, true)
+	return self.Server:BeginOpenCapsuleForPlayer(player, capsuleId, true)
 end
 
 function TycoonService.Client:DismissCapsule(player: Player, capsuleId: string): boolean
@@ -1303,6 +1368,11 @@ function TycoonService.Client:DismissCapsule(player: Player, capsuleId: string):
 	capsules[capsuleId] = nil
 	if pendingCapsuleRobux[player] == capsuleId then
 		pendingCapsuleRobux[player] = nil
+	end
+
+	local rewards = pendingCapsuleRewards[player]
+	if rewards then
+		rewards[capsuleId] = nil
 	end
 
 	return true
@@ -1336,6 +1406,7 @@ function TycoonService:KnitStart()
 		lastAmbientCapsuleAt[player] = nil
 		pendingCapsuleRobux[player] = nil
 		lastCapsuleRewardTier[player] = nil
+		pendingCapsuleRewards[player] = nil
 		self:ReleaseTycoon(player)
 	end)
 

@@ -4,14 +4,14 @@ local FormatUtil = require(script.Parent.FormatUtil)
 
 local Pricing = {}
 local RATE_GAIN_BASE = 1
-local RATE_GAIN_LINEAR = 0.9
-local RATE_GAIN_POWER_SCALE = 0.24
+local RATE_GAIN_LINEAR = 0.8
+local RATE_GAIN_POWER_SCALE = 0.5
 local RATE_GAIN_EXPONENT = 2.1
 local RATE_PRICE_BASE = 5
 local RATE_PRICE_LINEAR = 4
 local RATE_PRICE_POWER_SCALE = 1.9
 local RATE_PRICE_EXPONENT = 2.35
-local MAX_RATE_BUY_AMOUNT = 100_000_000
+local MAX_RATE_BUY_AMOUNT = 100_000_000_000
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,

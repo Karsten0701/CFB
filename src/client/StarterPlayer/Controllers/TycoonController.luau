@@ -7,6 +7,7 @@ local CollectionService = game:GetService("CollectionService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local ButtonPress = require(ReplicatedStorage.Shared.Observers.Button)
+local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Loading = require(ReplicatedStorage.Shared.Performance.Loading)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
@@ -49,6 +50,7 @@ local lastGroupRewardDisplayAt = 0
 local groupJoinPromptOpen = false
 local otherTycoonRefreshToken = 0
 local otherTycoonRefreshRunning = false
+local lastAppliedEventId: string? = nil
 
 local ACTION_COOLDOWN = 1.12
 local OTHER_TYCOON_STREAM_INTERVAL = 0.75
@@ -460,6 +462,14 @@ local function mergeEntitlementsWithSettings(
 	if type(settings) == "table" then
 		merged.AutoCollect = settings.AutoCollect == true
 		merged.AutoDeposit = settings.AutoDeposit == true
+		merged.ShowVFX = settings.ShowVFX ~= false
+		merged.ShowManaPopup = settings.ShowManaPopup ~= false
+	end
+
+	local activeEvent = EventUtil.getActiveEvent()
+	if activeEvent then
+		merged.ManaMultiplier *= math.max(tonumber(activeEvent.Effects.ManaMultiplier) or 1, 0)
+		merged.DropSpeedMultiplier = math.max(tonumber(activeEvent.Effects.DropSpeedMultiplier) or 1, 0.1)
 	end
 
 	return merged
@@ -468,11 +478,13 @@ end
 local function getCurrentUnitSpawnTier(PlayerDataController): number
 	local upgrades = PlayerDataController:Get("RebirthUpgrades")
 	local unitSpawnTierLevel = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
-	return RebirthUpgrades.getUnitSpawnTier(unitSpawnTierLevel)
+	local eventBonus = math.max(math.floor(EventUtil.getEffectBonus("UnitSpawnTierBonus", 0)), 0)
+	return math.clamp(RebirthUpgrades.getUnitSpawnTier(unitSpawnTierLevel) + eventBonus, 1, AnimeDroppers.MaxTier)
 end
 
 local function getDepositProcessInterval(): number
-	return if monetizationEntitlements.DoubleDeposit then 0.5 else 1
+	local interval = if monetizationEntitlements.DoubleDeposit then 0.5 else 1
+	return interval / math.max(EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1), 0.1)
 end
 
 function TycoonController:updateProcesserDisplay(tycoon: Instance)
@@ -500,6 +512,10 @@ function TycoonController:updateDepositVFX(tycoon: Instance, newDepositValue: nu
 	if not entry or not entry.depositVFX then
 		return
 	end
+
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local settings = PlayerDataController:Get("Settings")
+	entry.depositVFX:setEnabled(settings == nil or settings.ShowVFX ~= false)
 
 	local newDeposit = math.max(math.floor(newDepositValue or 0), 0)
 	local previousDeposit = entry.lastObservedDeposit
@@ -552,6 +568,7 @@ function TycoonController:applyEntitlementsToOwnTycoon(autoEnableSetting: string
 		end
 
 		if entry.depositVFX then
+			entry.depositVFX:setEnabled(settings == nil or settings.ShowVFX ~= false)
 			local deposit = PlayerDataController:Get("ManaInDeposit") or 0
 			entry.depositVFX:setProcessorActive(deposit > 0, getDepositProcessInterval())
 		end
@@ -1119,6 +1136,8 @@ function TycoonController:setupOwnTycoon(): boolean
 	local currentDeposit = math.max(math.floor(PlayerDataController:Get("ManaInDeposit") or 0), 0)
 	renderers[tycoon].lastObservedDeposit = currentDeposit
 	if renderers[tycoon].depositVFX then
+		local settings = PlayerDataController:Get("Settings")
+		renderers[tycoon].depositVFX:setEnabled(settings == nil or settings.ShowVFX ~= false)
 		renderers[tycoon].depositVFX:setProcessorActive(currentDeposit > 0, getDepositProcessInterval())
 	end
 
@@ -1172,12 +1191,15 @@ function TycoonController:setupOwnTycoon(): boolean
 		if entry and entry.renderer then
 			local autoCollect = settings and settings.AutoCollect == true
 			local autoDeposit = settings and settings.AutoDeposit == true
-			if entry.lastAutoCollect ~= autoCollect then
-				entry.lastAutoCollect = autoCollect
-				entry.renderer:setEntitlements(mergeEntitlementsWithSettings(monetizationEntitlements, settings))
-			end
-
+			entry.lastAutoCollect = autoCollect
 			entry.lastAutoDeposit = autoDeposit
+			entry.renderer:setEntitlements(mergeEntitlementsWithSettings(monetizationEntitlements, settings))
+		end
+
+		if entry and entry.depositVFX then
+			entry.depositVFX:setEnabled(settings == nil or settings.ShowVFX ~= false)
+			local deposit = PlayerDataController:Get("ManaInDeposit") or 0
+			entry.depositVFX:setProcessorActive(deposit > 0, getDepositProcessInterval())
 		end
 	end, janitor)
 
@@ -1337,6 +1359,41 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 	end)
 end
 
+function TycoonController:refreshOwnTycoonForEvent()
+	self:applyEntitlementsToOwnTycoon()
+
+	for tycoon, entry in renderers do
+		if entry.isOwn then
+			self:updateButtonPrices(tycoon)
+			self:updateProcesserDisplay(tycoon)
+
+			if entry.depositVFX then
+				local PlayerDataController = Knit.GetController("PlayerDataController")
+				local deposit = PlayerDataController:Get("ManaInDeposit") or 0
+				entry.depositVFX:setProcessorActive(deposit > 0, getDepositProcessInterval())
+			end
+		end
+	end
+end
+
+function TycoonController:startEventRefreshLoop()
+	task.spawn(function()
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		PlayerDataController:WaitForData()
+
+		while true do
+			local activeEvent = EventUtil.getActiveEvent()
+			local eventId = if activeEvent then activeEvent.Id else nil
+			if eventId ~= lastAppliedEventId then
+				lastAppliedEventId = eventId
+				self:refreshOwnTycoonForEvent()
+			end
+
+			task.wait(2)
+		end
+	end)
+end
+
 function TycoonController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local initialized = false
@@ -1404,6 +1461,8 @@ function TycoonController:KnitStart()
 			init()
 		end
 	end)
+
+	self:startEventRefreshLoop()
 end
 
 return TycoonController

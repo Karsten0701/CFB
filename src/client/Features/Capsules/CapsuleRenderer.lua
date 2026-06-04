@@ -1,6 +1,8 @@
 local PhysicsService = game:GetService("PhysicsService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
@@ -22,6 +24,9 @@ pcall(function()
 end)
 pcall(function()
 	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_COLLISION_GROUP, false)
+end)
+pcall(function()
+	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, CAPSULE_COLLISION_GROUP, false)
 end)
 pcall(function()
 	PhysicsService:CollisionGroupSetCollidable(CAPSULE_COLLISION_GROUP, DROP_WALL_COLLISION_GROUP, false)
@@ -62,28 +67,68 @@ local function getAnimeDroppersFolder(): Folder?
 	return if current:IsA("Folder") then current else nil
 end
 
-local unitTemplateCache: { [number]: Model? } = {}
+local unitTemplateCache: { [number]: { Model: Model, IsPreScaled: boolean } } = {}
 
-local function getUnitTemplate(tier: number): Model?
-	local cached = unitTemplateCache[tier]
-	if cached and cached.Parent then
-		return cached
-	end
-
-	local assets = getAnimeDroppersFolder()
+local function getCapsuleTemplatesFolder(): Folder?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	if not assets then
 		return nil
 	end
 
+	local templates = assets:FindFirstChild("CapsuleTemplates")
+	return if templates and templates:IsA("Folder") then templates else nil
+end
+
+local function getUnitTemplate(tier: number): (Model?, boolean)
+	local cached = unitTemplateCache[tier]
+	if cached and cached.Model.Parent then
+		return cached.Model, cached.IsPreScaled
+	end
+
 	tier = math.clamp(math.floor(tier), 1, AnimeDroppers.MaxTier)
+
+	local capsuleTemplates = getCapsuleTemplatesFolder()
+	if capsuleTemplates then
+		for fallbackTier = tier, 1, -1 do
+			local tierData = AnimeDroppers.Tiers[fallbackTier]
+			local model = tierData and capsuleTemplates:FindFirstChild(tierData.ModelName)
+			if model and model:IsA("Model") then
+				unitTemplateCache[tier] = {
+					Model = model,
+					IsPreScaled = true,
+				}
+				return model, true
+			end
+		end
+
+		for fallbackTier = tier + 1, AnimeDroppers.MaxTier do
+			local tierData = AnimeDroppers.Tiers[fallbackTier]
+			local model = tierData and capsuleTemplates:FindFirstChild(tierData.ModelName)
+			if model and model:IsA("Model") then
+				unitTemplateCache[tier] = {
+					Model = model,
+					IsPreScaled = true,
+				}
+				return model, true
+			end
+		end
+	end
+
+	local assets = getAnimeDroppersFolder()
+	if not assets then
+		return nil, false
+	end
 
 	for fallbackTier = tier, 1, -1 do
 		local tierData = AnimeDroppers.Tiers[fallbackTier]
 		if tierData then
 			local model = assets:FindFirstChild(tierData.ModelName)
 			if model and model:IsA("Model") then
-				unitTemplateCache[tier] = model
-				return model
+				unitTemplateCache[tier] = {
+					Model = model,
+					IsPreScaled = false,
+				}
+				return model, false
 			end
 		end
 	end
@@ -93,13 +138,16 @@ local function getUnitTemplate(tier: number): Model?
 		if tierData then
 			local model = assets:FindFirstChild(tierData.ModelName)
 			if model and model:IsA("Model") then
-				unitTemplateCache[tier] = model
-				return model
+				unitTemplateCache[tier] = {
+					Model = model,
+					IsPreScaled = false,
+				}
+				return model, false
 			end
 		end
 	end
 
-	return nil
+	return nil, false
 end
 
 local function isPreviewModel(instance: Instance): boolean
@@ -128,6 +176,8 @@ local function getContentModel(capsule: Instance): Model?
 		if inner and inner:IsA("Model") and inner ~= capsule then
 			return inner
 		end
+
+		return capsule
 	end
 
 	if capsule:IsA("BasePart") then
@@ -188,24 +238,22 @@ end
 
 local function findUnitSlot(capsule: Instance, slotName: string): Instance?
 	local content = getContentModel(capsule)
-	if not content then
-		return nil
-	end
+	local searchRoot = content or capsule
 
-	local slot = content:FindFirstChild(slotName)
+	local slot = searchRoot:FindFirstChild(slotName)
 	if slot then
 		return slot
 	end
 
 	local lower = string.lower(slotName)
-	for _, child in content:GetChildren() do
+	for _, child in searchRoot:GetChildren() do
 		if string.lower(child.Name) == lower then
 			return child
 		end
 	end
 
 	local upper = string.upper(string.sub(slotName, 1, 1)) .. string.sub(slotName, 2)
-	return content:FindFirstChild(upper)
+	return searchRoot:FindFirstChild(upper)
 end
 
 local function getSlotPivot(slot: Instance): CFrame
@@ -249,6 +297,11 @@ local function setCapsulePartPhysics(part: BasePart)
 	part.CanQuery = true
 	part.Massless = false
 	part.CollisionGroup = CAPSULE_COLLISION_GROUP
+	if part:IsA("Part") then
+		part.Shape = Enum.PartType.Ball
+	end
+	part.RootPriority = 127
+	part.CustomPhysicalProperties = PhysicalProperties.new(0.8, 0.75, 0, 1, 100)
 	part:SetAttribute("IsCapsule", true)
 	part:SetAttribute("IsPossibleDrop", true)
 	part:SetAttribute("DropValue", nil)
@@ -256,11 +309,11 @@ local function setCapsulePartPhysics(part: BasePart)
 end
 
 local function setWeldedPartPhysics(part: BasePart)
-	part.Anchored = true
+	part.Anchored = false
 	part.CanCollide = false
 	part.CanTouch = false
 	part.CanQuery = false
-	part.Massless = true
+	part.Massless = false
 	part.CollisionGroup = CAPSULE_COLLISION_GROUP
 	part:SetAttribute("IsCapsule", true)
 	part:SetAttribute("DropValue", nil)
@@ -272,8 +325,20 @@ local function setHeldPartPhysics(part: BasePart)
 	part.CanCollide = false
 	part.CanTouch = false
 	part.CanQuery = false
-	part.Massless = true
-	part.CollisionGroup = PLAYER_COLLISION_GROUP
+	part.Massless = false
+	part.CollisionGroup = CAPSULE_COLLISION_GROUP
+end
+
+local function getHoldAttachmentFolder(assemblyRoot: BasePart): Folder
+	local folder = assemblyRoot:FindFirstChild("CapsuleHold")
+	if folder and folder:IsA("Folder") then
+		return folder
+	end
+
+	folder = Instance.new("Folder")
+	folder.Name = "CapsuleHold"
+	folder.Parent = assemblyRoot
+	return folder
 end
 
 local function setPreviewPartPhysics(part: BasePart)
@@ -391,6 +456,8 @@ local function weldPreviewPartsToAnchor(unitModel: Model, anchor: BasePart)
 end
 
 local function weldCapsuleAssembly(capsule: Instance, assemblyRoot: BasePart)
+	setCapsulePartPhysics(assemblyRoot)
+
 	for _, descendant in capsule:GetDescendants() do
 		if descendant:IsA("BasePart") then
 			if descendant == assemblyRoot then
@@ -419,10 +486,21 @@ end
 local function ensurePreviewVisible(unitModel: Model)
 	for _, descendant in unitModel:GetDescendants() do
 		if descendant:IsA("BasePart") then
-			if descendant.Transparency >= 1 then
+			local lowerName = string.lower(descendant.Name)
+			local isHiddenHelper = lowerName == "humanoidrootpart"
+				or lowerName == "rootpart"
+				or string.find(lowerName, "hitbox") ~= nil
+				or string.find(lowerName, "collision") ~= nil
+
+			if isHiddenHelper then
+				descendant.Transparency = 1
+				descendant.LocalTransparencyModifier = 1
+			elseif descendant.Transparency >= 1 then
 				descendant.Transparency = 0
+				descendant.LocalTransparencyModifier = 0
+			else
+				descendant.LocalTransparencyModifier = 0
 			end
-			descendant.LocalTransparencyModifier = 0
 		end
 	end
 end
@@ -434,22 +512,22 @@ local function hideSlotPlaceholder(slot: Instance)
 		end
 
 		if descendant:IsA("BasePart") then
-			descendant.Anchored = true
+			descendant.Anchored = false
 			descendant.Transparency = 1
 			descendant.CanCollide = false
 			descendant.CanTouch = false
 			descendant.CanQuery = false
-			descendant.Massless = true
+			descendant.Massless = false
 		end
 	end
 
 	if slot:IsA("BasePart") then
-		slot.Anchored = true
+		slot.Anchored = false
 		slot.Transparency = 1
 		slot.CanCollide = false
 		slot.CanTouch = false
 		slot.CanQuery = false
-		slot.Massless = true
+		slot.Massless = false
 	end
 end
 
@@ -507,11 +585,254 @@ local function attachPreviewToSlot(unitModel: Model, assemblyRoot: BasePart, slo
 	end
 
 	weldPreviewPartsToAnchor(unitModel, anchor)
+	weldPartToRoot(anchor, assemblyRoot, "CapsulePreviewWeld")
 end
 
 local function isLocalCharacterPart(part: BasePart): boolean
 	local character = Players.LocalPlayer.Character
 	return character ~= nil and part:IsDescendantOf(character)
+end
+
+local function getUprightHoldCFrame(humanoidRoot: BasePart, offset: CFrame): CFrame
+	local targetPosition = (humanoidRoot.CFrame * offset).Position
+	local look = humanoidRoot.CFrame.LookVector
+	local flatLook = Vector3.new(look.X, 0, look.Z)
+	if flatLook.Magnitude < 0.001 then
+		flatLook = Vector3.new(0, 0, -1)
+	else
+		flatLook = flatLook.Unit
+	end
+
+	return CFrame.lookAt(targetPosition, targetPosition + flatLook)
+end
+
+local function startCapsulePhysicsDebug(capsuleId: string, assemblyRoot: BasePart)
+	if getCapsuleConfig().DebugPhysics ~= true then
+		return
+	end
+
+	task.spawn(function()
+		local lastPosition = assemblyRoot.Position
+		local lastOrientation = assemblyRoot.Orientation
+
+		for sample = 1, 8 do
+			if not assemblyRoot.Parent then
+				return
+			end
+
+			local position = assemblyRoot.Position
+			local orientation = assemblyRoot.Orientation
+			local moved = (position - lastPosition).Magnitude
+			local rotated = (orientation - lastOrientation).Magnitude
+			print(
+				`[CapsuleDebug] {capsuleId} sample={sample} pos={position} orient={orientation} moved={string.format(
+					"%.3f",
+					moved
+				)} rotated={string.format("%.3f", rotated)} linVel={assemblyRoot.AssemblyLinearVelocity} angVel={assemblyRoot.AssemblyAngularVelocity} anchored={assemblyRoot.Anchored} massless={assemblyRoot.Massless} canCollide={assemblyRoot.CanCollide} group={assemblyRoot.CollisionGroup} rollDrive={assemblyRoot:FindFirstChild(
+					"CapsuleRollDrive"
+				) ~= nil}`
+			)
+
+			lastPosition = position
+			lastOrientation = orientation
+			task.wait(0.75)
+		end
+	end)
+end
+
+local function getHorizontalDirection(direction: Vector3?): Vector3?
+	if not direction then
+		return nil
+	end
+
+	local horizontal = Vector3.new(direction.X, 0, direction.Z)
+	if horizontal.Magnitude < 0.001 then
+		return nil
+	end
+
+	return horizontal.Unit
+end
+
+local function applyRollKick(assemblyRoot: BasePart, strength: number, preferredDirection: Vector3?)
+	if not assemblyRoot.Parent then
+		return
+	end
+
+	local direction = getHorizontalDirection(preferredDirection)
+	if not direction then
+		local angle = math.random() * math.pi * 2
+		direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+	end
+
+	local mass = math.max(assemblyRoot.AssemblyMass, 1)
+	local linearVelocity = direction * strength
+	local spinAxis = Vector3.new(-direction.Z, 0, direction.X)
+
+	assemblyRoot:ApplyImpulse(linearVelocity * mass)
+	assemblyRoot:ApplyAngularImpulse(spinAxis * mass * strength * 1.1)
+end
+
+local function getGroundRollDirection(assemblyRoot: BasePart, excludeRoot: Instance?): (Vector3?, boolean, boolean)
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = { excludeRoot or assemblyRoot }
+	raycastParams.IgnoreWater = true
+
+	local radius = math.max(assemblyRoot.Size.X, assemblyRoot.Size.Y, assemblyRoot.Size.Z) * 0.5
+	local result = Workspace:Raycast(assemblyRoot.Position, Vector3.new(0, -(radius + 1.25), 0), raycastParams)
+	if not result then
+		return nil, false, false
+	end
+
+	local grounded = result.Distance <= radius + 0.45
+	if not grounded then
+		return nil, false, false
+	end
+
+	local normal = result.Normal
+	if normal.Y > 0.985 then
+		return nil, false, true
+	end
+
+	local gravityDirection = Vector3.new(0, -1, 0)
+	local downhill = gravityDirection - normal * gravityDirection:Dot(normal)
+	if downhill.Magnitude < 0.02 then
+		return nil, false, true
+	end
+
+	return downhill.Unit, true, true
+end
+
+local function pushGroundedHorizontalVelocity(assemblyRoot: BasePart, direction: Vector3, targetSpeed: number)
+	local horizontalDirection = getHorizontalDirection(direction)
+	if not horizontalDirection then
+		return
+	end
+
+	local velocity = assemblyRoot.AssemblyLinearVelocity
+	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	if horizontalVelocity.Magnitude >= targetSpeed then
+		return
+	end
+
+	local newHorizontalVelocity = horizontalDirection * targetSpeed
+	assemblyRoot.AssemblyLinearVelocity = Vector3.new(newHorizontalVelocity.X, velocity.Y, newHorizontalVelocity.Z)
+end
+
+local function syncGroundedRollSpin(assemblyRoot: BasePart, direction: Vector3, targetSpeed: number)
+	local horizontalDirection = getHorizontalDirection(direction)
+	if not horizontalDirection then
+		return
+	end
+
+	local radius = math.max(math.max(assemblyRoot.Size.X, assemblyRoot.Size.Y, assemblyRoot.Size.Z) * 0.5, 0.25)
+	local spinAxis = Vector3.new(-horizontalDirection.Z, 0, horizontalDirection.X)
+	local targetAngularSpeed = math.clamp(targetSpeed / radius, 1.5, 8)
+	local currentAngularVelocity = assemblyRoot.AssemblyAngularVelocity
+	local currentRollSpeed = math.abs(currentAngularVelocity:Dot(spinAxis))
+	if currentRollSpeed >= targetAngularSpeed * 0.7 then
+		return
+	end
+
+	assemblyRoot.AssemblyAngularVelocity = spinAxis * targetAngularSpeed + Vector3.new(0, currentAngularVelocity.Y, 0)
+end
+
+local function destroyRollDrive(entry: any)
+	if entry.rollConnection then
+		entry.rollConnection:Disconnect()
+		entry.rollConnection = nil
+	end
+
+	if entry.rollDriveFolder then
+		entry.rollDriveFolder:Destroy()
+		entry.rollDriveFolder = nil
+	end
+end
+
+local function startRollingAssist(entry: any, assemblyRoot: BasePart, preferredDirection: Vector3?)
+	destroyRollDrive(entry)
+
+	local folder = Instance.new("Folder")
+	folder.Name = "CapsuleRollDrive"
+	folder.Parent = assemblyRoot
+	entry.rollDriveFolder = folder
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "CapsuleRollAttachment"
+	attachment.Parent = assemblyRoot
+
+	local torque = Instance.new("Torque")
+	torque.Name = "CapsuleRollTorque"
+	torque.Attachment0 = attachment
+	torque.RelativeTo = Enum.ActuatorRelativeTo.World
+	torque.Torque = Vector3.zero
+	torque.Parent = folder
+
+	local vectorForce = Instance.new("VectorForce")
+	vectorForce.Name = "CapsuleRollVectorForce"
+	vectorForce.Attachment0 = attachment
+	vectorForce.RelativeTo = Enum.ActuatorRelativeTo.World
+	vectorForce.ApplyAtCenterOfMass = true
+	vectorForce.Force = Vector3.zero
+	vectorForce.Parent = folder
+
+	local rollDirection = getHorizontalDirection(preferredDirection) or Vector3.new(1, 0, 0)
+	local nextKickAt = 0
+	local driveStartedAt = os.clock()
+	entry.rollConnection = RunService.Heartbeat:Connect(function()
+		if entry.destroying or entry.pickedUp or not assemblyRoot.Parent then
+			destroyRollDrive(entry)
+			return
+		end
+
+		local now = os.clock()
+		local horizontalVelocity =
+			Vector3.new(assemblyRoot.AssemblyLinearVelocity.X, 0, assemblyRoot.AssemblyLinearVelocity.Z)
+		local driveAge = now - driveStartedAt
+		if driveAge > 28 then
+			destroyRollDrive(entry)
+			return
+		end
+		local assistAlpha = math.clamp(1 - (driveAge / 32), 0.55, 1)
+
+		local slopeDirection, onSlope, grounded = getGroundRollDirection(assemblyRoot, entry.instance)
+		if slopeDirection then
+			local horizontalSlopeDirection = getHorizontalDirection(slopeDirection)
+			if horizontalSlopeDirection then
+				rollDirection = horizontalSlopeDirection
+			end
+		elseif horizontalVelocity.Magnitude > 0.35 then
+			rollDirection = horizontalVelocity.Unit
+		end
+
+		local spinAxis = Vector3.new(-rollDirection.Z, 0, rollDirection.X)
+
+		local mass = math.max(assemblyRoot.AssemblyMass, 1)
+		local canFlatAssist = grounded and not onSlope and driveAge < 24
+		local assistDirection = if slopeDirection then slopeDirection else if canFlatAssist then rollDirection else nil
+		if assistDirection then
+			local forceStrength = if onSlope then 115 else 70
+			local torqueStrength = if onSlope then 950 else 700
+			vectorForce.Force = assistDirection * mass * forceStrength * assistAlpha
+			torque.Torque = spinAxis * mass * torqueStrength * assistAlpha
+
+			local targetSpeed = if onSlope then 5.5 else 3.5
+			pushGroundedHorizontalVelocity(assemblyRoot, assistDirection, targetSpeed * assistAlpha)
+			syncGroundedRollSpin(assemblyRoot, assistDirection, targetSpeed * assistAlpha)
+		else
+			vectorForce.Force = Vector3.zero
+			torque.Torque = Vector3.zero
+		end
+
+		if now < nextKickAt then
+			return
+		end
+
+		nextKickAt = now + 1
+		if grounded and assistDirection and horizontalVelocity.Magnitude < 0.65 and assistAlpha > 0 then
+			applyRollKick(assemblyRoot, if onSlope then 2.2 else 1.5, rollDirection)
+		end
+	end)
 end
 
 function CapsuleRenderer.getDropSpawnCFrame(dropPart: BasePart): CFrame
@@ -528,7 +849,7 @@ function CapsuleRenderer.getDropSpawnCFrame(dropPart: BasePart): CFrame
 			return dropSpot.CFrame
 		end
 		if dropSpot:IsA("Attachment") then
-			return dropPart.CFrame * dropSpot.CFrame
+			return dropSpot.WorldCFrame
 		end
 	end
 
@@ -569,11 +890,6 @@ function CapsuleRenderer.populatePreviewUnits(capsule: Instance, assemblyRoot: B
 	local config = getCapsuleConfig()
 	local unitScale = tonumber(config.UnitScale) or 0.2
 
-	if not getContentModel(capsule) then
-		warn("[CapsuleRenderer] Missing nested Capsule model")
-		return
-	end
-
 	clearExistingPreviews(capsule, assemblyRoot)
 
 	for index = 1, #previewTiers do
@@ -584,7 +900,7 @@ function CapsuleRenderer.populatePreviewUnits(capsule: Instance, assemblyRoot: B
 		end
 
 		local slot = findUnitSlot(capsule, slotName)
-		local template = getUnitTemplate(tier)
+		local template, isPreScaled = getUnitTemplate(tier)
 		if not slot then
 			warn("[CapsuleRenderer] Missing slot:", slotName)
 			continue
@@ -594,22 +910,19 @@ function CapsuleRenderer.populatePreviewUnits(capsule: Instance, assemblyRoot: B
 			continue
 		end
 
-		if not slot:IsA("Model") and not slot:IsA("Folder") then
-			warn("[CapsuleRenderer] Slot must be a Model or Folder:", slotName, slot.ClassName)
-			continue
-		end
-
 		hideSlotPlaceholder(slot)
 
 		local unitModel = template:Clone()
 		unitModel.Name = `Preview_{tier}`
 		stripPreviewDecorations(unitModel)
 
-		local scaleOk = pcall(function()
-			unitModel:ScaleTo(unitScale)
-		end)
-		if not scaleOk then
-			warn("[CapsuleRenderer] ScaleTo failed for preview tier:", tier)
+		if not isPreScaled then
+			local scaleOk = pcall(function()
+				unitModel:ScaleTo(unitScale)
+			end)
+			if not scaleOk then
+				warn("[CapsuleRenderer] ScaleTo failed for preview tier:", tier)
+			end
 		end
 
 		attachPreviewToSlot(unitModel, assemblyRoot, slot)
@@ -658,12 +971,41 @@ end
 
 function CapsuleRenderer:releaseHold(capsuleId: string)
 	local entry = self.entries[capsuleId]
-	if not entry or not entry.holdWeld then
+	if not entry then
 		return
 	end
 
-	entry.holdWeld:Destroy()
-	entry.holdWeld = nil
+	if entry.holdConnection then
+		entry.holdConnection:Disconnect()
+		entry.holdConnection = nil
+	end
+
+	if entry.holdWeld then
+		entry.holdWeld:Destroy()
+		entry.holdWeld = nil
+	end
+
+	if entry.holdFolder then
+		entry.holdFolder:Destroy()
+		entry.holdFolder = nil
+	end
+
+	if entry.rootHoldAttachment then
+		entry.rootHoldAttachment:Destroy()
+		entry.rootHoldAttachment = nil
+	end
+
+	if entry.characterHoldAttachment then
+		entry.characterHoldAttachment:Destroy()
+		entry.characterHoldAttachment = nil
+	end
+
+	if entry.root and entry.root.Parent then
+		entry.root.Anchored = false
+		entry.root.Massless = false
+		entry.root.AssemblyLinearVelocity = Vector3.zero
+		entry.root.AssemblyAngularVelocity = Vector3.zero
+	end
 end
 
 local function unregisterPossibleDrop(entry: any)
@@ -673,28 +1015,43 @@ local function unregisterPossibleDrop(entry: any)
 	end
 end
 
-function CapsuleRenderer:destroyCapsule(capsuleId: string)
-	local entry = self.entries[capsuleId]
-	if not entry then
+local function cancelThreadSafely(threadHandle: thread?)
+	if not threadHandle or coroutine.running() == threadHandle then
 		return
 	end
+
+	pcall(function()
+		task.cancel(threadHandle)
+	end)
+end
+
+function CapsuleRenderer:destroyCapsule(capsuleId: string)
+	local entry = self.entries[capsuleId]
+	if not entry or entry.destroying then
+		return
+	end
+
+	entry.destroying = true
+	self.entries[capsuleId] = nil
 
 	unregisterPossibleDrop(entry)
 	self:releaseHold(capsuleId)
 
 	if entry.touchConnection then
 		entry.touchConnection:Disconnect()
+		entry.touchConnection = nil
 	end
 
+	destroyRollDrive(entry)
+
 	if entry.lifetimeThread then
-		task.cancel(entry.lifetimeThread)
+		cancelThreadSafely(entry.lifetimeThread)
+		entry.lifetimeThread = nil
 	end
 
 	if entry.instance and entry.instance.Parent then
 		entry.instance:Destroy()
 	end
-
-	self.entries[capsuleId] = nil
 end
 
 function CapsuleRenderer:pickupCapsule(capsuleId: string, onPickedUp: ((string) -> ())?)
@@ -719,7 +1076,7 @@ function CapsuleRenderer:pickupCapsule(capsuleId: string, onPickedUp: ((string) 
 	unregisterPossibleDrop(entry)
 
 	if entry.lifetimeThread then
-		task.cancel(entry.lifetimeThread)
+		cancelThreadSafely(entry.lifetimeThread)
 		entry.lifetimeThread = nil
 	end
 
@@ -727,6 +1084,8 @@ function CapsuleRenderer:pickupCapsule(capsuleId: string, onPickedUp: ((string) 
 		entry.touchConnection:Disconnect()
 		entry.touchConnection = nil
 	end
+
+	destroyRollDrive(entry)
 
 	assemblyRoot.AssemblyLinearVelocity = Vector3.zero
 	assemblyRoot.AssemblyAngularVelocity = Vector3.zero
@@ -739,24 +1098,53 @@ function CapsuleRenderer:pickupCapsule(capsuleId: string, onPickedUp: ((string) 
 
 	setHeldPartPhysics(assemblyRoot)
 	assemblyRoot.CanQuery = true
+	assemblyRoot.Anchored = false
 
 	local holdOffset = CFrame.new(0, 1.25, -2.75)
+	local holdCFrame = getUprightHoldCFrame(humanoidRoot, holdOffset)
 	if instance:IsA("Model") then
-		instance:PivotTo(humanoidRoot.CFrame * holdOffset)
+		instance:PivotTo(holdCFrame)
 	else
-		assemblyRoot.CFrame = humanoidRoot.CFrame * holdOffset
+		assemblyRoot.CFrame = holdCFrame
 	end
 
-	pcall(function()
-		assemblyRoot:SetNetworkOwner(Players.LocalPlayer)
-	end)
+	local holdFolder = getHoldAttachmentFolder(assemblyRoot)
+	holdFolder:ClearAllChildren()
+	entry.holdFolder = holdFolder
 
-	local holdWeld = Instance.new("WeldConstraint")
-	holdWeld.Name = "CapsuleHoldWeld"
-	holdWeld.Part0 = humanoidRoot
-	holdWeld.Part1 = assemblyRoot
-	holdWeld.Parent = getAssemblyWeldFolder(assemblyRoot)
-	entry.holdWeld = holdWeld
+	local rootAttachment = Instance.new("Attachment")
+	rootAttachment.Name = "CapsuleHoldAttachment"
+	rootAttachment.Parent = assemblyRoot
+	entry.rootHoldAttachment = rootAttachment
+
+	local characterAttachment = Instance.new("Attachment")
+	characterAttachment.Name = "CapsuleHoldTarget"
+	characterAttachment.CFrame = holdOffset
+	characterAttachment.Parent = humanoidRoot
+	entry.characterHoldAttachment = characterAttachment
+
+	local alignPosition = Instance.new("AlignPosition")
+	alignPosition.Name = "CapsuleHoldPosition"
+	alignPosition.Attachment0 = rootAttachment
+	alignPosition.Attachment1 = characterAttachment
+	alignPosition.MaxForce = 25000
+	alignPosition.MaxVelocity = 80
+	alignPosition.Responsiveness = 35
+	alignPosition.RigidityEnabled = false
+	alignPosition.Parent = holdFolder
+
+	local alignOrientation = Instance.new("AlignOrientation")
+	alignOrientation.Name = "CapsuleHoldOrientation"
+	alignOrientation.Attachment0 = rootAttachment
+	alignOrientation.Attachment1 = characterAttachment
+	alignOrientation.MaxTorque = 25000
+	alignOrientation.MaxAngularVelocity = 80
+	alignOrientation.Responsiveness = 35
+	alignOrientation.RigidityEnabled = false
+	alignOrientation.Parent = holdFolder
+
+	assemblyRoot.AssemblyLinearVelocity = Vector3.zero
+	assemblyRoot.AssemblyAngularVelocity = Vector3.zero
 
 	if onPickedUp then
 		onPickedUp(capsuleId)
@@ -773,6 +1161,7 @@ function CapsuleRenderer:spawnCapsule(
 	onExpired: ((string) -> ())?,
 	spawnOptions: {
 		parent: Instance?,
+		rollDirection: Vector3?,
 		registerPossibleDrop: ((BasePart, Instance) -> ())?,
 		unregisterPossibleDrop: ((BasePart) -> ())?,
 	}?
@@ -823,8 +1212,15 @@ function CapsuleRenderer:spawnCapsule(
 		highestTier = highestTier,
 		pickedUp = false,
 		touchConnection = nil,
+		rollConnection = nil,
+		rollDriveFolder = nil,
 		holdWeld = nil,
+		holdConnection = nil,
+		holdFolder = nil,
+		rootHoldAttachment = nil,
+		characterHoldAttachment = nil,
 		lifetimeThread = nil,
+		destroying = false,
 		unregisterPossibleDrop = spawnOptions and spawnOptions.unregisterPossibleDrop or nil,
 	}
 	self.entries[capsuleId] = entry
@@ -838,7 +1234,22 @@ function CapsuleRenderer:spawnCapsule(
 		spawnOptions.registerPossibleDrop(assemblyRoot, instance)
 	end
 
-	assemblyRoot.AssemblyLinearVelocity = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
+	local rollDirection = spawnOptions and spawnOptions.rollDirection or nil
+	applyRollKick(assemblyRoot, 2.2, rollDirection)
+	startRollingAssist(entry, assemblyRoot, rollDirection)
+	task.delay(0.65, function()
+		local current = self.entries[capsuleId]
+		if not current or current.pickedUp or not assemblyRoot.Parent then
+			return
+		end
+
+		local horizontalVelocity =
+			Vector3.new(assemblyRoot.AssemblyLinearVelocity.X, 0, assemblyRoot.AssemblyLinearVelocity.Z)
+		if horizontalVelocity.Magnitude < 1 then
+			applyRollKick(assemblyRoot, 1.4, rollDirection)
+		end
+	end)
+	startCapsulePhysicsDebug(capsuleId, assemblyRoot)
 
 	entry.touchConnection = assemblyRoot.Touched:Connect(function(hit: BasePart)
 		local current = self.entries[capsuleId]
@@ -873,6 +1284,7 @@ function CapsuleRenderer:spawnCapsule(
 	entry.lifetimeThread = task.delay(lifetime, function()
 		local current = self.entries[capsuleId]
 		if current and not current.pickedUp then
+			current.lifetimeThread = nil
 			if onExpired then
 				onExpired(capsuleId)
 			end

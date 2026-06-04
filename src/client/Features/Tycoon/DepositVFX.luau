@@ -45,7 +45,7 @@ local function prepareVisual(instance: Instance)
 			descendant.CanCollide = false
 			descendant.CanTouch = false
 			descendant.CanQuery = false
-			descendant.Massless = true
+			descendant.Massless = false
 		elseif descendant:IsA("BillboardGui") then
 			descendant.Enabled = false
 		end
@@ -56,7 +56,7 @@ local function prepareVisual(instance: Instance)
 		instance.CanCollide = false
 		instance.CanTouch = false
 		instance.CanQuery = false
-		instance.Massless = true
+		instance.Massless = false
 	end
 end
 
@@ -224,7 +224,22 @@ function DepositVFX.new(tycoon: Instance, janitor: any)
 	self.beamLoopToken = 0
 	self.beamLoopActive = false
 	self.beamInterval = DEFAULT_PROCESS_INTERVAL
+	self.enabled = true
 	return self
+end
+
+function DepositVFX:setEnabled(enabled: boolean)
+	self.enabled = enabled
+
+	if enabled then
+		return
+	end
+
+	self:setProcessorActive(false)
+	for _, child in self.folder:GetChildren() do
+		child:Destroy()
+	end
+	self.activeOrbs = 0
 end
 
 function DepositVFX:createOrb(): Instance
@@ -253,7 +268,7 @@ function DepositVFX:createOrb(): Instance
 end
 
 function DepositVFX:playDeposit(amount: number)
-	if type(amount) ~= "number" or amount <= 0 or self.activeOrbs > 0 then
+	if not self.enabled or type(amount) ~= "number" or amount <= 0 or self.activeOrbs > 0 then
 		return
 	end
 
@@ -331,7 +346,7 @@ end
 function DepositVFX:setProcessorActive(isActive: boolean, interval: number?)
 	self.beamInterval = math.max(interval or DEFAULT_PROCESS_INTERVAL, MIN_BEAM_INTERVAL)
 
-	if not isActive then
+	if not isActive or not self.enabled then
 		if self.beamLoopActive then
 			self.beamLoopToken += 1
 			self.beamLoopActive = false
@@ -356,6 +371,10 @@ function DepositVFX:setProcessorActive(isActive: boolean, interval: number?)
 end
 
 function DepositVFX:pulseBeam(force: boolean?)
+	if not self.enabled then
+		return
+	end
+
 	local now = os.clock()
 	if not force and now - self.lastBeamAt < MIN_BEAM_INTERVAL then
 		return

@@ -217,6 +217,14 @@ local function ensureManaData(data: { [string]: any })
 		data.Settings.AutoDeposit = false
 	end
 
+	if type(data.Settings.ShowVFX) ~= "boolean" then
+		data.Settings.ShowVFX = true
+	end
+
+	if type(data.Settings.ShowManaPopup) ~= "boolean" then
+		data.Settings.ShowManaPopup = true
+	end
+
 	if type(data.Settings.Sound) ~= "boolean" then
 		data.Settings.Sound = true
 	end
@@ -322,7 +330,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.11",
+		profileStoreIndex = "CFB_PlayerData.13",
 	})
 end
 
@@ -438,6 +446,8 @@ local function isValidSetting(path: any, value: any): boolean
 		or path == "AutoDeposit"
 		or path == "ShowOtherTycoons"
 		or path == "ShowOthers"
+		or path == "ShowVFX"
+		or path == "ShowManaPopup"
 		or path == "Sound"
 		or path == "Music"
 	then
