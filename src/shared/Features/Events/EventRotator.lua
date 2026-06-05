@@ -57,6 +57,10 @@ function EventRotator:getCycleSeconds(): number
 	return math.max(math.floor(tonumber(self.config.CycleSeconds) or DEFAULT_CYCLE), 1)
 end
 
+function EventRotator:getGlobalEpochSeconds(): number
+	return math.max(math.floor(tonumber(self.config.GlobalEpochSeconds) or 0), 0)
+end
+
 function EventRotator:getDurationSeconds(event: EventDefinition?): number
 	local configuredDuration = event and tonumber(event.DurationSeconds)
 	local fallbackDuration = tonumber(self.config.DefaultDurationSeconds) or DEFAULT_DURATION
@@ -69,10 +73,11 @@ function EventRotator:getActiveEvent(now: number?): ActiveEvent?
 		return nil
 	end
 
-	local timestamp = math.max(math.floor(now or os.time()), 0)
+	local epochSeconds = self:getGlobalEpochSeconds()
+	local timestamp = math.max(math.floor(now or os.time()) - epochSeconds, 0)
 	local cycleSeconds = self:getCycleSeconds()
 	local cycleIndex = math.floor(timestamp / cycleSeconds)
-	local cycleStartedAt = cycleIndex * cycleSeconds
+	local cycleStartedAt = epochSeconds + cycleIndex * cycleSeconds
 	local nextStartsAt = cycleStartedAt + cycleSeconds
 	local event = events[(cycleIndex % #events) + 1]
 	local durationSeconds = self:getDurationSeconds(event)
@@ -97,9 +102,10 @@ function EventRotator:getActiveEvent(now: number?): ActiveEvent?
 end
 
 function EventRotator:getNextEventStartsAt(now: number?): number
-	local timestamp = math.max(math.floor(now or os.time()), 0)
+	local epochSeconds = self:getGlobalEpochSeconds()
+	local timestamp = math.max(math.floor(now or os.time()) - epochSeconds, 0)
 	local cycleSeconds = self:getCycleSeconds()
-	return (math.floor(timestamp / cycleSeconds) + 1) * cycleSeconds
+	return epochSeconds + (math.floor(timestamp / cycleSeconds) + 1) * cycleSeconds
 end
 
 function EventRotator:getNextEvent(now: number?): EventDefinition?
@@ -108,7 +114,7 @@ function EventRotator:getNextEvent(now: number?): EventDefinition?
 		return nil
 	end
 
-	local timestamp = math.max(math.floor(now or os.time()), 0)
+	local timestamp = math.max(math.floor(now or os.time()) - self:getGlobalEpochSeconds(), 0)
 	local cycleIndex = math.floor(timestamp / self:getCycleSeconds()) + 1
 	return events[(cycleIndex % #events) + 1]
 end

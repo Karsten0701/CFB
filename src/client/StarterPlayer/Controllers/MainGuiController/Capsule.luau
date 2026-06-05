@@ -48,7 +48,7 @@ function CapsuleFeature.Install(MainGuiController)
 				local label = unitsFrame:FindFirstChild(`Unit{index}`)
 				local entry = displayEntries[index]
 				if label and label:IsA("TextLabel") and entry then
-					label.Text = `{entry.DisplayName} [{CapsuleUtil.formatChancePercent(entry.Chance)}]`
+					label.Text = `[T{entry.Tier}] {entry.DisplayName} [{CapsuleUtil.formatChancePercent(entry.Chance)}]`
 					label.Visible = true
 				elseif label and label:IsA("TextLabel") then
 					label.Visible = false

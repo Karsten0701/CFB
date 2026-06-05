@@ -4,12 +4,15 @@ local UserInputService = game:GetService("UserInputService")
 
 local EventConfig = require(ReplicatedStorage.Shared.Data.Events)
 local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
+local Knit = require(ReplicatedStorage.Packages.knit)
 
 local EventFeature = {}
 
 local updateConnection: RBXScriptConnection? = nil
 local hoverConnections: { RBXScriptConnection } = {}
 local hoverActive = false
+local hoverMode: "event" | "tutorial"? = nil
 local lastDisplayId: string? = nil
 local eventLoopRunning = false
 
@@ -46,6 +49,35 @@ local function setHoverPosition(hoverInfo: GuiObject)
 		UDim2.fromOffset(mouseLocation.X - parentPosition.X + offset.X, mouseLocation.Y - parentPosition.Y + offset.Y)
 end
 
+local function setHoverText(hoverInfo: GuiObject, name: string, description: string)
+	local nameLabel = getTextLabel(hoverInfo, "Name")
+	local descLabel = getTextLabel(hoverInfo, "Desc")
+	if nameLabel then
+		nameLabel.Text = name
+	end
+	if descLabel then
+		descLabel.Text = description
+	end
+end
+
+local function getTutorialBoost(): { EndsAt: number, Name: string, Description: string, Icon: string? }?
+	local ok, boostEndsAt = pcall(function()
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		return PlayerDataController:Get("TutorialBoostEndsAt")
+	end)
+	if not ok or type(boostEndsAt) ~= "number" or boostEndsAt <= os.time() then
+		return nil
+	end
+
+	local tutorialConfig = TycoonConfig.Tutorial or {}
+	return {
+		EndsAt = boostEndsAt,
+		Name = tutorialConfig.BoostName or "2x Yen Boost",
+		Description = tutorialConfig.BoostDescription or "Tutorial reward",
+		Icon = tutorialConfig.BoostIcon,
+	}
+end
+
 function EventFeature.Install(MainGuiController)
 	function MainGuiController:getEventFrame(): GuiObject?
 		local mainGui = self:getMainGui()
@@ -67,6 +99,57 @@ function EventFeature.Install(MainGuiController)
 		return if icon and icon:IsA("GuiObject") then icon else nil
 	end
 
+	function MainGuiController:getTutorialBoostIcon(templateIcon: GuiObject?): GuiObject?
+		local eventFrame = self:getEventFrame()
+		local iconParent = templateIcon and templateIcon.Parent
+		if not eventFrame or not templateIcon or not iconParent then
+			return nil
+		end
+
+		local existing = eventFrame:FindFirstChild("TutorialBoostIcon", true)
+		if existing and existing:IsA("GuiObject") then
+			return existing
+		end
+
+		local clone = templateIcon:Clone()
+		clone.Name = "TutorialBoostIcon"
+		clone.LayoutOrder = templateIcon.LayoutOrder + 1
+		clone.Position = templateIcon.Position + UDim2.fromOffset(templateIcon.AbsoluteSize.X + 8, 0)
+		clone.Visible = false
+		clone.Parent = iconParent
+		return clone
+	end
+
+	function MainGuiController:updateTutorialBoostIcon(templateIcon: GuiObject, hoverInfo: GuiObject)
+		local boostIcon = self:getTutorialBoostIcon(templateIcon)
+		local tutorialBoost = getTutorialBoost()
+		if not boostIcon then
+			return
+		end
+
+		if not tutorialBoost then
+			boostIcon.Visible = false
+			if hoverMode == "tutorial" then
+				hoverActive = false
+				hoverMode = nil
+				hoverInfo.Visible = false
+			end
+			return
+		end
+
+		boostIcon.Visible = true
+		setIconImage(boostIcon, tutorialBoost.Icon)
+
+		local timerLabel = getTextLabel(boostIcon, "Timer")
+		if timerLabel then
+			timerLabel.Text = EventUtil.formatTime(math.max(tutorialBoost.EndsAt - os.time(), 0))
+		end
+
+		if hoverMode == "tutorial" then
+			setHoverText(hoverInfo, tutorialBoost.Name, tutorialBoost.Description)
+		end
+	end
+
 	function MainGuiController:updateEventDisplay()
 		local eventFrame = self:getEventFrame()
 		local icon = self:getEventIcon()
@@ -76,11 +159,12 @@ function EventFeature.Install(MainGuiController)
 			return
 		end
 
-		local activeEvent = EventUtil.getActiveEvent()
-		local now = os.time()
+		local now = EventUtil.getNow()
+		local activeEvent = EventUtil.getActiveEvent(now)
 		local timerLabel = getTextLabel(icon, "Timer")
 
 		eventFrame.Visible = true
+		self:updateTutorialBoostIcon(icon, hoverInfo)
 		if hoverInfo then
 			hoverInfo.Visible = hoverActive
 		else
@@ -97,47 +181,30 @@ function EventFeature.Install(MainGuiController)
 				lastDisplayId = activeEvent.Id
 				setIconImage(icon, activeEvent.Icon)
 
-				local nameLabel = getTextLabel(hoverInfo, "Name")
-				local descLabel = getTextLabel(hoverInfo, "Desc")
-				if nameLabel then
-					nameLabel.Text = activeEvent.Name
-					print("Name: " .. nameLabel.Text)
-				end
-				if descLabel then
-					descLabel.Text = activeEvent.Description
-					print("Description: " .. descLabel.Text)
+				if hoverMode ~= "tutorial" then
+					setHoverText(hoverInfo, activeEvent.Name, activeEvent.Description)
 				end
 			end
 		else
 			local remaining = math.max(EventUtil.getNextEventStartsAt(now) - now, 0)
-			local nextEvent = EventUtil.getNextEvent(now)
 			if timerLabel then
 				timerLabel.Text = EventUtil.formatTime(remaining)
 			end
 
-			local nextDisplayId = if nextEvent then "next:" .. (nextEvent.Id or nextEvent.Name or "") else nil
+			local nextDisplayId = "next"
 			if lastDisplayId ~= nextDisplayId then
 				lastDisplayId = nextDisplayId
-				if nextEvent then
-					setIconImage(icon, nextEvent.Icon)
-				end
+				setIconImage(icon, EventConfig.NextWindowIcon)
 			end
 
-			local nameLabel = getTextLabel(hoverInfo, "Name")
-			local descLabel = getTextLabel(hoverInfo, "Desc")
-			if nameLabel then
-				if nextEvent then
-					nameLabel.Text = "Next: " .. (nextEvent.Name or "Anime Event")
-				else
-					nameLabel.Text = EventConfig.EmptyWindowName or "Preparing next event"
-				end
-			end
-			if descLabel then
-				if nextEvent and nextEvent.Description then
-					descLabel.Text = nextEvent.Description
-				else
-					descLabel.Text = "Next event starts soon."
-				end
+			if hoverMode ~= "tutorial" then
+				setHoverText(
+					hoverInfo,
+					(EventConfig.NextWindowName or "Next event")
+					.. " in "
+						.. EventUtil.formatTime(remaining),
+					EventConfig.NextWindowDescription or "???"
+				)
 			end
 		end
 	end
@@ -156,8 +223,11 @@ function EventFeature.Install(MainGuiController)
 				hoverConnections,
 				icon.MouseEnter:Connect(function()
 					hoverActive = true
+					hoverMode = "event"
 					hoverInfo.Visible = true
 					setHoverPosition(hoverInfo)
+					lastDisplayId = nil
+					self:updateEventDisplay()
 				end)
 			)
 
@@ -165,9 +235,33 @@ function EventFeature.Install(MainGuiController)
 				hoverConnections,
 				icon.MouseLeave:Connect(function()
 					hoverActive = false
+					hoverMode = nil
 					hoverInfo.Visible = false
 				end)
 			)
+
+			local boostIcon = self:getTutorialBoostIcon(icon)
+			if boostIcon then
+				table.insert(
+					hoverConnections,
+					boostIcon.MouseEnter:Connect(function()
+						hoverActive = true
+						hoverMode = "tutorial"
+						hoverInfo.Visible = true
+						setHoverPosition(hoverInfo)
+						self:updateEventDisplay()
+					end)
+				)
+
+				table.insert(
+					hoverConnections,
+					boostIcon.MouseLeave:Connect(function()
+						hoverActive = false
+						hoverMode = nil
+						hoverInfo.Visible = false
+					end)
+				)
+			end
 		end
 
 		if updateConnection then

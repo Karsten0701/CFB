@@ -1,9 +1,11 @@
 local Players = game:GetService("Players")
 local AvatarEditorService = game:GetService("AvatarEditorService")
+local ContentProvider = game:GetService("ContentProvider")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
+local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
@@ -26,6 +28,13 @@ local localPlayer = Players.LocalPlayer
 local COUNTER_ANIMATION_TIME = 0.5
 local COUNTER_ANIMATION_STEPS = 50
 local MESSAGE_LIFETIME = 3
+local LOADING_BATCH_SIZE = 100
+local LOADING_FAKE_DURATION = 3
+local LOADING_MAX_WAIT = 15
+local LOADING_FORCED_FINISH_DURATION = 3
+local NEW_UNIT_POPUP_HOLD_TIME = 2.4
+local YEN_ICON_IMAGE = "rbxassetid://96573285096968"
+local REBIRTH_TOKEN_ICON_IMAGE = "rbxassetid://107689343391713"
 
 local displayedValues = {
 	ManaBag = 0,
@@ -37,6 +46,12 @@ local lastHomeTeleportAt = 0
 local activeMessages = {}
 local nextMessageLayoutOrder = 0
 local indexWarnedMissingGui = false
+local loadingScreenFinished = false
+local loadingScreenRunning = false
+local unlockedDropperCache: { [number]: boolean }? = nil
+local newUnitPopupQueue: { number } = {}
+local newUnitPopupRunning = false
+local currencyDisplayMode: "Yen" | "RebirthTokens" = "Yen"
 
 local animationTokens = {
 	ManaBag = 0,
@@ -111,6 +126,78 @@ local function setFirstMessageText(instance: Instance, text: string)
 	end
 end
 
+local function getTextLabel(root: Instance?, name: string): TextLabel?
+	local label = root and root:FindFirstChild(name, true)
+	return if label and label:IsA("TextLabel") then label else nil
+end
+
+local function getImageGui(root: Instance?, name: string): (ImageLabel | ImageButton)?
+	local image = root and root:FindFirstChild(name, true)
+	return if image and (image:IsA("ImageLabel") or image:IsA("ImageButton")) then image else nil
+end
+
+local function getGuiObject(root: Instance?, name: string): GuiObject?
+	local object = root and root:FindFirstChild(name, true)
+	return if object and object:IsA("GuiObject") then object else nil
+end
+
+local function setGuiObjectTransparency(root: Instance, transparency: number, minimumFrameTransparency: number?)
+	local frameTransparency = if minimumFrameTransparency ~= nil
+		then math.max(transparency, minimumFrameTransparency)
+		else transparency
+
+	if root:IsA("Frame") or root:IsA("ScrollingFrame") then
+		root.BackgroundTransparency = frameTransparency
+	elseif root:IsA("ImageLabel") or root:IsA("ImageButton") then
+		root.ImageTransparency = transparency
+	elseif isTextGui(root) then
+		root.TextTransparency = transparency
+		root.TextStrokeTransparency = math.clamp(transparency, 0, 1)
+	end
+
+	for _, descendant in root:GetDescendants() do
+		if descendant:IsA("Frame") or descendant:IsA("ScrollingFrame") then
+			descendant.BackgroundTransparency = frameTransparency
+		elseif descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+			descendant.ImageTransparency = transparency
+		elseif isTextGui(descendant) then
+			descendant.TextTransparency = transparency
+			descendant.TextStrokeTransparency = math.clamp(transparency, 0, 1)
+		elseif descendant:IsA("UIStroke") then
+			descendant.Transparency = transparency
+		end
+	end
+end
+
+local function getPreloadTargets(mainGui: Instance?): { Instance }
+	local targets = {}
+	local seen: { [Instance]: boolean } = {}
+
+	local function add(instance: Instance?)
+		if instance and not seen[instance] then
+			seen[instance] = true
+			table.insert(targets, instance)
+		end
+	end
+
+	local function addTree(instance: Instance?)
+		if not instance then
+			return
+		end
+
+		add(instance)
+		for _, descendant in instance:GetDescendants() do
+			add(descendant)
+		end
+	end
+
+	addTree(mainGui)
+	addTree(ReplicatedStorage:FindFirstChild("Assets"))
+	addTree(ReplicatedStorage:FindFirstChild("Shared"))
+
+	return targets
+end
+
 IndexFeature.Install(MainGuiController)
 OfflineFeature.Install(MainGuiController)
 RebirthFeature.Install(MainGuiController)
@@ -133,6 +220,36 @@ function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 
 	local amount = container:FindFirstChild("Amount")
 	return if amount and amount:IsA("TextLabel") then amount else nil
+end
+
+function MainGuiController:getCounterContainer(containerName: string): Instance?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	return mainGui:FindFirstChild(containerName)
+end
+
+function MainGuiController:getCurrencyIcon(containerName: string): (ImageLabel | ImageButton)?
+	local container = self:getCounterContainer(containerName)
+	if not container then
+		return nil
+	end
+
+	local coinIcon = container:FindFirstChild("coinicon", true) or container:FindFirstChild("CoinIcon", true)
+	if coinIcon and (coinIcon:IsA("ImageLabel") or coinIcon:IsA("ImageButton")) then
+		return coinIcon
+	end
+
+	for _, name in { "Icon", "ImageLabel" } do
+		local icon = container:FindFirstChild(name, true)
+		if icon and (icon:IsA("ImageLabel") or icon:IsA("ImageButton")) then
+			return icon
+		end
+	end
+
+	return nil
 end
 
 function MainGuiController:getMainGui(): Instance?
@@ -190,6 +307,305 @@ function MainGuiController:getMessageTemplate(): GuiObject?
 	end
 
 	return nil
+end
+
+function MainGuiController:getLoadingScreen(): GuiObject?
+	local mainGui = self:getMainGui()
+	return getGuiObject(mainGui, "LoadingScreen")
+end
+
+function MainGuiController:getNewUnitPopup(): GuiObject?
+	local mainGui = self:getMainGui()
+	return getGuiObject(mainGui, "NewUnitPopup")
+end
+
+function MainGuiController:setLoadingProgress(progress: number)
+	local loadingScreen = self:getLoadingScreen()
+	if not loadingScreen then
+		return
+	end
+
+	progress = math.clamp(progress, 0, 1)
+	local filler = getGuiObject(loadingScreen, "Filler")
+	if filler then
+		filler.AnchorPoint = Vector2.new(0, filler.AnchorPoint.Y)
+		filler.Position = UDim2.new(0, 0, filler.Position.Y.Scale, filler.Position.Y.Offset)
+		TweenService:Create(filler, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Size = UDim2.new(progress, 0, filler.Size.Y.Scale, filler.Size.Y.Offset),
+		}):Play()
+	end
+
+	local percentageLabel = getTextLabel(loadingScreen, "LoadingPercentage")
+	if percentageLabel then
+		percentageLabel.Text = tostring(math.floor(progress * 100 + 0.5)) .. "%"
+	end
+end
+
+function MainGuiController:finishLoadingScreen()
+	local loadingScreen = self:getLoadingScreen()
+	if not loadingScreen or loadingScreenFinished then
+		return
+	end
+
+	loadingScreenFinished = true
+	self:setLoadingProgress(1)
+
+	local startPosition = loadingScreen.Position
+	local targetPosition = startPosition - UDim2.fromScale(0, 1.25)
+	local tween = TweenService:Create(
+		loadingScreen,
+		TweenInfo.new(0.7, Enum.EasingStyle.Quart, Enum.EasingDirection.InOut),
+		{ Position = targetPosition }
+	)
+	tween:Play()
+	tween.Completed:Connect(function()
+		if loadingScreen.Parent then
+			loadingScreen.Visible = false
+			loadingScreen.Position = startPosition
+		end
+	end)
+end
+
+function MainGuiController:startLoadingScreen()
+	if loadingScreenRunning or loadingScreenFinished then
+		return
+	end
+
+	loadingScreenRunning = true
+	task.spawn(function()
+		local mainGui = self:getMainGui()
+		local loadingScreen = self:getLoadingScreen()
+		local deadline = os.clock() + 10
+		while (not mainGui or not loadingScreen) and os.clock() < deadline do
+			task.wait(0.1)
+			mainGui = self:getMainGui()
+			loadingScreen = self:getLoadingScreen()
+		end
+		if not loadingScreen then
+			loadingScreenRunning = false
+			return
+		end
+
+		loadingScreen.Visible = true
+		self:setLoadingProgress(0)
+
+		local targets = getPreloadTargets(mainGui)
+		local total = math.max(#targets, 1)
+		local loaded = 0
+		local preloadDone = false
+		local startedAt = os.clock()
+
+		task.spawn(function()
+			for index = 1, #targets, LOADING_BATCH_SIZE do
+				local batch = {}
+				for batchIndex = index, math.min(index + LOADING_BATCH_SIZE - 1, #targets) do
+					table.insert(batch, targets[batchIndex])
+				end
+
+				pcall(function()
+					ContentProvider:PreloadAsync(batch)
+				end)
+
+				loaded = math.min(index + #batch - 1, total)
+				task.wait()
+			end
+
+			preloadDone = true
+		end)
+
+		while not preloadDone and os.clock() - startedAt < LOADING_MAX_WAIT do
+			local elapsed = os.clock() - startedAt
+			local fakeProgress = math.clamp(elapsed / LOADING_FAKE_DURATION, 0, 0.92)
+			local assetProgress = math.clamp(loaded / total, 0, 1)
+			self:setLoadingProgress(math.max(fakeProgress, assetProgress * 0.95))
+
+			if elapsed >= LOADING_FAKE_DURATION and assetProgress >= 0.35 then
+				break
+			end
+
+			task.wait(0.05)
+		end
+
+		if not preloadDone and os.clock() - startedAt >= LOADING_MAX_WAIT then
+			local forceStartedAt = os.clock()
+			while os.clock() - forceStartedAt < LOADING_FORCED_FINISH_DURATION do
+				local alpha = math.clamp((os.clock() - forceStartedAt) / LOADING_FORCED_FINISH_DURATION, 0, 1)
+				self:setLoadingProgress(0.92 + alpha * 0.08)
+				task.wait(0.05)
+			end
+		else
+			local finishStartedAt = os.clock()
+			while os.clock() - finishStartedAt < 0.45 do
+				local alpha = math.clamp((os.clock() - finishStartedAt) / 0.45, 0, 1)
+				self:setLoadingProgress(0.92 + alpha * 0.08)
+				task.wait(0.03)
+			end
+		end
+
+		self:finishLoadingScreen()
+		loadingScreenRunning = false
+	end)
+end
+
+function MainGuiController:setNewUnitPopupContent(tier: number)
+	local popup = self:getNewUnitPopup()
+	if not popup then
+		return
+	end
+
+	local tierData = AnimeDroppers.Tiers[tier]
+	local displayName = if tierData
+		then tierData.DisplayName or tierData.ModelName or ("Tier " .. tier)
+		else ("Tier " .. tier)
+	local charName = getTextLabel(popup, "CharName")
+	if charName then
+		charName.Text = string.upper(displayName)
+	end
+
+	local altLabel = getTextLabel(popup, "alt")
+	if altLabel then
+		altLabel.Text = "NEW CHARACTER UNLOCKED!"
+	end
+
+	local shadowLabel = getTextLabel(popup, "shadow")
+	if shadowLabel then
+		shadowLabel.Text = string.upper(displayName)
+	end
+
+	local icon = getImageGui(popup, "CharIcon")
+	if icon and tierData then
+		local image = self:getConfiguredUnitIcon(tierData)
+		if image ~= "" then
+			icon.Image = image
+		end
+	end
+end
+
+function MainGuiController:playNewUnitPopup(tier: number)
+	local popup = self:getNewUnitPopup()
+	if not popup then
+		return
+	end
+
+	self:setNewUnitPopupContent(tier)
+
+	local originalPosition = popup.Position
+	local hiddenPosition = originalPosition - UDim2.fromScale(0, 1.25)
+	popup.Position = hiddenPosition
+	popup.Visible = true
+	setGuiObjectTransparency(popup, 1, 0.2)
+
+	local popTargets = {}
+	for _, name in { "alt", "CharName", "shadow", "CharIcon" } do
+		local object = popup:FindFirstChild(name, true)
+		if object and object:IsA("GuiObject") then
+			local scale = object:FindFirstChild("UnlockPopScale")
+			if not scale or not scale:IsA("UIScale") then
+				scale = Instance.new("UIScale")
+				scale.Name = "UnlockPopScale"
+				scale.Parent = object
+			end
+			scale.Scale = 0.15
+			table.insert(popTargets, scale)
+		end
+	end
+
+	TweenService:Create(popup, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Position = originalPosition,
+	}):Play()
+
+	local fadeProgress = Instance.new("NumberValue")
+	fadeProgress.Value = 1
+	local fadeConnection = fadeProgress.Changed:Connect(function(value)
+		setGuiObjectTransparency(popup, value, 0.2)
+	end)
+	TweenService:Create(fadeProgress, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Value = 0,
+	}):Play()
+
+	task.delay(0.2, function()
+		for _, scale in popTargets do
+			if scale.Parent then
+				TweenService:Create(scale, TweenInfo.new(0.42, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+					Scale = 1,
+				}):Play()
+			end
+		end
+	end)
+
+	task.delay(NEW_UNIT_POPUP_HOLD_TIME, function()
+		if not popup.Parent then
+			return
+		end
+
+		local outTween = TweenService:Create(
+			popup,
+			TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+			{ Position = hiddenPosition }
+		)
+		local fadeOut = Instance.new("NumberValue")
+		fadeOut.Value = 0
+		local fadeOutConnection = fadeOut.Changed:Connect(function(value)
+			setGuiObjectTransparency(popup, value, 0.2)
+		end)
+		TweenService:Create(fadeOut, TweenInfo.new(0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Value = 1,
+		}):Play()
+		outTween:Play()
+		outTween.Completed:Connect(function()
+			fadeConnection:Disconnect()
+			fadeProgress:Destroy()
+			fadeOutConnection:Disconnect()
+			fadeOut:Destroy()
+			if popup.Parent then
+				popup.Visible = false
+				popup.Position = originalPosition
+				setGuiObjectTransparency(popup, 0, 0.2)
+			end
+		end)
+	end)
+end
+
+function MainGuiController:queueNewUnitPopup(tier: number)
+	table.insert(newUnitPopupQueue, tier)
+	if newUnitPopupRunning then
+		return
+	end
+
+	newUnitPopupRunning = true
+	task.spawn(function()
+		while #newUnitPopupQueue > 0 do
+			local nextTier = table.remove(newUnitPopupQueue, 1)
+			self:playNewUnitPopup(nextTier)
+			task.wait(NEW_UNIT_POPUP_HOLD_TIME + 0.7)
+		end
+		newUnitPopupRunning = false
+	end)
+end
+
+function MainGuiController:onUnlockedAnimeDroppersChanged(unlockedDroppers: any)
+	self:refreshIndexFrame()
+	if type(unlockedDroppers) ~= "table" then
+		return
+	end
+
+	if unlockedDropperCache == nil then
+		unlockedDropperCache = {}
+		for tier = 1, AnimeDroppers.MaxTier do
+			if self:isAnimeDropperUnlocked(unlockedDroppers, tier) then
+				unlockedDropperCache[tier] = true
+			end
+		end
+		return
+	end
+
+	for tier = 1, AnimeDroppers.MaxTier do
+		local unlocked = self:isAnimeDropperUnlocked(unlockedDroppers, tier)
+		if unlocked and not unlockedDropperCache[tier] then
+			unlockedDropperCache[tier] = true
+			self:queueNewUnitPopup(tier)
+		end
+	end
 end
 
 function MainGuiController:getMessageText(baseText: string, count: number): string
@@ -342,10 +758,11 @@ function MainGuiController:ShowCapsuleRewardMessage(rewardTier: number?)
 	local tier = math.max(math.floor(rewardTier or 1), 1)
 	local tierData = AnimeDroppers.Tiers[tier]
 	local displayName = if tierData then tierData.DisplayName else ("Tier " .. tier)
+	local tierDisplayName = "[T" .. tostring(tier) .. "] " .. displayName
 
 	self:showMessage(
 		"CapsuleReward:" .. tier,
-		'Capsule opened! You received <font color="#FF8BE7">' .. displayName .. "</font>"
+		'Capsule opened! You received <font color="#FF8BE7">' .. tierDisplayName .. "</font>"
 	)
 end
 
@@ -537,10 +954,28 @@ function MainGuiController:formatCounter(counterName: string, value: number): st
 	if counterName == "ManaBag" then
 		return FormatUtil.formatNumber(value) .. " Mana"
 	elseif counterName == "YenShow" then
+		if currencyDisplayMode == "RebirthTokens" then
+			return FormatUtil.formatNumber(value) .. " Rebirth Tokens"
+		end
+
 		return Pricing.formatYen(value)
 	end
 
 	return FormatUtil.formatNumber(value)
+end
+
+function MainGuiController:setCurrencyDisplayMode(mode: "Yen" | "RebirthTokens")
+	local changed = currencyDisplayMode ~= mode
+	currencyDisplayMode = mode
+	local icon = self:getCurrencyIcon("YenShow")
+	if icon then
+		icon.Image = if mode == "RebirthTokens" then REBIRTH_TOKEN_ICON_IMAGE else YEN_ICON_IMAGE
+	end
+
+	if changed then
+		animationTokens.YenShow += 1
+	end
+	self:updateYenShow()
 end
 
 function MainGuiController:setCounterText(counterName: string, value: number)
@@ -595,13 +1030,19 @@ end
 
 function MainGuiController:updateYenShow()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	self:animateCounter("YenShow", PlayerDataController:Get("Yen") or 0)
+	local value = if currencyDisplayMode == "RebirthTokens"
+		then PlayerDataController:Get("RebirthTokens") or 0
+		else PlayerDataController:Get("Yen") or 0
+	self:animateCounter("YenShow", value)
 end
 
 function MainGuiController:updateAll(instant: boolean?)
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local mana = math.max(math.floor(PlayerDataController:Get("ManaInBag") or 0), 0)
 	local yen = math.max(math.floor(PlayerDataController:Get("Yen") or 0), 0)
+	local yenShowValue = if currencyDisplayMode == "RebirthTokens"
+		then math.max(math.floor(PlayerDataController:Get("RebirthTokens") or 0), 0)
+		else yen
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
 	self:setupShopFeature()
@@ -610,25 +1051,30 @@ function MainGuiController:updateAll(instant: boolean?)
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
 	self:setupEventFrame()
+	local newUnitPopup = self:getNewUnitPopup()
+	if newUnitPopup and not newUnitPopupRunning then
+		newUnitPopup.Visible = false
+	end
 
 	if instant then
 		animationTokens.ManaBag += 1
 		animationTokens.YenShow += 1
 		displayedValues.ManaBag = mana
-		displayedValues.YenShow = yen
+		displayedValues.YenShow = yenShowValue
 		self:setCounterText("ManaBag", mana)
-		self:setCounterText("YenShow", yen)
+		self:setCounterText("YenShow", yenShowValue)
 		self:refreshShopFeature()
 		return
 	end
 
 	self:animateCounter("ManaBag", mana)
-	self:animateCounter("YenShow", yen)
+	self:animateCounter("YenShow", yenShowValue)
 	self:refreshShopFeature()
 end
 
 function MainGuiController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
+	self:startLoadingScreen()
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
 	self:setupShopFeature()
@@ -639,6 +1085,10 @@ function MainGuiController:KnitStart()
 	self:setupOpenCapsuleFrame()
 	self:setupTeleportFrame()
 	self:setupEventFeature()
+	local newUnitPopup = self:getNewUnitPopup()
+	if newUnitPopup then
+		newUnitPopup.Visible = false
+	end
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, productId, wasPurchased)
 		self:onShopProductPromptFinished(firstArg, productId, wasPurchased)
@@ -651,6 +1101,7 @@ function MainGuiController:KnitStart()
 	task.spawn(function()
 		PlayerDataController:WaitForData()
 		self:updateAll()
+		self:onUnlockedAnimeDroppersChanged(PlayerDataController:Get("UnlockedAnimeDroppers"))
 		self:refreshSettingsFeature()
 		self:setupFavoritePrompt()
 		self:showOfflineEarningAfterDelay()
@@ -683,6 +1134,9 @@ function MainGuiController:KnitStart()
 
 		PlayerDataController:Observe("RebirthTokens", function()
 			self:updateUpgradesFrame()
+			if currencyDisplayMode == "RebirthTokens" then
+				self:updateYenShow()
+			end
 		end)
 
 		PlayerDataController:Observe("RebirthUpgrades", function()
@@ -698,7 +1152,7 @@ function MainGuiController:KnitStart()
 		end)
 
 		PlayerDataController:Observe("UnlockedAnimeDroppers", function()
-			self:refreshIndexFrame()
+			self:onUnlockedAnimeDroppersChanged(PlayerDataController:Get("UnlockedAnimeDroppers"))
 		end)
 
 		PlayerDataController:Observe("Settings", function(settings)
@@ -722,6 +1176,10 @@ function MainGuiController:KnitStart()
 				self:setupOpenCapsuleFrame()
 				self:setupTeleportFrame()
 				self:setupEventFrame()
+				local refreshedNewUnitPopup = self:getNewUnitPopup()
+				if refreshedNewUnitPopup and not newUnitPopupRunning then
+					refreshedNewUnitPopup.Visible = false
+				end
 			end)
 		end
 	end)

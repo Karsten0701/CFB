@@ -10,6 +10,11 @@ local function getCapsuleConfig()
 	return TycoonConfig.Capsules or {}
 end
 
+local function getTierRequiredBaseUnits(tier: number): number
+	local tierData = AnimeDroppers.Tiers[math.clamp(math.floor(tier or 1), 1, AnimeDroppers.MaxTier)]
+	return math.max(tonumber(tierData and tierData.RequiredTier1) or 1, 1)
+end
+
 function CapsuleUtil.getHighestUnitTier(units: { { Tier: number } }?): number
 	local highest = 1
 	if type(units) ~= "table" then
@@ -81,12 +86,65 @@ function CapsuleUtil.rollRewardTier(highestTier: number): number?
 	return highestTier
 end
 
-function CapsuleUtil.getOpenPrice(highestTier: number): number
+local function getExpectedRewardBaseUnits(highestTier: number): number
+	local config = getCapsuleConfig()
+	local weights = config.TierWeights
+	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
+	if type(weights) ~= "table" or #weights <= 0 then
+		return getTierRequiredBaseUnits(highestTier)
+	end
+
+	local expectedValue = 0
+	local totalChance = 0
+	for index, tier in previewTiers do
+		local entry = weights[index]
+		local chance = if type(entry) == "table" then math.max(tonumber(entry.Chance) or 0, 0) else 0
+		expectedValue += getTierRequiredBaseUnits(tier) * chance
+		totalChance += chance
+	end
+
+	if totalChance <= 0 then
+		return getTierRequiredBaseUnits(highestTier)
+	end
+
+	return expectedValue / totalChance
+end
+
+local function getEstimatedUnitBuyCost(baseUnitValue: number, spawnTier: number, purchasedUnitCount: number): number
+	local spawnBaseValue = getTierRequiredBaseUnits(spawnTier)
+	local equivalentUnits = math.max((baseUnitValue or 1) / spawnBaseValue, 0.05)
+	local lowerAmount = math.floor(equivalentUnits)
+	local upperAmount = math.max(lowerAmount + 1, 1)
+	local alpha = equivalentUnits - lowerAmount
+
+	if lowerAmount <= 0 then
+		return Pricing.getUnitBulkPrice(purchasedUnitCount, 1, true) * equivalentUnits
+	end
+
+	local lowerPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, lowerAmount, true)
+	local upperPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, upperAmount, true)
+	return lowerPrice + (upperPrice - lowerPrice) * alpha
+end
+
+function CapsuleUtil.getOpenPrice(
+	highestTier: number,
+	units: { { Tier: number } }?,
+	purchasedUnitCount: number?,
+	spawnTier: number?
+): number
 	highestTier = math.clamp(math.floor(highestTier or 1), 1, AnimeDroppers.MaxTier)
 	local config = getCapsuleConfig()
 	local minPrice = tonumber(config.MinOpenPrice) or 100
-	local discount = math.clamp(tonumber(config.OpenPriceUnitCostDiscount) or 0.28, 0.01, 1)
-	local exponent = math.clamp(tonumber(config.OpenPriceUnitCostExponent) or 0.58, 0.25, 1)
+	local discount = math.clamp(tonumber(config.OpenPriceUnitCostDiscount) or 0.45, 0.01, 1)
+	local dropMultiplier = math.max(tonumber(config.OpenPriceMultiplier) or 50, 1)
+	local ownedCostPercent = math.clamp(tonumber(config.OpenPriceOwnedUnitCostPercent) or 0.18, 0.01, 1)
+	local ownedCostFloorPercent = math.clamp(tonumber(config.OpenPriceOwnedUnitCostFloorPercent) or 0.04, 0, ownedCostPercent)
+	local unitBuyDiscount = math.clamp(tonumber(config.OpenPriceUnitBuyDiscount) or 0.62, 0.05, 1)
+	local spawnTierDiscountPower = math.clamp(tonumber(config.OpenPriceSpawnTierDiscountPower) or 1, 0, 2)
+	local ownedBaseUnitPercent = math.clamp(tonumber(config.OpenPriceOwnedBaseUnitPercent) or 0.025, 0, 1)
+	purchasedUnitCount = math.max(math.floor(tonumber(purchasedUnitCount) or 0), 0)
+	spawnTier = math.clamp(math.floor(tonumber(spawnTier) or highestTier), 1, AnimeDroppers.MaxTier)
+	local spawnBaseValue = getTierRequiredBaseUnits(spawnTier)
 	local floorTier = highestTier
 
 	for _, tier in CapsuleUtil.getPreviewTiers(highestTier) do
@@ -95,10 +153,41 @@ function CapsuleUtil.getOpenPrice(highestTier: number): number
 
 	local tierData = AnimeDroppers.Tiers[floorTier]
 	local requiredTierOneUnits = math.max(math.floor(tonumber(tierData and tierData.RequiredTier1) or 1), 1)
-	local directBuyCost = Pricing.getUnitBulkPrice(0, requiredTierOneUnits, true)
-	local price = math.floor((directBuyCost ^ exponent) * discount)
+	local estimatedUnitCost = tonumber(tierData and tierData.EstimatedTier1Cost)
+		or Pricing.getUnitBulkPrice(0, requiredTierOneUnits, true)
+	local dropValue = math.max(tonumber(tierData and tierData.DropValue) or 1, 1)
+	local legacyTierPrice = math.max(estimatedUnitCost * discount, dropValue * dropMultiplier)
+	local expectedBaseUnits = getExpectedRewardBaseUnits(highestTier)
+	local valueBasedPrice = getEstimatedUnitBuyCost(expectedBaseUnits, spawnTier, purchasedUnitCount) * unitBuyDiscount
+	local spawnTierDiscount = 1 / (spawnBaseValue ^ spawnTierDiscountPower)
+	local tierBasedPrice = math.min(legacyTierPrice, valueBasedPrice) * spawnTierDiscount
+	local ownedUnitCost = 0
+	local ownedBaseUnits = 0
+	if type(units) == "table" then
+		for _, unit in units do
+			if type(unit) ~= "table" then
+				continue
+			end
 
-	return math.max(price, minPrice)
+			local ownedTierData = AnimeDroppers.Tiers[unit.Tier or 1]
+			ownedUnitCost += tonumber(ownedTierData and ownedTierData.EstimatedTier1Cost) or 0
+			ownedBaseUnits += getTierRequiredBaseUnits(unit.Tier or 1)
+		end
+	end
+
+	local price = tierBasedPrice
+	if ownedUnitCost > 0 then
+		price = math.min(price, ownedUnitCost * ownedCostPercent)
+		price = math.max(price, ownedUnitCost * ownedCostFloorPercent)
+	end
+	if ownedBaseUnits > 0 and ownedBaseUnitPercent > 0 then
+		local ownedProgressPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, math.max(math.floor(ownedBaseUnits / spawnBaseValue), 1), true)
+			* ownedBaseUnitPercent
+			* spawnTierDiscount
+		price = math.min(price, ownedProgressPrice)
+	end
+
+	return math.max(math.floor(price), minPrice)
 end
 
 function CapsuleUtil.getPreviewDisplayEntries(highestTier: number): { { Tier: number, DisplayName: string, Chance: number } }

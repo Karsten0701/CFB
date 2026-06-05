@@ -1,13 +1,17 @@
 return {
-	CycleSeconds = 15 * 60,
+	GlobalEpochSeconds = 0,
+	CycleSeconds = 10 * 60,
 	DefaultDurationSeconds = 5 * 60,
 	EmptyWindowName = "Preparing next event",
+	NextWindowName = "Next event",
+	NextWindowDescription = "???",
+	NextWindowIcon = "rbxassetid://126078239150428",
 	Events = {
 		{ -- V
 			Id = "saiyan_ascension",
-			Name = "Saiyan Ascension",
+			Name = "Saiyan Surge",
 			Icon = "rbxassetid://133962178231664",
-			VFXKey = "SaiyanAscension",
+			VFXKey = "SaiyanSurge",
 			DurationSeconds = 5 * 60,
 			Description = "+1 spawn tier for 5 minutes.",
 			Effects = {

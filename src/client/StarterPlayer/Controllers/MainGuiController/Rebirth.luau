@@ -130,10 +130,18 @@ function MainGuiController:updateRebirthFrame(rebirthOverride: number?)
 	local rebirths = math.max(math.floor(rebirthOverride or PlayerDataController:Get("Rebirths") or 0), 0)
 	local nextRebirths = rebirths + 1
 	local requiredTier = self:getRebirthRequiredTier(rebirths)
+	local currentMultiplier = self:getRebirthYenMultiplier(rebirths)
 	local nextMultiplier = self:getRebirthYenMultiplier(nextRebirths)
 
 	self:setNamedText(frame, "TierReq", "Reach Tier " .. requiredTier)
-	self:setNamedText(frame, "Boost", self:formatRebirthMultiplier(nextMultiplier) .. "x YEN Boost")
+	self:setNamedText(
+		frame,
+		"Boost",
+		self:formatRebirthMultiplier(currentMultiplier)
+			.. "x -> "
+			.. self:formatRebirthMultiplier(nextMultiplier)
+			.. "x YEN Boost"
+	)
 end
 
 function MainGuiController:getUpgradeLevel(upgradeKey: string): number
@@ -309,6 +317,7 @@ function MainGuiController:setupRebirthFrame()
 			local upgradesFrame = self:getUpgradesFrame()
 			if upgradesFrame then
 				self:updateUpgradesFrame()
+				self:setCurrencyDisplayMode("RebirthTokens")
 				OpenFrame.Toggle(upgradesFrame, true)
 			end
 		end)
@@ -332,10 +341,17 @@ function MainGuiController:setupUpgradesFrame()
 	frame.Visible = false
 	OpenFrame.SetupFrame(frame)
 	self:updateUpgradesFrame()
+	table.insert(
+		rebirthConnections,
+		frame:GetPropertyChangedSignal("Visible"):Connect(function()
+			self:setCurrencyDisplayMode(if frame.Visible then "RebirthTokens" else "Yen")
+		end)
+	)
 
 	local closeButton = frame:FindFirstChild("CloseButton", true)
 	if closeButton and closeButton:IsA("GuiObject") then
 		self:connectRebirthGuiActivated(closeButton, function()
+			self:setCurrencyDisplayMode("Yen")
 			OpenFrame.Toggle(frame, false)
 		end)
 	end

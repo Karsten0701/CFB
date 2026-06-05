@@ -129,7 +129,10 @@ end
 
 function CapsuleController:onCapsulePickedUp(capsuleId: string)
 	SoundUtil.Pickup()
+	self:showHeldCapsuleUI(capsuleId)
+end
 
+function CapsuleController:showHeldCapsuleUI(capsuleId: string)
 	local entry = renderer and renderer:getEntry(capsuleId)
 	if not entry then
 		return
@@ -481,6 +484,23 @@ end
 
 function CapsuleController:KnitStart()
 	self:ensureRenderer()
+
+	localPlayer.CharacterAdded:Connect(function()
+		task.wait(0.35)
+		if openingCapsule or not renderer then
+			return
+		end
+
+		renderer:reattachHeldCapsules(function(capsuleId: string)
+			self:showHeldCapsuleUI(capsuleId)
+			task.delay(0.75, function()
+				local entry = renderer and renderer:getEntry(capsuleId)
+				if entry and entry.pickedUp and not openingCapsule then
+					self:showHeldCapsuleUI(capsuleId)
+				end
+			end)
+		end)
+	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(player, productId, wasPurchased)
 		if player ~= localPlayer or productId ~= OPEN_CAPSULE_PRODUCT.ProductId then

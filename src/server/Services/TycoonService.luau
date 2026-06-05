@@ -49,6 +49,23 @@ local DROP_WALL_COLLISION_GROUP = "DropWalls"
 local CAPSULE_COLLISION_GROUP = "CapsuleDrops"
 local VISUAL_DATA_REQUEST_COOLDOWN = 0.35
 local MUTATION_PICKUP_COOLDOWN_PADDING = 0.8
+local TUTORIAL_STEPS = {
+	Prompt = 0,
+	PickupDrop = 1,
+	DepositMana = 2,
+	BuySecondUnit = 3,
+	PickupDropAgain = 4,
+	UpgradeRate = 5,
+	DepositManaAgain = 6,
+	BuyThirdUnit = 7,
+	MergeUnits = 8,
+	WaitForRebirthReady = 9,
+	Rebirth = 10,
+	OpenUpgrades = 11,
+	UpgradeUnitSpawnTier = 12,
+	Completed = 13,
+	Cancelled = 99,
+}
 
 local function resetPickupBudgetTimer(player: Player)
 	pickupBudget[player] = 0
@@ -155,7 +172,34 @@ local function getYenMultiplier(player: Player): number
 	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
 	multiplier *= EventUtil.getEffectMultiplier("YenMultiplier", 1)
 
+	local tutorialBoostEndsAt = math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+	if tutorialBoostEndsAt > os.time() then
+		local tutorialConfig = TycoonConfig.Tutorial or {}
+		multiplier *= math.max(tonumber(tutorialConfig.RewardMultiplier) or 2, 1)
+	end
+
 	return multiplier
+end
+
+local function getTutorialData(PlayerDataService, player: Player): { [string]: any }
+	local tutorial = PlayerDataService:Get(player, "Tutorial")
+	return if type(tutorial) == "table" then tutorial else {}
+end
+
+local function grantTutorialReward(PlayerDataService, player: Player): number
+	local tutorial = getTutorialData(PlayerDataService, player)
+	if tutorial.RewardClaimed == true then
+		return math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+	end
+
+	local tutorialConfig = TycoonConfig.Tutorial or {}
+	local rewardSeconds = math.max(math.floor(tonumber(tutorialConfig.RewardSeconds) or 15 * 60), 1)
+	local now = os.time()
+	local currentEndsAt = math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+	local nextEndsAt = math.max(currentEndsAt, now) + rewardSeconds
+	PlayerDataService:Set(player, "TutorialBoostEndsAt", nextEndsAt)
+	PlayerDataService:Set(player, { "Tutorial", "RewardClaimed" }, true)
+	return nextEndsAt
 end
 
 local function getOfflineYenMultiplier(player: Player): number
@@ -773,9 +817,6 @@ function TycoonService:GrantUnits(player: Player, amount: number): boolean
 			shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
 			getUnitSpawnTier(PlayerDataService, player)
 		)
-	if #units > TycoonConfig.MaxUnits then
-		return false
-	end
 
 	PlayerDataService:SetUnits(player, units)
 	return true
@@ -794,6 +835,89 @@ function TycoonService:SellAllProcessor(player: Player): number
 	PlayerDataService:Set(player, "ManaInDeposit", 0)
 	PlayerDataService:AddYen(player, deposit * getYenMultiplier(player))
 	return deposit
+end
+
+function TycoonService.Client:AcceptTutorial(player: Player): (boolean, string?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tutorial = getTutorialData(PlayerDataService, player)
+	if tutorial.Completed == true or tutorial.Cancelled == true then
+		return false, "Already finished"
+	end
+
+	PlayerDataService:Set(player, { "Tutorial", "Prompted" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Cancelled" }, false)
+	PlayerDataService:Set(player, { "Tutorial", "Step" }, "PickupDrop")
+	return true
+end
+
+function TycoonService.Client:CancelTutorial(player: Player): (boolean, string?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	PlayerDataService:Set(player, { "Tutorial", "Prompted" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, false)
+	PlayerDataService:Set(player, { "Tutorial", "Cancelled" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Step" }, "Cancelled")
+	return true
+end
+
+function TycoonService.Client:UpdateTutorialStep(player: Player, step: string): boolean
+	if type(step) ~= "string" or TUTORIAL_STEPS[step] == nil or step == "Cancelled" then
+		return false
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tutorial = getTutorialData(PlayerDataService, player)
+	if tutorial.Accepted ~= true or tutorial.Cancelled == true or tutorial.Completed == true then
+		return false
+	end
+
+	local currentStep = if type(tutorial.Step) == "string" then tutorial.Step else "Prompt"
+	local currentIndex = TUTORIAL_STEPS[currentStep] or 0
+	local nextIndex = TUTORIAL_STEPS[step] or 0
+	if nextIndex < currentIndex then
+		return false
+	end
+
+	PlayerDataService:Set(player, { "Tutorial", "Step" }, step)
+	return true
+end
+
+function TycoonService.Client:CompleteTutorial(player: Player): (boolean, string?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tutorial = getTutorialData(PlayerDataService, player)
+	if tutorial.Cancelled == true then
+		return false, "Cancelled"
+	end
+
+	PlayerDataService:Set(player, { "Tutorial", "Prompted" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Completed" }, true)
+	PlayerDataService:Set(player, { "Tutorial", "Step" }, "Completed")
+	return true
+end
+
+function TycoonService.Client:ClaimTutorialReward(player: Player): (boolean, string?, number?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local tutorial = getTutorialData(PlayerDataService, player)
+	if tutorial.Completed ~= true and tutorial.Cancelled ~= true then
+		return false, "Tutorial not finished"
+	end
+
+	if tutorial.RewardClaimed == true then
+		return false, "Already claimed", math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+	end
+
+	return true, nil, grantTutorialReward(PlayerDataService, player)
 end
 
 function TycoonService.Client:DepositMana(player: Player): (boolean, string?, number?)
@@ -871,10 +995,6 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 			shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
 			getUnitSpawnTier(PlayerDataService, player)
 		)
-	if #units > TycoonConfig.MaxUnits then
-		PlayerDataService:AddYen(player, price)
-		return false, "Grid full"
-	end
 
 	PlayerDataService:SetUnits(player, units)
 	PlayerDataService:Set(player, "TotalUnitsPurchased", purchasedUnitCount + amount)
@@ -914,10 +1034,6 @@ function TycoonService.Client:BuyMaxUnits(player: Player, buttonName: string): (
 	end
 
 	local units = addTierOneUnits(currentUnits, amount, true, getUnitSpawnTier(PlayerDataService, player))
-	if #units > TycoonConfig.MaxUnits then
-		PlayerDataService:AddYen(player, price)
-		return false, "Grid full"
-	end
 
 	PlayerDataService:SetUnits(player, units)
 	PlayerDataService:Set(player, "TotalUnitsPurchased", purchasedUnitCount + amount)
@@ -1177,10 +1293,6 @@ end
 local function grantCapsuleUnit(player: Player, tier: number): (boolean, string?)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local currentUnits = PlayerDataService:GetUnits(player)
-	if #currentUnits >= TycoonConfig.MaxUnits then
-		return false, "Unit cap reached"
-	end
-
 	local normalizedTier = math.clamp(math.floor(tier), 1, AnimeDroppers.MaxTier)
 	local nextUnits = Merge.makeRoom(currentUnits, 1)
 	table.insert(nextUnits, {
@@ -1202,20 +1314,22 @@ local function createCapsuleEntry(player: Player): (boolean, any?)
 	local units = PlayerDataService:GetUnits(player)
 	local highestTier = CapsuleUtil.getHighestUnitTier(units)
 	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
+	local purchasedUnitCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0)
+	local spawnTier = getUnitSpawnTier(PlayerDataService, player)
 	local capsuleId = HttpService:GenerateGUID(false)
 
 	activeCapsules[player] = activeCapsules[player] or {}
 	activeCapsules[player][capsuleId] = {
 		HighestTier = highestTier,
 		PreviewTiers = previewTiers,
-		OpenPrice = CapsuleUtil.getOpenPrice(highestTier),
+		OpenPrice = CapsuleUtil.getOpenPrice(highestTier, units, purchasedUnitCount, spawnTier),
 		CreatedAt = os.clock(),
 	}
 
 	return true, {
 		Id = capsuleId,
 		PreviewTiers = previewTiers,
-		OpenPrice = CapsuleUtil.getOpenPrice(highestTier),
+		OpenPrice = activeCapsules[player][capsuleId].OpenPrice,
 		HighestTier = highestTier,
 	}
 end
@@ -1228,11 +1342,6 @@ function TycoonService:BeginOpenCapsuleForPlayer(player: Player, capsuleId: stri
 	end
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")
-	local currentUnits = PlayerDataService:GetUnits(player)
-	if #currentUnits >= TycoonConfig.MaxUnits then
-		return false, "Unit cap reached"
-	end
-
 	if spentYen then
 		if not PlayerDataService:TrySpendYen(player, capsule.OpenPrice) then
 			return false, "Not enough yen"
@@ -1334,11 +1443,6 @@ function TycoonService.Client:PrepareCapsuleRobuxOpen(player: Player, capsuleId:
 
 	local capsules = activeCapsules[player]
 	if not capsules or not capsules[capsuleId] then
-		return false
-	end
-
-	local PlayerDataService = Knit.GetService("PlayerDataService")
-	if #PlayerDataService:GetUnits(player) >= TycoonConfig.MaxUnits then
 		return false
 	end
 

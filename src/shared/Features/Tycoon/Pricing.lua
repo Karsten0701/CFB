@@ -4,14 +4,15 @@ local FormatUtil = require(script.Parent.FormatUtil)
 
 local Pricing = {}
 local RATE_GAIN_BASE = 1
-local RATE_GAIN_LINEAR = 0.8
-local RATE_GAIN_POWER_SCALE = 0.5
-local RATE_GAIN_EXPONENT = 2.1
-local RATE_PRICE_BASE = 5
-local RATE_PRICE_LINEAR = 4
-local RATE_PRICE_POWER_SCALE = 1.9
-local RATE_PRICE_EXPONENT = 2.35
-local MAX_RATE_BUY_AMOUNT = 100_000_000_000
+local RATE_GAIN_LINEAR = 0.35
+local RATE_GAIN_POWER_SCALE = 0.85
+local RATE_GAIN_EXPONENT = 1.6
+local RATE_PRICE_BASE = 12
+local RATE_PRICE_LINEAR = 6
+local RATE_PRICE_POWER_SCALE = 15
+local RATE_PRICE_EXPONENT = 1.62
+local MAX_UNIT_BUY_AMOUNT = 1e100
+local MAX_RATE_BUY_AMOUNT = 1e100
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
@@ -82,20 +83,29 @@ function Pricing.getUnitBulkPrice(baseUnitCount: number, amount: number, useMaxD
 end
 
 function Pricing.getMaxBaseUnitCapacity(): number
-	return TycoonConfig.MaxUnits * (TycoonConfig.MergeRatio ^ (AnimeDroppers.MaxTier - 1))
+	return math.huge
 end
 
 function Pricing.getMaxAffordableUnitPurchase(baseUnitCount: number, yen: number): (number, number)
 	yen = math.max(yen or 0, 0)
-	local capacity = math.max(math.floor(Pricing.getMaxBaseUnitCapacity() - baseUnitCount), 0)
-	if capacity <= 0 then
+	if yen <= 0 then
 		return 0, 0
 	end
 
 	local low = 0
-	local high = capacity
+	local high = 1
+	while high < MAX_UNIT_BUY_AMOUNT do
+		local price = Pricing.getUnitBulkPrice(baseUnitCount, high, true)
+		if price > yen or price == math.huge then
+			break
+		end
+
+		low = high
+		high = math.min(high * 2, MAX_UNIT_BUY_AMOUNT)
+	end
+
 	local iterations = 0
-	while low < high and iterations < 128 do
+	while low < high and iterations < 512 do
 		iterations += 1
 		local mid = math.ceil((low + high + 1) / 2)
 		if mid <= low then

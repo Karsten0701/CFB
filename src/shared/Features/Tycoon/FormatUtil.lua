@@ -67,6 +67,41 @@ function FormatUtil.formatMana(value: number): string
 	return FormatUtil.formatNumber(value) .. " Mana"
 end
 
+function FormatUtil.formatRoundedInteger(value: number): string
+	if type(value) ~= "number" or value ~= value then
+		return "0"
+	end
+
+	if value == math.huge then
+		return "Inf"
+	elseif value == -math.huge then
+		return "-Inf"
+	end
+
+	local rounded = math.floor(value + 0.5)
+	if math.abs(rounded) >= COMPACT_THRESHOLD then
+		return FormatUtil.formatNumber(rounded)
+	end
+
+	return addThousandsSeparators(tostring(rounded))
+end
+
+function FormatUtil.formatRoundedMana(value: number): string
+	return FormatUtil.formatRoundedInteger(value) .. " Mana"
+end
+
+function FormatUtil.formatSeconds(value: number): string
+	if type(value) ~= "number" or value ~= value then
+		return "0s"
+	end
+
+	local rounded = math.floor(value * 100 + 0.5) / 100
+	local text = string.format("%.2f", rounded)
+	text = string.gsub(text, "0+$", "")
+	text = string.gsub(text, "%.$", "")
+	return text .. "s"
+end
+
 function FormatUtil.formatRate(value: number): string
 	return FormatUtil.formatNumber(value) .. "/1s"
 end

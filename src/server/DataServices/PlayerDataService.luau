@@ -194,6 +194,40 @@ local function ensureManaData(data: { [string]: any })
 	data.RebirthUpgrades.UnitSpawnTier = math.max(math.floor(tonumber(data.RebirthUpgrades.UnitSpawnTier) or 0), 0)
 	data.RebirthUpgrades.MoreMana = math.max(math.floor(tonumber(data.RebirthUpgrades.MoreMana) or 0), 0)
 
+	if type(data.Tutorial) ~= "table" then
+		data.Tutorial = {}
+	end
+	data.Tutorial.Prompted = data.Tutorial.Prompted == true
+	data.Tutorial.Accepted = data.Tutorial.Accepted == true
+	data.Tutorial.Cancelled = data.Tutorial.Cancelled == true
+	data.Tutorial.Completed = data.Tutorial.Completed == true
+	data.Tutorial.RewardClaimed = data.Tutorial.RewardClaimed == true
+	if type(data.Tutorial.Step) ~= "string" or data.Tutorial.Step == "" then
+		data.Tutorial.Step = "Prompt"
+	end
+	local legacyTutorialStepMap = {
+		SaveForSecondUnit = "BuySecondUnit",
+		SaveForThirdUnit = "BuyThirdUnit",
+		WaitForTier5 = "WaitForRebirthReady",
+	}
+	data.Tutorial.Step = legacyTutorialStepMap[data.Tutorial.Step] or data.Tutorial.Step
+	if
+		data.Tutorial.Completed == true
+		and data.Tutorial.RewardClaimed ~= true
+		and (data.Rebirths < 1 or data.RebirthUpgrades.UnitSpawnTier < 1)
+	then
+		data.Tutorial.Completed = false
+		data.Tutorial.Accepted = true
+		data.Tutorial.Cancelled = false
+		data.Tutorial.Prompted = true
+		data.Tutorial.Step = if data.Rebirths >= 1 then "OpenUpgrades" else "WaitForRebirthReady"
+	end
+
+	if type(data.TutorialBoostEndsAt) ~= "number" then
+		data.TutorialBoostEndsAt = 0
+	end
+	data.TutorialBoostEndsAt = math.max(math.floor(data.TutorialBoostEndsAt), 0)
+
 	if type(data.Settings) ~= "table" then
 		data.Settings = {}
 	end
@@ -330,7 +364,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.13",
+		profileStoreIndex = "CFB_PlayerData.24",
 	})
 end
 

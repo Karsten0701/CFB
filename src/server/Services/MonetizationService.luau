@@ -2,7 +2,6 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
-local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
 local MonetizationService = Knit.CreateService({
@@ -133,7 +132,7 @@ function MonetizationService:KnitStart()
 				local nextUnits = table.clone(currentUnits)
 				if type(product.Units) == "table" then
 					for _, unit in product.Units do
-						if type(unit) ~= "table" or #nextUnits >= TycoonConfig.MaxUnits then
+						if type(unit) ~= "table" then
 							continue
 						end
 

@@ -16,6 +16,10 @@ TycoonRenderer.__index = TycoonRenderer
 local DROP_INTERVAL = 6
 local MAX_ACTIVE_DROPS = 150
 local MAX_DROP_SPAWNS_PER_FRAME = 4
+local DROP_MAX_FALL_SPEED = 26
+local DROP_NEAR_FLOOR_HEIGHT = 5
+local DROP_NEAR_FLOOR_MAX_SPEED = 5
+local DROP_FLOOR_CLEARANCE = 0.08
 local DROP_STAGGER_HASH = 0.61803398875
 local PICKUP_ANIMATION_TIME = 0.42
 local PICKUP_POPUP_LIFETIME = 0.72
@@ -178,11 +182,11 @@ local function setDropPhysics(part: BasePart, value: number)
 	part.Anchored = false
 	part.CanCollide = true
 	part.CanQuery = true
-	part.CanTouch = true
+	part.CanTouch = false
 	part.CollisionGroup = DROP_COLLISION_GROUP
 	part:SetAttribute("DropValue", value)
 	part:SetAttribute("Value", value)
-	part.CustomPhysicalProperties = PhysicalProperties.new(0.4, 0.35, 0.15)
+	part.CustomPhysicalProperties = PhysicalProperties.new(0.25, 0.65, 0.05)
 end
 
 local function prepareDropPickup(dropInstance: Instance, pickupPart: BasePart, value: number)
@@ -193,6 +197,7 @@ local function prepareDropPickup(dropInstance: Instance, pickupPart: BasePart, v
 			descendant.Anchored = false
 			descendant.CanCollide = false
 			descendant.CanTouch = false
+			descendant.CanQuery = false
 			descendant.Massless = false
 			descendant.CollisionGroup = DROP_COLLISION_GROUP
 
@@ -520,6 +525,45 @@ function TycoonRenderer:isInsideDropBounds(position: Vector3): boolean
 	return math.abs(localPosition.X) <= halfSize.X
 		and math.abs(localPosition.Y) <= halfSize.Y
 		and math.abs(localPosition.Z) <= halfSize.Z
+end
+
+function TycoonRenderer:getDropFloorY(pickupPart: BasePart): number
+	local bounds = self:getDropBounds()
+	if bounds then
+		return bounds.Position.Y - bounds.Size.Y * 0.5 + pickupPart.Size.Y * 0.5 + DROP_FLOOR_CLEARANCE
+	end
+
+	return pickupPart.Position.Y - 24
+end
+
+function TycoonRenderer:isPointInsidePart(part: BasePart, position: Vector3): boolean
+	local localPosition = part.CFrame:PointToObjectSpace(position)
+	local halfSize = part.Size * 0.5
+	return math.abs(localPosition.X) <= halfSize.X
+		and math.abs(localPosition.Y) <= halfSize.Y
+		and math.abs(localPosition.Z) <= halfSize.Z
+end
+
+function TycoonRenderer:limitDropFallSpeed(orb: BasePart, entry)
+	if type(entry) ~= "table" or entry.IsPossibleDrop or orb:GetAttribute("IsCapsule") == true then
+		return
+	end
+
+	local velocity = orb.AssemblyLinearVelocity
+	local downwardSpeed = -velocity.Y
+	if downwardSpeed <= 0 then
+		return
+	end
+
+	local maxFallSpeed = DROP_MAX_FALL_SPEED
+	local floorY = entry.FloorY or self:getDropFloorY(orb)
+	if orb.Position.Y - floorY <= DROP_NEAR_FLOOR_HEIGHT then
+		maxFallSpeed = DROP_NEAR_FLOOR_MAX_SPEED
+	end
+
+	if downwardSpeed > maxFallSpeed then
+		orb.AssemblyLinearVelocity = Vector3.new(velocity.X, -maxFallSpeed, velocity.Z)
+	end
 end
 
 function TycoonRenderer:ensureFloors(unitCount: number)
@@ -959,6 +1003,16 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 	end
 end
 
+function TycoonRenderer:registerManaDrop(pickupPart: BasePart, dropInstance: Instance, value: number, velocity: Vector3, extra: { [string]: any }?)
+	local entry = extra or {}
+	entry.Value = value
+	entry.Instance = dropInstance
+	entry.FloorY = self:getDropFloorY(pickupPart)
+
+	self.activeOrbs[pickupPart] = entry
+	pickupPart.AssemblyLinearVelocity = velocity
+end
+
 function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
 	if self.entitlements.ShowManaPopup == false then
 		return
@@ -982,7 +1036,7 @@ function TycoonRenderer:showPickupBillboard(position: Vector3, value: number)
 
 	local popup = template:Clone()
 	popup.Name = "PickupPopup"
-	setFirstTextLabelText(popup, "+" .. FormatUtil.formatMana(value))
+	setFirstTextLabelText(popup, "+" .. FormatUtil.formatRoundedMana(value))
 	preparePickupPopup(popup)
 	fadeTextLabels(popup, 0)
 
@@ -1114,19 +1168,21 @@ function TycoonRenderer:ensurePickupLoop()
 		return
 	end
 
-	self.pickupConnection = RunService.Heartbeat:Connect(function()
+	self.pickupConnection = RunService.Heartbeat:Connect(function(deltaTime)
 		local root = self:getLocalRoot()
-		if not root then
-			return
-		end
+		local autoCollect = self.entitlements.AutoCollect and self:getAutoCollectPart() or nil
 
-		for orb in self.activeOrbs do
+		for orb, entry in self.activeOrbs do
 			if not orb.Parent then
 				self.activeOrbs[orb] = nil
 				continue
 			end
 
-			if (root.Position - orb.Position).Magnitude <= 3 or not self:isInsideDropBounds(orb.Position) then
+			self:limitDropFallSpeed(orb, entry)
+
+			local pickedByPlayer = root ~= nil and (root.Position - orb.Position).Magnitude <= 3
+			local pickedByAutoCollect = autoCollect ~= nil and self:isPointInsidePart(autoCollect, orb.Position)
+			if pickedByPlayer or pickedByAutoCollect or not self:isInsideDropBounds(orb.Position) then
 				self:pickupOrb(orb)
 			end
 		end
@@ -1181,35 +1237,7 @@ function TycoonRenderer:spawnManaDrop(dropPart: BasePart, tier: number, value: n
 	end
 
 	dropInstance.Parent = dropsFolder
-	pickupPart.AssemblyLinearVelocity = Vector3.new(math.random(-2, 2), 3, math.random(-2, 2))
-
-	self.activeOrbs[pickupPart] = {
-		Value = value,
-		Instance = dropInstance,
-	}
-	self.dropTouchConnections[pickupPart] = pickupPart.Touched:Connect(function(hit)
-		if not self.activeOrbs[pickupPart] then
-			return
-		end
-
-		if hit:GetAttribute("IsCapsule") == true or hit:GetAttribute("IsPossibleDrop") == true then
-			return
-		end
-
-		if self:isLocalCharacterPart(hit) then
-			self:pickupOrb(pickupPart)
-			return
-		end
-
-		local autoCollect = self:getAutoCollectPart()
-		if
-			self.entitlements.AutoCollect
-			and autoCollect
-			and (hit == autoCollect or hit:IsDescendantOf(autoCollect))
-		then
-			self:pickupOrb(pickupPart)
-		end
-	end)
+	self:registerManaDrop(pickupPart, dropInstance, value, Vector3.new(math.random(-2, 2), 3, math.random(-2, 2)))
 
 	return true
 end
@@ -1303,38 +1331,11 @@ function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
 	end
 
 	dropInstance.Parent = self:getDropsFolder()
-	pickupPart.AssemblyLinearVelocity = Vector3.new(math.random(-2, 2), 4, math.random(-2, 2))
-
-	self.activeOrbs[pickupPart] = {
-		Value = value,
-		Instance = dropInstance,
+	self:registerManaDrop(pickupPart, dropInstance, value, Vector3.new(math.random(-2, 2), 4, math.random(-2, 2)), {
 		Mutation = "Gold",
 		Multiplier = multiplier,
 		Tier = entry.Tier,
-	}
-	self.dropTouchConnections[pickupPart] = pickupPart.Touched:Connect(function(hit)
-		if not self.activeOrbs[pickupPart] then
-			return
-		end
-
-		if hit:GetAttribute("IsCapsule") == true or hit:GetAttribute("IsPossibleDrop") == true then
-			return
-		end
-
-		if self:isLocalCharacterPart(hit) then
-			self:pickupOrb(pickupPart)
-			return
-		end
-
-		local autoCollect = self:getAutoCollectPart()
-		if
-			self.entitlements.AutoCollect
-			and autoCollect
-			and (hit == autoCollect or hit:IsDescendantOf(autoCollect))
-		then
-			self:pickupOrb(pickupPart)
-		end
-	end)
+	})
 
 	return true
 end
@@ -1445,7 +1446,13 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 		return (left.Tier or 1) > (right.Tier or 1)
 	end)
 
-	self:ensureFloors(#sortedUnits)
+	local renderCapacity = math.max(TycoonConfig.SpotsPerFloor * TycoonConfig.MaxFloors, 1)
+	local visibleUnits = {}
+	for unitIndex = 1, math.min(#sortedUnits, renderCapacity) do
+		visibleUnits[unitIndex] = sortedUnits[unitIndex]
+	end
+
+	self:ensureFloors(#visibleUnits)
 
 	local dropperHolder = self:getDropperHolder()
 	if not dropperHolder then
@@ -1468,14 +1475,14 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	end
 
 	for unitIndex in self.unitEntries do
-		if unitIndex > #sortedUnits then
+		if unitIndex > #visibleUnits then
 			queueRecycle(self.unitEntries[unitIndex])
 			self.unitEntries[unitIndex] = nil
 			self.unitModels[unitIndex] = nil
 		end
 	end
 
-	for unitIndex, unit in sortedUnits do
+	for unitIndex, unit in visibleUnits do
 		local existingEntry = self.unitEntries[unitIndex]
 		if existingEntry and existingEntry.Tier == unit.Tier and existingEntry.Model and existingEntry.Model.Parent then
 			local spotPart = self:getSpotForUnitIndex(dropperHolder, unitIndex)

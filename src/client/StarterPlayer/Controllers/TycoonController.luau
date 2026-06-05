@@ -502,7 +502,7 @@ function TycoonController:updateProcesserDisplay(tycoon: Instance)
 	end
 
 	if rateLabel then
-		local intervalText = tostring(getDepositProcessInterval()) .. "s"
+		local intervalText = FormatUtil.formatSeconds(getDepositProcessInterval())
 		rateLabel.Text = "Rate: " .. FormatUtil.formatNumber(math.floor(rate)) .. "/" .. intervalText
 	end
 end

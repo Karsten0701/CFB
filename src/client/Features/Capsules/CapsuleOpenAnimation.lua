@@ -140,6 +140,7 @@ function CapsuleOpenAnimation.play(
 	local config = getConfig()
 	local revealStartHeight = tonumber(config.RevealStartHeight) or 1.15
 	local revealEndHeight = tonumber(config.RevealEndHeight) or 1.75
+	local revealHoldDuration = tonumber(config.RevealHoldDuration) or 0.85
 
 	for _, part in getCapsuleParts(capsule) do
 		part.Anchored = true
@@ -271,7 +272,7 @@ function CapsuleOpenAnimation.play(
 		riseValue:Destroy()
 	end
 
-	task.wait(0.3)
+	task.wait(revealHoldDuration)
 
 	if camera then
 		camera.CameraType = previousCameraType
