@@ -32,6 +32,9 @@ local buttonActions: { [BasePart]: { kind: string, amount: number?, buttonName: 
 local buttonModelsByTycoon: { [Instance]: { Model } } = {}
 local buttonDisplayCache: { [Instance]: { [string]: any } } = {}
 local buttonInfoCache: { [Instance]: { [string]: any } } = {}
+local buttonBillboardCacheByTycoon: { [Instance]: { BillboardGui } } = {}
+local buttonBillboardsEnabledByTycoon: { [Instance]: boolean } = {}
+local buttonPriceUpdateScheduled: { [Instance]: boolean } = {}
 local buyUnitTierCache: { [Instance]: number } = {}
 local lastActionAt: { [BasePart]: number } = {}
 local wasStandingOnButton: { [BasePart]: boolean } = {}
@@ -51,12 +54,15 @@ local groupJoinPromptOpen = false
 local otherTycoonRefreshToken = 0
 local otherTycoonRefreshRunning = false
 local lastAppliedEventId: string? = nil
+local groupRewardWasOnCooldown = false
+local groupRewardReadyNotified = false
 
 local ACTION_COOLDOWN = 1.12
 local OTHER_TYCOON_STREAM_INTERVAL = 0.75
 local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
 local OTHER_TYCOON_BATCH_SIZE = 1
 local OTHER_TYCOON_BATCH_DELAY = 0.08
+local BUTTON_PRICE_UPDATE_DELAY = 0.04
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
 	if firstArg == localPlayer then
@@ -246,7 +252,7 @@ local function getButtonInfo(buttonModel: Instance)
 end
 
 local function getProcesserLabels(tycoon: Instance): (TextLabel?, TextLabel?)
-	local processer = tycoon:FindFirstChild("Processer")
+	local processer = tycoon:FindFirstChild("Processer") or tycoon:FindFirstChild("Processor")
 	if not processer then
 		return nil, nil
 	end
@@ -266,6 +272,51 @@ local function getProcesserLabels(tycoon: Instance): (TextLabel?, TextLabel?)
 
 	return if mpLabel and mpLabel:IsA("TextLabel") then mpLabel else nil,
 		if rateLabel and rateLabel:IsA("TextLabel") then rateLabel else nil
+end
+
+local function rebuildButtonBillboardCache(tycoon: Instance): { BillboardGui }
+	local billboards = {}
+	for _, descendant in tycoon:GetDescendants() do
+		if not descendant:IsA("BillboardGui") then
+			continue
+		end
+
+		local buttonModel = descendant:FindFirstAncestorOfClass("Model")
+		if buttonModel and buttonModel:IsDescendantOf(tycoon) and getButtonInfo(buttonModel).ShouldRegister then
+			table.insert(billboards, descendant)
+		end
+	end
+
+	buttonBillboardCacheByTycoon[tycoon] = billboards
+	return billboards
+end
+
+local function getButtonBillboards(tycoon: Instance): { BillboardGui }
+	local cached = buttonBillboardCacheByTycoon[tycoon]
+	if cached then
+		for _, billboard in cached do
+			if not billboard.Parent then
+				return rebuildButtonBillboardCache(tycoon)
+			end
+		end
+
+		return cached
+	end
+
+	return rebuildButtonBillboardCache(tycoon)
+end
+
+local function setButtonBillboardsEnabled(tycoon: Instance, enabled: boolean)
+	if buttonBillboardsEnabledByTycoon[tycoon] == enabled then
+		return
+	end
+
+	buttonBillboardsEnabledByTycoon[tycoon] = enabled
+	for _, billboard in getButtonBillboards(tycoon) do
+		if billboard.Parent then
+			billboard.Enabled = enabled
+		end
+	end
 end
 
 local function getButtonBillboard(buttonModel: Instance): BillboardGui?
@@ -487,15 +538,15 @@ local function getDepositProcessInterval(): number
 	return interval / math.max(EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1), 0.1)
 end
 
-function TycoonController:updateProcesserDisplay(tycoon: Instance)
+function TycoonController:updateProcesserDisplay(tycoon: Instance, depositOverride: number?, rateOverride: number?)
 	local mpLabel, rateLabel = getProcesserLabels(tycoon)
 	if not mpLabel and not rateLabel then
 		return
 	end
 
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local deposit = PlayerDataController:Get("ManaInDeposit") or 0
-	local rate = PlayerDataController:Get("Rate") or 0
+	local deposit = if depositOverride ~= nil then depositOverride else (PlayerDataController:Get("ManaInDeposit") or 0)
+	local rate = if rateOverride ~= nil then rateOverride else (PlayerDataController:Get("Rate") or 0)
 
 	if mpLabel then
 		mpLabel.Text = FormatUtil.formatMana(math.floor(deposit))
@@ -603,6 +654,17 @@ function TycoonController:updateGroupRewardDisplay(tycoon: Instance)
 	local remaining = getGroupRewardRemaining()
 	local reward = getGroupRewardAmount()
 	local buttonModels = buttonModelsByTycoon[tycoon] or {}
+	local isReady = isInGroup and remaining <= 0
+
+	if isInGroup and remaining > 0 then
+		groupRewardWasOnCooldown = true
+		groupRewardReadyNotified = false
+	elseif isReady and groupRewardWasOnCooldown and not groupRewardReadyNotified then
+		groupRewardReadyNotified = true
+		groupRewardWasOnCooldown = false
+		local MainGuiController = Knit.GetController("MainGuiController")
+		MainGuiController:ShowGroupRewardReadyMessage()
+	end
 
 	for _, child in buttonModels do
 		local info = getButtonInfo(child)
@@ -736,6 +798,20 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 	end
 end
 
+function TycoonController:scheduleButtonPriceUpdate(tycoon: Instance)
+	if buttonPriceUpdateScheduled[tycoon] then
+		return
+	end
+
+	buttonPriceUpdateScheduled[tycoon] = true
+	task.delay(BUTTON_PRICE_UPDATE_DELAY, function()
+		buttonPriceUpdateScheduled[tycoon] = nil
+		if tycoon.Parent then
+			self:updateButtonPrices(tycoon)
+		end
+	end)
+end
+
 function TycoonController:registerButtonAction(
 	head: BasePart,
 	action: { kind: string, amount: number?, buttonName: string }
@@ -769,6 +845,9 @@ function TycoonController:performButtonAction(head: BasePart)
 	elseif action.kind == "sell_all_product" then
 		promptDevProduct(head, Monetization.DeveloperProducts.SellAll.ProductId)
 	elseif action.kind == "group_reward" then
+		local TutorialController = Knit.GetController("TutorialController")
+		TutorialController:MarkGroupRewardVisited()
+
 		if not isLocalPlayerInRewardGroup() then
 			promptJoinRewardGroup()
 			return
@@ -776,6 +855,7 @@ function TycoonController:performButtonAction(head: BasePart)
 
 		TycoonService:ClaimGroupReward(action.buttonName):andThen(function(success, err, reward)
 			if success then
+				SoundUtil.RewardClaim()
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowGroupRewardMessage(reward or 0)
 				if actionTycoon then
@@ -810,6 +890,7 @@ function TycoonController:performButtonAction(head: BasePart)
 	elseif action.kind == "merge" then
 		TycoonService:MergeUnits(action.buttonName):andThen(function(success, err, mergedUnitCount)
 			if success then
+				SoundUtil.Merge()
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowMergedUnitsMessage(mergedUnitCount or 0)
 			end
@@ -841,6 +922,9 @@ function TycoonController:performButtonAction(head: BasePart)
 			if not success and err and err ~= "Nothing to deposit" then
 				warn("[TycoonController] Deposit failed:", err)
 			elseif success then
+				if (depositedAmount or 0) > 0 then
+					SoundUtil.Deposit()
+				end
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowDepositMessage(depositedAmount or 0)
 			end
@@ -978,6 +1062,8 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 
 	buttonActions = nextButtonActions
 	buttonModelsByTycoon[tycoon] = nextButtonModels
+	buttonBillboardCacheByTycoon[tycoon] = nil
+	buttonBillboardsEnabledByTycoon[tycoon] = nil
 
 	for head in wasStandingOnButton do
 		if not buttonActions[head] then
@@ -1024,10 +1110,14 @@ end
 
 function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 	if renderers[tycoon] then
+		setButtonBillboardsEnabled(tycoon, isOwn)
 		return true
 	end
 
 	if not self:shouldRenderTycoon(tycoon, isOwn) then
+		if not isOwn then
+			setButtonBillboardsEnabled(tycoon, false)
+		end
 		return false
 	end
 
@@ -1058,6 +1148,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 		lastAutoDeposit = nil,
 		lastObservedDeposit = nil,
 	}
+	setButtonBillboardsEnabled(tycoon, isOwn)
 
 	if isOwn then
 		local MonetizationService = Knit.GetService("MonetizationService")
@@ -1143,24 +1234,24 @@ function TycoonController:setupOwnTycoon(): boolean
 
 	PlayerDataController:Observe("Units", function(newUnits)
 		self:rebuildTycoon(tycoon, newUnits or {})
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
 	PlayerDataController:Observe("RateLevel", function()
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
 	PlayerDataController:Observe("Yen", function()
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
 	PlayerDataController:Observe("TotalUnitsPurchased", function()
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
 	PlayerDataController:Observe({ "RebirthUpgrades", "UnitSpawnTier" }, function()
 		table.clear(buyUnitTierCache)
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 		self:rebuildTycoon(tycoon, PlayerDataController:Get("Units") or {})
 	end, janitor)
 
@@ -1182,7 +1273,7 @@ function TycoonController:setupOwnTycoon(): boolean
 	end, janitor)
 
 	PlayerDataController:Observe("Rate", function()
-		self:updateButtonPrices(tycoon)
+		self:scheduleButtonPriceUpdate(tycoon)
 		self:updateProcesserDisplay(tycoon)
 	end, janitor)
 
@@ -1286,7 +1377,7 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 			end
 
 			local shouldShowOthers = shouldShowOtherTycoons()
-			self:setDefaultProcesserDisplay(tycoon)
+			setButtonBillboardsEnabled(tycoon, false)
 
 			local entry = renderers[tycoon]
 			local isClaimed = tycoon:GetAttribute("Claimed") == true
@@ -1297,6 +1388,10 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 				entry.renderer:destroy()
 				entry.janitor:Destroy()
 				renderers[tycoon] = nil
+				buttonBillboardCacheByTycoon[tycoon] = nil
+				buttonBillboardsEnabledByTycoon[tycoon] = nil
+				buttonPriceUpdateScheduled[tycoon] = nil
+				self:setDefaultProcesserDisplay(tycoon)
 				stepBatch()
 			elseif shouldLoad then
 				if self:setupTycoon(tycoon, false) then
@@ -1315,6 +1410,7 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 							end
 
 							currentEntry.lastVisualRefreshAt = os.clock()
+							self:updateProcesserDisplay(requestedTycoon, payload.ManaInDeposit or 0, payload.Rate or 0)
 							self:rebuildTycoon(requestedTycoon, payload.Units or {})
 						end)
 						:catch(function(err)
@@ -1342,6 +1438,7 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 							end
 
 							currentEntry.lastVisualRefreshAt = os.clock()
+							self:updateProcesserDisplay(requestedTycoon, payload.ManaInDeposit or 0, payload.Rate or 0)
 							self:rebuildTycoon(requestedTycoon, payload.Units or {})
 						end)
 						:catch(function(err)

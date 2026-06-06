@@ -41,7 +41,7 @@ local lastCapsuleRewardTier: { [Player]: number } = {}
 local pendingCapsuleRewards: { [Player]: { [string]: number } } = {}
 
 local PROCESS_INTERVAL = 1
-local DROP_INTERVAL = 6
+local DROP_INTERVAL = 60
 local MAX_ACTIVE_DROPS = 150
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
@@ -59,17 +59,30 @@ local TUTORIAL_STEPS = {
 	DepositManaAgain = 6,
 	BuyThirdUnit = 7,
 	MergeUnits = 8,
-	WaitForRebirthReady = 9,
-	Rebirth = 10,
-	OpenUpgrades = 11,
-	UpgradeUnitSpawnTier = 12,
-	Completed = 13,
+	VisitGroupReward = 9,
+	WaitForRebirthReady = 10,
+	Rebirth = 11,
+	OpenUpgrades = 12,
+	UpgradeUnitSpawnTier = 13,
+	Completed = 14,
 	Cancelled = 99,
 }
 
 local function resetPickupBudgetTimer(player: Player)
 	pickupBudget[player] = 0
 	pickupBudgetUpdatedAt[player] = os.clock()
+end
+
+local function clearPlayerCapsuleState(player: Player, clearCooldowns: boolean?)
+	activeCapsules[player] = nil
+	pendingCapsuleRobux[player] = nil
+	lastCapsuleRewardTier[player] = nil
+	pendingCapsuleRewards[player] = nil
+
+	if clearCooldowns then
+		lastCapsuleSpawnAt[player] = nil
+		lastAmbientCapsuleAt[player] = nil
+	end
 end
 
 local function flushQueuedMana(player: Player)
@@ -193,7 +206,10 @@ local function grantTutorialReward(PlayerDataService, player: Player): number
 	end
 
 	local tutorialConfig = TycoonConfig.Tutorial or {}
-	local rewardSeconds = math.max(math.floor(tonumber(tutorialConfig.RewardSeconds) or 15 * 60), 1)
+	local configuredRewardSeconds = if tutorial.Cancelled == true
+		then tutorialConfig.CancelledRewardSeconds
+		else tutorialConfig.RewardSeconds
+	local rewardSeconds = math.max(math.floor(tonumber(configuredRewardSeconds) or 15 * 60), 1)
 	local now = os.time()
 	local currentEndsAt = math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
 	local nextEndsAt = math.max(currentEndsAt, now) + rewardSeconds
@@ -242,7 +258,8 @@ local function getOfflineRewardPayload(player: Player)
 	local offlineConfig = TycoonConfig.OfflineReward or {}
 	local minimumOfflineSeconds = math.max(math.floor(tonumber(offlineConfig.MinimumOfflineSeconds) or 3600), 0)
 	local rewardMultiplier = math.clamp(tonumber(offlineConfig.RewardMultiplier) or 0.75, 0, 1)
-	local maxOfflineSeconds = math.max(math.floor(tonumber(offlineConfig.MaxOfflineSeconds) or 24 * 60 * 60), minimumOfflineSeconds)
+	local maxOfflineSeconds =
+		math.max(math.floor(tonumber(offlineConfig.MaxOfflineSeconds) or 24 * 60 * 60), minimumOfflineSeconds)
 	local now = os.time()
 	local lastLogoutAt = math.max(math.floor(PlayerDataService:Get(player, "LastLogoutAt") or 0), 0)
 	local offlineSeconds = math.max(now - lastLogoutAt, 0)
@@ -292,6 +309,28 @@ end
 
 local function getRebirthTokenReward(rebirthNumber: number): number
 	rebirthNumber = math.max(math.floor(rebirthNumber), 1)
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	local tokensPerRebirth = rebirthConfig.TokensPerRebirth
+	if type(tokensPerRebirth) == "table" then
+		local configuredReward = tokensPerRebirth[rebirthNumber]
+		if configuredReward == nil then
+			local fallbackRebirth = 0
+			for configuredRebirth in tokensPerRebirth do
+				local numericRebirth = math.floor(tonumber(configuredRebirth) or 0)
+				if numericRebirth > fallbackRebirth and numericRebirth <= rebirthNumber then
+					fallbackRebirth = numericRebirth
+					configuredReward = tokensPerRebirth[configuredRebirth]
+				end
+			end
+		end
+
+		if configuredReward ~= nil then
+			return math.max(math.floor(tonumber(configuredReward) or 0), 0)
+		end
+	elseif tonumber(tokensPerRebirth) then
+		return math.max(math.floor(tonumber(tokensPerRebirth) or 0), 0)
+	end
+
 	local previousReward = 1
 	local reward = 1
 
@@ -724,14 +763,15 @@ function TycoonService.Client:GetOfflineReward(player: Player): (boolean, any)
 		}
 	end
 
-	return true, {
-		Eligible = true,
-		OfflineSeconds = payload.OfflineSeconds,
-		RewardedSeconds = payload.RewardedSeconds,
-		Reward = payload.Reward,
-		YenPerHour = payload.YenPerHour,
-		RewardMultiplier = payload.RewardMultiplier,
-	}
+	return true,
+		{
+			Eligible = true,
+			OfflineSeconds = payload.OfflineSeconds,
+			RewardedSeconds = payload.RewardedSeconds,
+			Reward = payload.Reward,
+			YenPerHour = payload.YenPerHour,
+			RewardMultiplier = payload.RewardMultiplier,
+		}
 end
 
 function TycoonService.Client:ClaimOfflineReward(player: Player): (boolean, string?, number?)
@@ -773,6 +813,8 @@ function TycoonService.Client:GetTycoonVisualData(player: Player, tycoonName: st
 
 	PlayerDataService:WaitForData(owner)
 	local units = PlayerDataService:GetUnits(owner)
+	local manaInDeposit = math.max(math.floor(PlayerDataService:Get(owner, "ManaInDeposit") or 0), 0)
+	local rate = math.max(math.floor(PlayerDataService:Get(owner, "Rate") or 0), 0)
 	local compactUnits = table.create(#units)
 	for _, unit in units do
 		table.insert(compactUnits, {
@@ -782,11 +824,14 @@ function TycoonService.Client:GetTycoonVisualData(player: Player, tycoonName: st
 	end
 
 	-- Visual-only payload. Server stays authoritative for money, drops, buys and merges.
-	return true, {
-		TycoonName = tycoon.Name,
-		OwnerUserId = owner.UserId,
-		Units = compactUnits,
-	}
+	return true,
+		{
+			TycoonName = tycoon.Name,
+			OwnerUserId = owner.UserId,
+			Units = compactUnits,
+			ManaInDeposit = manaInDeposit,
+			Rate = rate,
+		}
 end
 
 function TycoonService:GrantUnits(player: Player, amount: number): boolean
@@ -810,13 +855,12 @@ function TycoonService:GrantUnits(player: Player, amount: number): boolean
 	end
 
 	local currentUnits = PlayerDataService:GetUnits(player)
-	local units =
-		addTierOneUnits(
-			currentUnits,
-			amount,
-			shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
-			getUnitSpawnTier(PlayerDataService, player)
-		)
+	local units = addTierOneUnits(
+		currentUnits,
+		amount,
+		shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
+		getUnitSpawnTier(PlayerDataService, player)
+	)
 
 	PlayerDataService:SetUnits(player, units)
 	return true
@@ -914,7 +958,9 @@ function TycoonService.Client:ClaimTutorialReward(player: Player): (boolean, str
 	end
 
 	if tutorial.RewardClaimed == true then
-		return false, "Already claimed", math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+		return false,
+			"Already claimed",
+			math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
 	end
 
 	return true, nil, grantTutorialReward(PlayerDataService, player)
@@ -988,13 +1034,12 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 		return false, "Not enough yen"
 	end
 
-	local units =
-		addTierOneUnits(
-			currentUnits,
-			amount,
-			shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
-			getUnitSpawnTier(PlayerDataService, player)
-		)
+	local units = addTierOneUnits(
+		currentUnits,
+		amount,
+		shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
+		getUnitSpawnTier(PlayerDataService, player)
+	)
 
 	PlayerDataService:SetUnits(player, units)
 	PlayerDataService:Set(player, "TotalUnitsPurchased", purchasedUnitCount + amount)
@@ -1092,6 +1137,7 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 	local tokenReward = getRebirthTokenReward(nextRebirths)
 	local currentTokens = math.max(math.floor(PlayerDataService:Get(player, "RebirthTokens") or 0), 0)
 	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
+	local starterUnits = getRebirthStarterUnits(PlayerDataService, player)
 	PlayerDataService:Set(player, "Rebirths", nextRebirths)
 	PlayerDataService:Set(player, "RebirthTokens", currentTokens + tokenReward)
 	PlayerDataService:Set(player, "Yen", resetYen)
@@ -1100,10 +1146,11 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 	PlayerDataService:Set(player, "TotalUnitsPurchased", 0)
 	PlayerDataService:Set(player, "RateLevel", 0)
 	PlayerDataService:Set(player, "Rate", rebirthConfig.ResetRate or 1)
-	PlayerDataService:SetUnits(player, getRebirthStarterUnits(PlayerDataService, player))
+	PlayerDataService:SetUnits(player, starterUnits)
 	pendingBagMana[player] = nil
 	pendingDepositMana[player] = nil
 	manaFlushScheduled[player] = nil
+	clearPlayerCapsuleState(player, true)
 	pickupBlockedUntil[player] = os.clock() + 1
 	resetPickupBudgetTimer(player)
 
@@ -1326,15 +1373,20 @@ local function createCapsuleEntry(player: Player): (boolean, any?)
 		CreatedAt = os.clock(),
 	}
 
-	return true, {
-		Id = capsuleId,
-		PreviewTiers = previewTiers,
-		OpenPrice = activeCapsules[player][capsuleId].OpenPrice,
-		HighestTier = highestTier,
-	}
+	return true,
+		{
+			Id = capsuleId,
+			PreviewTiers = previewTiers,
+			OpenPrice = activeCapsules[player][capsuleId].OpenPrice,
+			HighestTier = highestTier,
+		}
 end
 
-function TycoonService:BeginOpenCapsuleForPlayer(player: Player, capsuleId: string, spentYen: boolean): (boolean, string?, number?)
+function TycoonService:BeginOpenCapsuleForPlayer(
+	player: Player,
+	capsuleId: string,
+	spentYen: boolean
+): (boolean, string?, number?)
 	local capsules = activeCapsules[player]
 	local capsule = if capsules then capsules[capsuleId] else nil
 	if not capsule then
@@ -1505,12 +1557,7 @@ function TycoonService:KnitStart()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		activeCapsules[player] = nil
-		lastCapsuleSpawnAt[player] = nil
-		lastAmbientCapsuleAt[player] = nil
-		pendingCapsuleRobux[player] = nil
-		lastCapsuleRewardTier[player] = nil
-		pendingCapsuleRewards[player] = nil
+		clearPlayerCapsuleState(player, true)
 		self:ReleaseTycoon(player)
 	end)
 

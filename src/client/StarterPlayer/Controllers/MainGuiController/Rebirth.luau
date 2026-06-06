@@ -4,6 +4,7 @@ local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
@@ -244,6 +245,7 @@ function MainGuiController:buyRebirthUpgrade(upgradeKey: string, displayName: st
 		:andThen(function(success, err)
 			rebirthUpgradeRequestOpen = false
 			if success then
+				SoundUtil.TutorialProgress()
 				self:ShowRebirthUpgradeMessage(displayName)
 				self:updateUpgradesFrame()
 			elseif err == "Not enough tokens" then
@@ -293,7 +295,10 @@ function MainGuiController:setupRebirthFrame()
 				:andThen(function(success, err, rebirths, tokenReward)
 					rebirthRequestOpen = false
 					if success then
+						SoundUtil.TutorialProgress()
 						local TycoonController = Knit.GetController("TycoonController")
+						local CapsuleController = Knit.GetController("CapsuleController")
+						CapsuleController:ClearCapsules()
 						TycoonController:ClearOwnDrops()
 						self:ShowRebirthMessage(rebirths or 0, tokenReward or 0)
 						self:updateRebirthFrame(rebirths)

@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
@@ -94,6 +95,7 @@ function MainGuiController:claimOfflineReward(frame: GuiObject?)
 			end
 
 			if success then
+				SoundUtil.RewardClaim()
 				self:ShowOfflineRewardMessage(reward or 0)
 			elseif err and err ~= "No reward" then
 				warn("[MainGuiController] Offline reward failed:", err)

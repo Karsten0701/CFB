@@ -717,39 +717,104 @@ local function getRaycastExcludes(excludeRoot: Instance?, extraExclude: Instance
 	return excludes
 end
 
+local function isManaDropPart(part: Instance?): boolean
+	if not part or not part:IsA("BasePart") then
+		return false
+	end
+
+	if part.CollisionGroup == DROP_COLLISION_GROUP then
+		return true
+	end
+
+	if tonumber(part:GetAttribute("DropValue")) ~= nil or tonumber(part:GetAttribute("Value")) ~= nil then
+		return true
+	end
+
+	local ancestor = part.Parent
+	while ancestor and ancestor ~= Workspace do
+		if ancestor.Name == "ManaDrops" then
+			return true
+		end
+		ancestor = ancestor.Parent
+	end
+
+	return false
+end
+
+local function isFirstLayerBottom(part: Instance?): boolean
+	if not part or not part:IsA("BasePart") or part.Name ~= "Bottom" then
+		return false
+	end
+
+	local model = part.Parent
+	local firstLayerStuff = model and model.Parent
+	return model ~= nil and model.Name == "Model" and firstLayerStuff ~= nil and firstLayerStuff.Name == "FirstLayerStuff"
+end
+
+local function getBottomEdgePushDirection(bottom: BasePart?, assemblyRoot: BasePart): Vector3?
+	if not bottom then
+		return nil
+	end
+
+	local localPosition = bottom.CFrame:PointToObjectSpace(assemblyRoot.Position)
+	local halfSize = bottom.Size * 0.5
+	local radius = math.max(assemblyRoot.Size.X, assemblyRoot.Size.Y, assemblyRoot.Size.Z) * 0.5
+	local margin = math.min(math.max(radius * 0.75, 0.75), math.min(halfSize.X, halfSize.Z) * 0.45)
+
+	if math.abs(localPosition.X) <= halfSize.X - margin and math.abs(localPosition.Z) <= halfSize.Z - margin then
+		return nil
+	end
+
+	local centerDirection = bottom.Position - assemblyRoot.Position
+	return getHorizontalDirection(centerDirection)
+end
+
 local function getGroundRollDirection(
 	assemblyRoot: BasePart,
 	excludeRoot: Instance?,
 	extraExclude: Instance?
-): (Vector3?, boolean, boolean)
+): (Vector3?, boolean, boolean, BasePart?, boolean, Vector3)
 	local raycastParams = RaycastParams.new()
 	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 	raycastParams.FilterDescendantsInstances = getRaycastExcludes(excludeRoot or assemblyRoot, extraExclude)
 	raycastParams.IgnoreWater = true
+	raycastParams.CollisionGroup = CAPSULE_COLLISION_GROUP
+	raycastParams.RespectCanCollide = true
 
 	local radius = math.max(assemblyRoot.Size.X, assemblyRoot.Size.Y, assemblyRoot.Size.Z) * 0.5
 	local result = Workspace:Raycast(assemblyRoot.Position, Vector3.new(0, -(radius + 1.25), 0), raycastParams)
-	if not result then
-		return nil, false, false
+	local retryCount = 0
+	while result and isManaDropPart(result.Instance) and retryCount < 4 do
+		retryCount += 1
+		local excludes = table.clone(raycastParams.FilterDescendantsInstances)
+		table.insert(excludes, result.Instance)
+		raycastParams.FilterDescendantsInstances = excludes
+		result = Workspace:Raycast(assemblyRoot.Position, Vector3.new(0, -(radius + 1.25), 0), raycastParams)
+	end
+
+	if not result or not result.Instance:IsA("BasePart") then
+		return nil, false, false, nil, false, Vector3.yAxis
 	end
 
 	local grounded = result.Distance <= radius + 0.45
 	if not grounded then
-		return nil, false, false
+		return nil, false, false, nil, false, result.Normal
 	end
 
 	local normal = result.Normal
+	local hitPart = result.Instance
+	local onFirstLayerBottom = isFirstLayerBottom(hitPart)
 	if normal.Y > 0.985 then
-		return nil, false, true
+		return nil, false, true, hitPart, onFirstLayerBottom, normal
 	end
 
 	local gravityDirection = Vector3.new(0, -1, 0)
 	local downhill = gravityDirection - normal * gravityDirection:Dot(normal)
 	if downhill.Magnitude < 0.02 then
-		return nil, false, true
+		return nil, false, true, hitPart, onFirstLayerBottom, normal
 	end
 
-	return downhill.Unit, true, true
+	return downhill.Unit, true, true, hitPart, onFirstLayerBottom, normal
 end
 
 local function pushGroundedHorizontalVelocity(assemblyRoot: BasePart, direction: Vector3, targetSpeed: number)
@@ -832,6 +897,11 @@ local function destroyRollDrive(entry: any)
 		entry.rollConnection = nil
 	end
 
+	if entry.rollDriveAttachment then
+		entry.rollDriveAttachment:Destroy()
+		entry.rollDriveAttachment = nil
+	end
+
 	if entry.rollDriveFolder then
 		entry.rollDriveFolder:Destroy()
 		entry.rollDriveFolder = nil
@@ -849,6 +919,7 @@ local function startRollingAssist(entry: any, assemblyRoot: BasePart, preferredD
 	local attachment = Instance.new("Attachment")
 	attachment.Name = "CapsuleRollAttachment"
 	attachment.Parent = assemblyRoot
+	entry.rollDriveAttachment = attachment
 
 	local torque = Instance.new("Torque")
 	torque.Name = "CapsuleRollTorque"
@@ -868,6 +939,8 @@ local function startRollingAssist(entry: any, assemblyRoot: BasePart, preferredD
 	local rollDirection = getHorizontalDirection(preferredDirection) or Vector3.new(1, 0, 0)
 	local nextKickAt = 0
 	local driveStartedAt = os.clock()
+	local bottomStableSince: number? = nil
+	local bottomLandedAt: number? = nil
 	entry.rollConnection = RunService.Heartbeat:Connect(function()
 		if entry.destroying or entry.pickedUp or not assemblyRoot.Parent then
 			destroyRollDrive(entry)
@@ -881,13 +954,32 @@ local function startRollingAssist(entry: any, assemblyRoot: BasePart, preferredD
 
 		local separationDirection = getCapsuleSeparationDirection(entry, assemblyRoot)
 
-		if driveAge > 28 then
+		local slopeDirection, onSlope, grounded, groundPart, onFirstLayerBottom, groundNormal =
+			getGroundRollDirection(assemblyRoot, entry.instance)
+
+		local bottomEdgePushDirection =
+			if onFirstLayerBottom then getBottomEdgePushDirection(groundPart, assemblyRoot) else nil
+		local stableOnBottom = onFirstLayerBottom and grounded and not onSlope and groundNormal.Y > 0.985
+			and bottomEdgePushDirection == nil
+		if stableOnBottom then
+			bottomStableSince = bottomStableSince or now
+			if not bottomLandedAt and now - bottomStableSince >= 0.35 then
+				bottomLandedAt = now
+			end
+		elseif not stableOnBottom then
+			bottomStableSince = nil
+			bottomLandedAt = nil
+		end
+
+		if bottomLandedAt and now - bottomLandedAt >= 20 then
+			assemblyRoot.AssemblyLinearVelocity = Vector3.zero
+			assemblyRoot.AssemblyAngularVelocity = Vector3.zero
 			destroyRollDrive(entry)
 			return
 		end
-		local assistAlpha = math.clamp(1 - (driveAge / 32), 0.55, 1)
 
-		local slopeDirection, onSlope, grounded = getGroundRollDirection(assemblyRoot, entry.instance)
+		local bottomRollAlpha = if bottomLandedAt then math.clamp(1 - ((now - bottomLandedAt) / 20), 0.2, 1) else 1
+		local assistAlpha = math.clamp(1 - (driveAge / 120), 0.7, 1) * bottomRollAlpha
 		if slopeDirection then
 			local horizontalSlopeDirection = getHorizontalDirection(slopeDirection)
 			if horizontalSlopeDirection then
@@ -897,24 +989,29 @@ local function startRollingAssist(entry: any, assemblyRoot: BasePart, preferredD
 			rollDirection = horizontalVelocity.Unit
 		end
 
-		local spinAxis = Vector3.new(-rollDirection.Z, 0, rollDirection.X)
-
 		local mass = math.max(assemblyRoot.AssemblyMass, 1)
-		local canFlatAssist = grounded and not onSlope and driveAge < 24
+		local canFlatAssist = grounded and not onSlope
 		local assistDirection = if slopeDirection then slopeDirection else if canFlatAssist then rollDirection else nil
 		if separationDirection and assistDirection then
 			assistDirection = (assistDirection + separationDirection * 0.75).Unit
 		elseif separationDirection then
 			assistDirection = separationDirection
 		end
+		if bottomEdgePushDirection and assistDirection then
+			assistDirection = (assistDirection + bottomEdgePushDirection * 1.35).Unit
+		elseif bottomEdgePushDirection then
+			assistDirection = bottomEdgePushDirection
+		end
 
 		if assistDirection then
-			local forceStrength = if separationDirection then 55 else if onSlope then 115 else 70
-			local torqueStrength = if separationDirection then 500 else if onSlope then 950 else 700
+			local forceStrength = if bottomEdgePushDirection then 125 else if separationDirection then 55 else if onSlope then 115 else 70
+			local torqueStrength = if bottomEdgePushDirection then 950 else if separationDirection then 500 else if onSlope then 950 else 700
+			local torqueDirection = getHorizontalDirection(assistDirection) or rollDirection
+			local spinAxis = Vector3.new(-torqueDirection.Z, 0, torqueDirection.X)
 			vectorForce.Force = assistDirection * mass * forceStrength * assistAlpha
 			torque.Torque = spinAxis * mass * torqueStrength * assistAlpha
 
-			local targetSpeed = if separationDirection then 2.4 else if onSlope then 5.5 else 3.5
+			local targetSpeed = if bottomEdgePushDirection then 5 else if separationDirection then 2.4 else if onSlope then 5.5 else 3.5
 			pushGroundedHorizontalVelocity(assemblyRoot, assistDirection, targetSpeed * assistAlpha)
 			syncGroundedRollSpin(assemblyRoot, assistDirection, targetSpeed * assistAlpha)
 		else
@@ -1346,6 +1443,7 @@ function CapsuleRenderer:spawnCapsule(
 		touchConnection = nil,
 		rollConnection = nil,
 		rollDriveFolder = nil,
+		rollDriveAttachment = nil,
 		holdWeld = nil,
 		holdConnection = nil,
 		holdFolder = nil,

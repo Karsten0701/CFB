@@ -5,7 +5,7 @@ local SoundService = game:GetService("SoundService")
 local SoundUtil = {}
 
 local sfxEnabled = true
-local sfxVolume = 1
+local sfxVolume = 0.5
 local soundsFolder: Folder? = nil
 local folderConnections: { RBXScriptConnection } = {}
 local soundCache: { [string]: Sound } = {}
@@ -17,6 +17,19 @@ local soundAliases = {
 	Error = { "Error" },
 	Pickup = { "Pickup sound", "Pickup" },
 	Robux = { "Buy Robux", "Robux" },
+	Deposit = { "Deposit", "DepositMana" },
+	Merge = { "Merge", "MergeUnits" },
+	TierUnlock = { "TierUnlock", "UnitUnlock", "NewUnit" },
+	RewardClaim = { "RewardClaim", "OfflineReward", "GroupReward" },
+	TutorialProgress = { "TutorialProgress", "TutorialStep", "RebirthSuccess", "RebirthUpgrade" },
+}
+
+local soundAssetIds = {
+	Deposit = "rbxassetid://99735583832184",
+	Merge = "rbxassetid://84938276696021",
+	TierUnlock = "rbxassetid://105446048067940",
+	RewardClaim = "rbxassetid://133657980011333",
+	TutorialProgress = "rbxassetid://113062463645110",
 }
 
 local function clearFolderConnections()
@@ -121,19 +134,25 @@ bindSoundsFolder = function()
 		return
 	end
 
-	table.insert(folderConnections, folder.ChildAdded:Connect(function(child)
-		if child:IsA("Sound") then
-			soundCache[child.Name] = child
-			child.Volume = getOriginalVolume(child) * sfxVolume
-		end
-	end))
+	table.insert(
+		folderConnections,
+		folder.ChildAdded:Connect(function(child)
+			if child:IsA("Sound") then
+				soundCache[child.Name] = child
+				child.Volume = getOriginalVolume(child) * sfxVolume
+			end
+		end)
+	)
 
-	table.insert(folderConnections, folder.ChildRemoved:Connect(function(child)
-		if child:IsA("Sound") then
-			soundCache[child.Name] = nil
-			originalVolumes[child] = nil
-		end
-	end))
+	table.insert(
+		folderConnections,
+		folder.ChildRemoved:Connect(function(child)
+			if child:IsA("Sound") then
+				soundCache[child.Name] = nil
+				originalVolumes[child] = nil
+			end
+		end)
+	)
 end
 
 function SoundUtil.SetLocalSfxVolume(volume: number)
@@ -164,11 +183,19 @@ function SoundUtil.Play(soundKey: string)
 	end
 
 	local template = findSound(soundKey)
-	if not template then
-		return
-	end
+	local sound
+	if template then
+		sound = template:Clone()
+	else
+		local assetId = soundAssetIds[soundKey]
+		if not assetId then
+			return
+		end
 
-	local sound = template:Clone()
+		sound = Instance.new("Sound")
+		sound.SoundId = assetId
+		sound.Volume = sfxVolume
+	end
 	sound.Parent = SoundService
 	sound:Play()
 
@@ -194,6 +221,26 @@ end
 
 function SoundUtil.Robux()
 	SoundUtil.Play("Robux")
+end
+
+function SoundUtil.Deposit()
+	SoundUtil.Play("Deposit")
+end
+
+function SoundUtil.Merge()
+	SoundUtil.Play("Merge")
+end
+
+function SoundUtil.TierUnlock()
+	SoundUtil.Play("TierUnlock")
+end
+
+function SoundUtil.RewardClaim()
+	SoundUtil.Play("RewardClaim")
+end
+
+function SoundUtil.TutorialProgress()
+	SoundUtil.Play("TutorialProgress")
 end
 
 rebuildSoundCache()

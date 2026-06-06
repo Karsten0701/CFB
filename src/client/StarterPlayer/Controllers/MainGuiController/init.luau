@@ -3,11 +3,13 @@ local AvatarEditorService = game:GetService("AvatarEditorService")
 local ContentProvider = game:GetService("ContentProvider")
 local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SocialService = game:GetService("SocialService")
 local TweenService = game:GetService("TweenService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Icon = require(ReplicatedStorage.Packages.topbarplus)
 local Knit = require(ReplicatedStorage.Packages.knit)
@@ -30,8 +32,8 @@ local COUNTER_ANIMATION_STEPS = 50
 local MESSAGE_LIFETIME = 3
 local LOADING_BATCH_SIZE = 100
 local LOADING_FAKE_DURATION = 3
-local LOADING_MAX_WAIT = 15
-local LOADING_FORCED_FINISH_DURATION = 3
+local LOADING_MAX_WAIT = 5
+local LOADING_FORCED_FINISH_DURATION = 0.45
 local NEW_UNIT_POPUP_HOLD_TIME = 2.4
 local YEN_ICON_IMAGE = "rbxassetid://96573285096968"
 local REBIRTH_TOKEN_ICON_IMAGE = "rbxassetid://107689343391713"
@@ -43,6 +45,9 @@ local displayedValues = {
 
 local homeIcon = nil
 local lastHomeTeleportAt = 0
+local feedbackIcon = nil
+local feedbackPromptOpen = false
+local lastFeedbackPromptAt = 0
 local activeMessages = {}
 local nextMessageLayoutOrder = 0
 local indexWarnedMissingGui = false
@@ -169,12 +174,24 @@ local function setGuiObjectTransparency(root: Instance, transparency: number, mi
 	end
 end
 
+local function shouldPreloadInstance(instance: Instance): boolean
+	return instance:IsA("ImageLabel")
+		or instance:IsA("ImageButton")
+		or instance:IsA("Decal")
+		or instance:IsA("Texture")
+		or instance:IsA("MeshPart")
+		or instance:IsA("SpecialMesh")
+		or instance:IsA("Sound")
+		or instance:IsA("Animation")
+		or instance:IsA("VideoFrame")
+end
+
 local function getPreloadTargets(mainGui: Instance?): { Instance }
 	local targets = {}
 	local seen: { [Instance]: boolean } = {}
 
 	local function add(instance: Instance?)
-		if instance and not seen[instance] then
+		if instance and shouldPreloadInstance(instance) and not seen[instance] then
 			seen[instance] = true
 			table.insert(targets, instance)
 		end
@@ -193,7 +210,6 @@ local function getPreloadTargets(mainGui: Instance?): { Instance }
 
 	addTree(mainGui)
 	addTree(ReplicatedStorage:FindFirstChild("Assets"))
-	addTree(ReplicatedStorage:FindFirstChild("Shared"))
 
 	return targets
 end
@@ -419,7 +435,7 @@ function MainGuiController:startLoadingScreen()
 			local assetProgress = math.clamp(loaded / total, 0, 1)
 			self:setLoadingProgress(math.max(fakeProgress, assetProgress * 0.95))
 
-			if elapsed >= LOADING_FAKE_DURATION and assetProgress >= 0.35 then
+			if elapsed >= LOADING_FAKE_DURATION or assetProgress >= 0.95 then
 				break
 			end
 
@@ -576,6 +592,7 @@ function MainGuiController:queueNewUnitPopup(tier: number)
 	task.spawn(function()
 		while #newUnitPopupQueue > 0 do
 			local nextTier = table.remove(newUnitPopupQueue, 1)
+			SoundUtil.TierUnlock()
 			self:playNewUnitPopup(nextTier)
 			task.wait(NEW_UNIT_POPUP_HOLD_TIME + 0.7)
 		end
@@ -811,6 +828,10 @@ function MainGuiController:ShowGroupRewardMessage(amount: number)
 	)
 end
 
+function MainGuiController:ShowGroupRewardReadyMessage()
+	self:showMessage("GroupRewardReady", '<font color="#47FF6A">Group reward is ready to claim!</font>')
+end
+
 function MainGuiController:ShowOfflineRewardMessage(amount: number)
 	amount = math.max(math.floor(amount), 0)
 	if amount <= 0 then
@@ -906,6 +927,47 @@ function MainGuiController:setupHomeIcon()
 		TycoonService:TeleportHome():andThen(function(success, err)
 			if not success and err then
 				warn("[MainGuiController] Teleport home failed:", err)
+			end
+		end)
+	end)
+end
+
+function MainGuiController:setupFeedbackIcon()
+	if feedbackIcon then
+		return
+	end
+
+	feedbackIcon = Icon.new()
+		:setName("Feedback")
+		:setLabel("Feedback")
+		:setCaption("Send feedback")
+		:setOrder(9999)
+		:align("Right")
+		:oneClick(true)
+
+	feedbackIcon:modifyTheme({
+		{ "Widget", "MinimumWidth", 118 },
+		{ "Widget", "DesiredWidth", 132 },
+		{ "IconLabel", "TextSize", 17 },
+	})
+
+	feedbackIcon.selected:Connect(function()
+		local now = os.clock()
+		if feedbackPromptOpen or now - lastFeedbackPromptAt < 2 then
+			return
+		end
+
+		feedbackPromptOpen = true
+		lastFeedbackPromptAt = now
+		task.spawn(function()
+			local success, err = pcall(function()
+				SocialService:PromptFeedbackSubmissionAsync()
+			end)
+
+			feedbackPromptOpen = false
+			if not success then
+				warn("[MainGuiController] Feedback prompt failed:", err)
+				self:showMessage("FeedbackUnavailable", "Feedback is unavailable right now.")
 			end
 		end)
 	end)
@@ -1045,6 +1107,7 @@ function MainGuiController:updateAll(instant: boolean?)
 		else yen
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
+	self:setupFeedbackIcon()
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()
@@ -1077,6 +1140,7 @@ function MainGuiController:KnitStart()
 	self:startLoadingScreen()
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
+	self:setupFeedbackIcon()
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()

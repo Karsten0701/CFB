@@ -24,9 +24,22 @@ local pendingRobuxCapsuleId: string? = nil
 local handledRobuxCapsules: { [string]: boolean } = {}
 local OPEN_CAPSULE_PRODUCT = Monetization.DeveloperProducts.OpenCapsule
 local ROBUX_REWARD_TIMEOUT = 8
+local ROBUX_PROMPT_TIMEOUT = 45
 
 local function getCapsuleConfig()
 	return TycoonConfig.Capsules or {}
+end
+
+local function isLocalProductPromptFinished(firstArg: any): boolean
+	if firstArg == localPlayer then
+		return true
+	end
+
+	if type(firstArg) == "number" then
+		return firstArg == localPlayer.UserId
+	end
+
+	return false
 end
 
 local function getOwnTycoon(): Instance?
@@ -88,6 +101,24 @@ function CapsuleController:GetHeldCapsuleInfo(capsuleId: string): { PreviewTiers
 		OpenPrice = entry.openPrice,
 		HighestTier = entry.highestTier,
 	}
+end
+
+function CapsuleController:HasCapsule(capsuleId: string): boolean
+	return renderer ~= nil and renderer:getEntry(capsuleId) ~= nil
+end
+
+function CapsuleController:ClearCapsules()
+	openingCapsule = false
+	robuxPromptOpen = false
+	pendingRobuxCapsuleId = nil
+	table.clear(handledRobuxCapsules)
+
+	local MainGuiController = Knit.GetController("MainGuiController")
+	MainGuiController:hideOpenCapsuleUI()
+
+	if renderer then
+		renderer:destroy()
+	end
 end
 
 function CapsuleController:spawnCapsuleVisual(capsuleId: string, spawnCFrame: CFrame, payload: any, dropPart: BasePart?)
@@ -273,7 +304,17 @@ function CapsuleController:openWithYen(capsuleId: string)
 			return
 		end
 
+		if not self:HasCapsule(capsuleId) then
+			openingCapsule = false
+			return
+		end
+
 		self:playOpenAnimation(capsuleId, rewardTier or 1, function()
+			if not self:HasCapsule(capsuleId) then
+				openingCapsule = false
+				return
+			end
+
 			openingCapsule = false
 			self:claimRewardThenFinish(capsuleId, rewardTier)
 		end)
@@ -301,9 +342,21 @@ function CapsuleController:waitForRobuxReward(capsuleId: string, startedAt: numb
 		end
 
 		if type(rewardTier) == "number" then
+			if not self:HasCapsule(capsuleId) then
+				openingCapsule = false
+				handledRobuxCapsules[capsuleId] = nil
+				return
+			end
+
 			handledRobuxCapsules[capsuleId] = true
 			openingCapsule = true
 			self:playOpenAnimation(capsuleId, rewardTier, function()
+				if not self:HasCapsule(capsuleId) then
+					openingCapsule = false
+					handledRobuxCapsules[capsuleId] = nil
+					return
+				end
+
 				openingCapsule = false
 				self:claimRewardThenFinish(capsuleId, rewardTier)
 				handledRobuxCapsules[capsuleId] = nil
@@ -346,8 +399,20 @@ function CapsuleController:onRobuxCapsuleOpened(capsuleId: string, rewardTier: n
 	pendingRobuxCapsuleId = nil
 
 	if type(rewardTier) == "number" then
+		if not self:HasCapsule(capsuleId) then
+			openingCapsule = false
+			handledRobuxCapsules[capsuleId] = nil
+			return
+		end
+
 		openingCapsule = true
 		self:playOpenAnimation(capsuleId, rewardTier, function()
+			if not self:HasCapsule(capsuleId) then
+				openingCapsule = false
+				handledRobuxCapsules[capsuleId] = nil
+				return
+			end
+
 			openingCapsule = false
 			self:claimRewardThenFinish(capsuleId, rewardTier)
 			handledRobuxCapsules[capsuleId] = nil
@@ -374,6 +439,7 @@ function CapsuleController:openWithRobux(capsuleId: string)
 
 		pendingRobuxCapsuleId = capsuleId
 		robuxPromptOpen = true
+		local promptCapsuleId = capsuleId
 
 		local ok, err = pcall(function()
 			MarketplaceService:PromptProductPurchase(localPlayer, OPEN_CAPSULE_PRODUCT.ProductId)
@@ -393,7 +459,15 @@ function CapsuleController:openWithRobux(capsuleId: string)
 				)
 			end
 			warn("[CapsuleController] Capsule robux prompt failed:", err)
+			return
 		end
+
+		task.delay(ROBUX_PROMPT_TIMEOUT, function()
+			if robuxPromptOpen and pendingRobuxCapsuleId == promptCapsuleId then
+				robuxPromptOpen = false
+				pendingRobuxCapsuleId = nil
+			end
+		end)
 	end):catch(function(err)
 		robuxPromptOpen = false
 		pendingRobuxCapsuleId = nil
@@ -502,8 +576,8 @@ function CapsuleController:KnitStart()
 		end)
 	end)
 
-	MarketplaceService.PromptProductPurchaseFinished:Connect(function(player, productId, wasPurchased)
-		if player ~= localPlayer or productId ~= OPEN_CAPSULE_PRODUCT.ProductId then
+	MarketplaceService.PromptProductPurchaseFinished:Connect(function(playerOrUserId, productId, wasPurchased)
+		if not isLocalProductPromptFinished(playerOrUserId) or productId ~= OPEN_CAPSULE_PRODUCT.ProductId then
 			return
 		end
 

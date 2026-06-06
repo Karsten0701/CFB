@@ -28,10 +28,17 @@ local PICKUP_POPUP_FADE_TIME = 0.16
 local PICKUP_POPUP_SIZE = UDim2.fromOffset(280, 78)
 local PICKUP_POPUP_TEXT_SIZE = 36
 local UNIT_SPAWN_BATCH_SIZE = 8
+local OTHER_UNIT_SPAWN_BATCH_SIZE = 3
 local UNIT_SPAWN_BATCH_DELAY = 0.02
+local OTHER_UNIT_SPAWN_BATCH_DELAY = 0.035
 local UNIT_RENDER_BATCH_SIZE = 8
+local OTHER_UNIT_RENDER_BATCH_SIZE = 4
 local UNIT_RENDER_BATCH_DELAY = 0.02
+local OTHER_UNIT_RENDER_BATCH_DELAY = 0.03
 local UNIT_POOL_LIMIT_PER_TIER = 18
+local OTHER_UNIT_POOL_LIMIT_PER_TIER = 80
+local UNIT_DESTROY_BATCH_SIZE = 4
+local UNIT_DESTROY_BATCH_DELAY = 0.03
 local UNIT_POOL_CFRAME = CFrame.new(0, -10000, 0)
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
@@ -178,6 +185,37 @@ local function getFirstBasePart(instance: Instance): BasePart?
 	return instance:FindFirstChildWhichIsA("BasePart", true)
 end
 
+local function getDropParts(container: Instance?, fallbackPart: BasePart): { BasePart }
+	local parts = {}
+	if container and container:IsA("BasePart") then
+		table.insert(parts, container)
+	end
+
+	if container then
+		for _, descendant in container:GetDescendants() do
+			if descendant:IsA("BasePart") then
+				table.insert(parts, descendant)
+			end
+		end
+	end
+
+	if #parts <= 0 then
+		table.insert(parts, fallbackPart)
+	end
+
+	return parts
+end
+
+local function pivotDropContainer(container: Instance?, pickupPart: BasePart, targetCFrame: CFrame, pivotOffset: CFrame?)
+	if container and container:IsA("Model") then
+		container:PivotTo(targetCFrame * (pivotOffset or CFrame.identity))
+	elseif container and container:IsA("BasePart") then
+		container.CFrame = targetCFrame
+	else
+		pickupPart.CFrame = targetCFrame
+	end
+end
+
 local function setDropPhysics(part: BasePart, value: number)
 	part.Anchored = false
 	part.CanCollide = true
@@ -294,6 +332,12 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.unitPoolByTier = {}
 	self.unitTemplateCache = {}
 	self.unitModelInfo = {}
+	self.pendingDestroyModels = {}
+	self.destroyQueueRunning = false
+	self.highestDisplayModel = nil
+	self.highestDisplayTier = nil
+	self.lastUnits = {}
+	self.lastRenderSignature = nil
 	self.spotCache = {}
 	self.rebuildToken = 0
 	self.activeOrbs = {}
@@ -311,7 +355,36 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.onManaDropSpawned = nil
 	self.nextMutationAt = os.clock()
 		+ (TycoonConfig.Mutations and TycoonConfig.Mutations.Interval or DEFAULT_MUTATION_INTERVAL)
+	if janitor then
+		janitor:Add(tycoon.DescendantAdded:Connect(function(descendant)
+			if descendant.Name ~= "Display" and descendant.Name ~= "UnitSpot" then
+				return
+			end
+
+			task.defer(function()
+				if self.tycoon.Parent then
+					self:updateHighestDisplayUnit(self.lastUnits or {}, true)
+				end
+			end)
+		end))
+		janitor:Add(tycoon:GetAttributeChangedSignal("Claimed"):Connect(function()
+			if tycoon:GetAttribute("Claimed") ~= true then
+				self:clearHighestDisplayUnit()
+			end
+		end))
+	end
 	return self
+end
+
+local function getUnitSignature(units: { { Tier: number } }): string
+	local parts = table.create(#units)
+	for index, unit in units do
+		local tier = if type(unit) == "table" then math.floor(tonumber(unit.Tier) or 1) else 1
+		local slot = if type(unit) == "table" then unit.Slot else nil
+		parts[index] = tostring(tier) .. ":" .. tostring(slot or "")
+	end
+
+	return table.concat(parts, "|")
 end
 
 function TycoonRenderer:setIsOwn(isOwn: boolean)
@@ -608,11 +681,11 @@ end
 
 function TycoonRenderer:clearRenderedUnits()
 	self.rebuildToken += 1
+	self:clearHighestDisplayUnit()
 
 	for _, entry in self.unitEntries do
 		if entry.Model then
-			self.unitModelInfo[entry.Model] = nil
-			entry.Model:Destroy()
+			self:destroyUnitModelNow(entry.Model)
 		end
 	end
 	table.clear(self.unitModels)
@@ -620,20 +693,174 @@ function TycoonRenderer:clearRenderedUnits()
 
 	for _, pool in self.unitPoolByTier do
 		for _, model in pool do
-			if model then
-				self.unitModelInfo[model] = nil
-				model:Destroy()
-			end
+			self:destroyUnitModelNow(model)
 		end
 	end
 	table.clear(self.unitPoolByTier)
+
+	for _, model in self.pendingDestroyModels do
+		self:destroyUnitModelNow(model)
+	end
+	table.clear(self.pendingDestroyModels)
+	self.destroyQueueRunning = false
 	table.clear(self.unitModelInfo)
+	self.lastRenderSignature = nil
 
 	local unitsFolder = self:getUnitsFolder()
 	for _, child in unitsFolder:GetChildren() do
 		if child:IsA("Model") then
-			child:Destroy()
+			self:destroyUnitModelNow(child)
 		end
+	end
+end
+
+function TycoonRenderer:getDisplayRoot(): Instance?
+	local display = self.tycoon:FindFirstChild("Display")
+	if display then
+		return display
+	end
+
+	local unitSpot = self.tycoon:FindFirstChild("UnitSpot", true)
+	return if unitSpot then unitSpot.Parent else nil
+end
+
+function TycoonRenderer:getDisplayUnitSpot(): Instance?
+	local display = self:getDisplayRoot()
+	if not display then
+		return nil
+	end
+
+	return display:FindFirstChild("UnitSpot", true)
+end
+
+function TycoonRenderer:getDisplayUnitSpotCFrame(unitSpot: Instance): CFrame?
+	if unitSpot:IsA("BasePart") then
+		return unitSpot.CFrame
+	end
+
+	if unitSpot:IsA("Model") then
+		return unitSpot:GetPivot()
+	end
+
+	local spotPart = unitSpot:FindFirstChildWhichIsA("BasePart", true)
+	return if spotPart then spotPart.CFrame else nil
+end
+
+function TycoonRenderer:clearHighestDisplayUnit()
+	if self.highestDisplayModel then
+		self.unitModelInfo[self.highestDisplayModel] = nil
+		self.highestDisplayModel:Destroy()
+		self.highestDisplayModel = nil
+	end
+
+	local unitSpot = self:getDisplayUnitSpot()
+	if unitSpot then
+		for _, child in unitSpot:GetChildren() do
+			if child:IsA("Model") and (child.Name == "HighestTierDisplayUnit" or child:GetAttribute("HighestTierDisplay") == true) then
+				self.unitModelInfo[child] = nil
+				child:Destroy()
+			end
+		end
+	end
+
+	local display = self:getDisplayRoot()
+	if display then
+		for _, descendant in display:GetDescendants() do
+			if
+				descendant:IsA("Model")
+				and descendant ~= self.highestDisplayModel
+				and (descendant.Name == "HighestTierDisplayUnit" or descendant:GetAttribute("HighestTierDisplay") == true)
+			then
+				self.unitModelInfo[descendant] = nil
+				descendant:Destroy()
+			end
+		end
+	end
+
+	self.highestDisplayTier = nil
+end
+
+function TycoonRenderer:getHighestUnitTier(units: { { Tier: number } }): number?
+	local highestTier: number? = nil
+	for _, unit in units do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		local tier = math.clamp(math.floor(tonumber(unit.Tier) or 0), 1, AnimeDroppers.MaxTier)
+		if AnimeDroppers.Tiers[tier] and (not highestTier or tier > highestTier) then
+			highestTier = tier
+		end
+	end
+
+	return highestTier
+end
+
+function TycoonRenderer:updateHighestDisplayUnit(units: { { Tier: number } }, forceReplace: boolean?)
+	local unitSpot = self:getDisplayUnitSpot()
+	if not unitSpot then
+		self:clearHighestDisplayUnit()
+		warn("[TycoonRenderer] Display.UnitSpot missing for highest unit display:", self.tycoon:GetFullName())
+		return
+	end
+
+	local spotCFrame = self:getDisplayUnitSpotCFrame(unitSpot)
+	if not spotCFrame then
+		self:clearHighestDisplayUnit()
+		warn("[TycoonRenderer] UnitSpot has no BasePart/Pivot for highest unit display:", unitSpot:GetFullName())
+		return
+	end
+
+	local highestTier = self:getHighestUnitTier(units)
+	if not highestTier then
+		self:clearHighestDisplayUnit()
+		return
+	end
+
+	if not forceReplace and self.highestDisplayModel and self.highestDisplayModel.Parent and self.highestDisplayTier == highestTier then
+		if self.highestDisplayModel.Parent ~= unitSpot then
+			self.highestDisplayModel.Parent = unitSpot
+		end
+		self.highestDisplayModel:PivotTo(spotCFrame)
+		return
+	end
+
+	self:clearHighestDisplayUnit()
+
+	local template = self:getUnitTemplate(highestTier)
+	if not template then
+		warn("[TycoonRenderer] Missing highest unit template for tier:", highestTier)
+		return
+	end
+
+	local displayModel = template:Clone()
+	displayModel.Name = "HighestTierDisplayUnit"
+	displayModel:SetAttribute("HighestTierDisplay", true)
+	displayModel:SetAttribute("UnitTier", highestTier)
+	anchorModel(displayModel)
+	for _, descendant in displayModel:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+		end
+	end
+	self:getUnitModelInfo(displayModel)
+	self:setUnitModelVisible(displayModel, true)
+	displayModel.Parent = unitSpot
+	displayModel:PivotTo(spotCFrame)
+
+	self.highestDisplayModel = displayModel
+	self.highestDisplayTier = highestTier
+end
+
+function TycoonRenderer:scheduleHighestDisplayRefresh()
+	local delays = { 0.1, 0.5, 1.5 }
+	for _, delayTime in delays do
+		task.delay(delayTime, function()
+			if self.tycoon.Parent then
+				self:updateHighestDisplayUnit(self.lastUnits or {})
+			end
+		end)
 	end
 end
 
@@ -695,6 +922,73 @@ function TycoonRenderer:setUnitModelAssignment(model: Model, unitIndex: number?,
 	model:SetAttribute("Pooled", pooled)
 end
 
+function TycoonRenderer:getUnitPoolLimit(): number
+	return if self.isOwn then UNIT_POOL_LIMIT_PER_TIER else OTHER_UNIT_POOL_LIMIT_PER_TIER
+end
+
+function TycoonRenderer:getUnitSpawnBatchSize(): number
+	return if self.isOwn then UNIT_SPAWN_BATCH_SIZE else OTHER_UNIT_SPAWN_BATCH_SIZE
+end
+
+function TycoonRenderer:getUnitSpawnBatchDelay(): number
+	return if self.isOwn then UNIT_SPAWN_BATCH_DELAY else OTHER_UNIT_SPAWN_BATCH_DELAY
+end
+
+function TycoonRenderer:getUnitRenderBatchSize(): number
+	return if self.isOwn then UNIT_RENDER_BATCH_SIZE else OTHER_UNIT_RENDER_BATCH_SIZE
+end
+
+function TycoonRenderer:getUnitRenderBatchDelay(): number
+	return if self.isOwn then UNIT_RENDER_BATCH_DELAY else OTHER_UNIT_RENDER_BATCH_DELAY
+end
+
+function TycoonRenderer:destroyUnitModelNow(model: Model?)
+	if not model then
+		return
+	end
+
+	self.unitModelInfo[model] = nil
+	if model.Parent then
+		model:Destroy()
+	end
+end
+
+function TycoonRenderer:queueDestroyUnitModel(model: Model?)
+	if not model or model:GetAttribute("QueuedDestroy") == true then
+		return
+	end
+
+	model:SetAttribute("QueuedDestroy", true)
+	self:setUnitModelVisible(model, false)
+	self:setUnitModelAssignment(model, nil, tonumber(model:GetAttribute("UnitTier")), true)
+	model:PivotTo(UNIT_POOL_CFRAME)
+	table.insert(self.pendingDestroyModels, model)
+
+	if self.destroyQueueRunning then
+		return
+	end
+
+	self.destroyQueueRunning = true
+	task.spawn(function()
+		while #self.pendingDestroyModels > 0 do
+			for _ = 1, UNIT_DESTROY_BATCH_SIZE do
+				local queuedModel = table.remove(self.pendingDestroyModels)
+				if not queuedModel then
+					break
+				end
+
+				self:destroyUnitModelNow(queuedModel)
+			end
+
+			if #self.pendingDestroyModels > 0 then
+				task.wait(UNIT_DESTROY_BATCH_DELAY)
+			end
+		end
+
+		self.destroyQueueRunning = false
+	end)
+end
+
 function TycoonRenderer:recycleUnitEntry(entry)
 	if not entry or not entry.Model then
 		return
@@ -707,9 +1001,8 @@ function TycoonRenderer:recycleUnitEntry(entry)
 		self.unitPoolByTier[tier] = pool
 	end
 
-	if #pool >= UNIT_POOL_LIMIT_PER_TIER then
-		entry.Model:Destroy()
-		self.unitModelInfo[entry.Model] = nil
+	if #pool >= self:getUnitPoolLimit() then
+		self:queueDestroyUnitModel(entry.Model)
 		return
 	end
 
@@ -789,8 +1082,7 @@ function TycoonRenderer:cleanupUnitFolderModels(unitsFolder: Instance)
 		end
 
 		if not validModels[child] or (claimedModel and claimedModel ~= child) then
-			self.unitModelInfo[child] = nil
-			child:Destroy()
+			self:queueDestroyUnitModel(child)
 		end
 	end
 end
@@ -988,15 +1280,7 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 		return
 	end
 
-	self:animatePickupOrb(orb)
-
-	if container ~= orb and container.Parent then
-		task.delay(PICKUP_ANIMATION_TIME, function()
-			if container.Parent then
-				container:Destroy()
-			end
-		end)
-	end
+	self:animatePickupOrb(orb, container)
 
 	if self.onPickup then
 		self.onPickup(value)
@@ -1103,7 +1387,12 @@ function TycoonRenderer:ensurePickupAnimationLoop()
 		for orb, animation in self.pickupAnimations do
 			if not orb.Parent or not root then
 				self.pickupAnimations[orb] = nil
-				orb:Destroy()
+				local container = animation.Container
+				if container and container.Parent then
+					container:Destroy()
+				else
+					orb:Destroy()
+				end
 				continue
 			end
 
@@ -1113,13 +1402,32 @@ function TycoonRenderer:ensurePickupAnimationLoop()
 			local endPosition = root.Position + Vector3.new(0, 0.5, 0)
 			local pulse = math.sin(alpha * math.pi)
 
-			orb.Position = quadraticBezier(animation.StartPosition, animation.ControlPosition, endPosition, easedAlpha)
-			orb.Size = animation.StartSize:Lerp(Vector3.new(0.12, 0.12, 0.12), easedAlpha) * (1 + pulse * 0.22)
-			orb.Transparency = easedAlpha * 0.45
+			local position = quadraticBezier(animation.StartPosition, animation.ControlPosition, endPosition, easedAlpha)
+			local rotation = animation.StartCFrame - animation.StartCFrame.Position
+			pivotDropContainer(animation.Container, orb, CFrame.new(position) * rotation, animation.PivotOffset)
+
+			local scaleAlpha = (1 - easedAlpha) * (1 + pulse * 0.22)
+			for _, partInfo in animation.Parts do
+				local part = partInfo.Part
+				if not part.Parent then
+					continue
+				end
+
+				part.Size = partInfo.StartSize:Lerp(partInfo.TargetSize, easedAlpha) * (1 + pulse * 0.22)
+				part.Transparency = math.clamp(partInfo.StartTransparency + (0.9 - partInfo.StartTransparency) * easedAlpha, 0, 1)
+				if scaleAlpha <= 0.02 then
+					part.Transparency = 1
+				end
+			end
 
 			if alpha >= 1 then
 				self.pickupAnimations[orb] = nil
-				orb:Destroy()
+				local container = animation.Container
+				if container and container.Parent then
+					container:Destroy()
+				else
+					orb:Destroy()
+				end
 			end
 		end
 
@@ -1130,22 +1438,44 @@ function TycoonRenderer:ensurePickupAnimationLoop()
 	end)
 end
 
-function TycoonRenderer:animatePickupOrb(orb: BasePart)
+function TycoonRenderer:animatePickupOrb(orb: BasePart, container: Instance?)
 	local root = self:getLocalRoot()
 	if not root then
-		orb:Destroy()
+		if container and container.Parent then
+			container:Destroy()
+		else
+			orb:Destroy()
+		end
 		return
 	end
 
-	orb.Anchored = true
-	orb.CanCollide = false
-	orb.CanQuery = false
-	orb.CanTouch = false
+	local animatedParts = {}
+	for _, part in getDropParts(container, orb) do
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.AssemblyLinearVelocity = Vector3.zero
+		part.AssemblyAngularVelocity = Vector3.zero
+		table.insert(animatedParts, {
+			Part = part,
+			StartSize = part.Size,
+			TargetSize = Vector3.new(
+				math.max(part.Size.X * 0.16, 0.08),
+				math.max(part.Size.Y * 0.16, 0.08),
+				math.max(part.Size.Z * 0.16, 0.08)
+			),
+			StartTransparency = part.Transparency,
+		})
+	end
 
 	local startPosition = orb.Position
 	self.pickupAnimations[orb] = {
+		Container = container or orb,
+		Parts = animatedParts,
+		StartCFrame = orb.CFrame,
+		PivotOffset = if container and container:IsA("Model") then orb.CFrame:Inverse() * container:GetPivot() else CFrame.identity,
 		StartPosition = startPosition,
-		StartSize = orb.Size,
 		ControlPosition = startPosition:Lerp(root.Position, 0.45)
 			+ Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0),
 		StartTime = os.clock(),
@@ -1433,11 +1763,11 @@ function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: Bas
 end
 
 function TycoonRenderer:rebuild(units: { { Tier: number } })
-	self.rebuildToken += 1
-	local rebuildToken = self.rebuildToken
+	self.lastUnits = units or {}
 	self:updateAutoCollectPad()
+	self:updateHighestDisplayUnit(self.lastUnits)
 
-	local sortedUnits = table.clone(units)
+	local sortedUnits = table.clone(self.lastUnits)
 	table.sort(sortedUnits, function(left, right)
 		if left.Slot and right.Slot and left.Slot ~= right.Slot then
 			return left.Slot < right.Slot
@@ -1451,6 +1781,18 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	for unitIndex = 1, math.min(#sortedUnits, renderCapacity) do
 		visibleUnits[unitIndex] = sortedUnits[unitIndex]
 	end
+
+	local nextRenderSignature = getUnitSignature(visibleUnits)
+	if nextRenderSignature == self.lastRenderSignature then
+		self:ensureDropLoop()
+		self:scheduleHighestDisplayRefresh()
+		return
+	end
+
+	self.lastRenderSignature = nextRenderSignature
+	self.rebuildToken += 1
+	local rebuildToken = self.rebuildToken
+	self:scheduleHighestDisplayRefresh()
 
 	self:ensureFloors(#visibleUnits)
 
@@ -1538,11 +1880,16 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	self:ensureDropLoop()
 
 	task.spawn(function()
+		local renderBatchSize = self:getUnitRenderBatchSize()
+		local renderBatchDelay = self:getUnitRenderBatchDelay()
+		local spawnBatchSize = self:getUnitSpawnBatchSize()
+		local spawnBatchDelay = self:getUnitSpawnBatchDelay()
+
 		local function stepBatch()
 			renderOperationsThisBatch += 1
-			if renderOperationsThisBatch >= UNIT_RENDER_BATCH_SIZE then
+			if renderOperationsThisBatch >= renderBatchSize then
 				renderOperationsThisBatch = 0
-				task.wait(UNIT_RENDER_BATCH_DELAY)
+				task.wait(renderBatchDelay)
 			end
 		end
 
@@ -1601,9 +1948,9 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 			self:scheduleUnitDrop(self.unitEntries[unitIndex], unitIndex, os.clock())
 
 			renderOperationsThisBatch += 1
-			if renderOperationsThisBatch >= UNIT_SPAWN_BATCH_SIZE then
+			if renderOperationsThisBatch >= spawnBatchSize then
 				renderOperationsThisBatch = 0
-				task.wait(UNIT_SPAWN_BATCH_DELAY)
+				task.wait(spawnBatchDelay)
 			end
 		end
 	end)

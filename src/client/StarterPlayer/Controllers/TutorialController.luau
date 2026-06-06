@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local TycoonUtil = require(ReplicatedStorage.Shared.Features.Tycoon.TycoonUtil)
 local Knit = require(ReplicatedStorage.Packages.knit)
@@ -21,6 +22,7 @@ local STEP_ORDER = {
 	"DepositManaAgain",
 	"BuyThirdUnit",
 	"MergeUnits",
+	"VisitGroupReward",
 	"WaitForRebirthReady",
 	"Rebirth",
 	"OpenUpgrades",
@@ -42,7 +44,8 @@ local STEP_TEXT = {
 	DepositManaAgain = "Deposit your Mana again!",
 	BuyThirdUnit = "Buy one more anime unit!",
 	MergeUnits = "Merge your units!",
-	WaitForRebirthReady = "",
+	VisitGroupReward = "Go to the Group Reward button and press it!",
+	WaitForRebirthReady = "Tutorial resumes when you can rebirth.",
 	Rebirth = "Rebirth your tycoon!",
 	OpenUpgrades = "Open the upgrades menu!",
 	UpgradeUnitSpawnTier = "Upgrade Unit Spawn Tier!",
@@ -221,6 +224,8 @@ local function getStepTarget(step: string): BasePart?
 		return getRateButton(tycoon)
 	elseif step == "MergeUnits" then
 		return findButtonTarget(tycoon, TycoonUtil.isMergeButton) or getBuyOneButton(tycoon)
+	elseif step == "VisitGroupReward" then
+		return findButtonTarget(tycoon, TycoonUtil.isGroupRewardButton)
 	end
 
 	return nil
@@ -390,9 +395,9 @@ local function getStepFromData(PlayerDataController): string
 		index = STEP_INDEX.MergeUnits
 	end
 	if index <= STEP_INDEX.MergeUnits and highestTier >= 2 then
-		index = STEP_INDEX.WaitForRebirthReady
+		index = STEP_INDEX.VisitGroupReward
 	end
-	if index <= STEP_INDEX.WaitForRebirthReady and highestTier >= requiredRebirthTier then
+	if index == STEP_INDEX.WaitForRebirthReady and highestTier >= requiredRebirthTier then
 		index = STEP_INDEX.Rebirth
 	end
 	if index <= STEP_INDEX.Rebirth and rebirths >= 1 then
@@ -512,6 +517,48 @@ local function getDescriptionStepText(frame: Instance?, playerGui: Instance): Te
 	})
 end
 
+local function setTutorialRewardText(text: string)
+	local playerGui = localPlayer:FindFirstChild("PlayerGui")
+	local frame = getTutorialRewardFrame()
+	if not playerGui or not frame then
+		return
+	end
+
+	local descriptionLabel = getDescriptionStepText(frame, playerGui)
+	if descriptionLabel then
+		descriptionLabel.Text = text
+	end
+end
+
+local function formatRewardMinutes(seconds: number): string
+	local minutes = math.max((tonumber(seconds) or 0) / 60, 0)
+	if math.abs(minutes - math.floor(minutes)) < 0.01 then
+		return tostring(math.floor(minutes))
+	end
+
+	return string.format("%.1f", minutes)
+end
+
+local function updateTutorialRewardAmountText(cancelledOverride: boolean?)
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local tutorial = PlayerDataController:Get("Tutorial")
+	local frame = getTutorialRewardFrame()
+	if type(tutorial) ~= "table" or not frame then
+		return
+	end
+
+	local config = getTutorialConfig()
+	local isCancelled = if cancelledOverride ~= nil then cancelledOverride else tutorial.Cancelled == true
+	local rewardSeconds = if isCancelled
+		then tonumber(config.CancelledRewardSeconds) or 7.5 * 60
+		else tonumber(config.RewardSeconds) or 15 * 60
+	local rewardText = formatRewardMinutes(rewardSeconds) .. " minute 2x BOOST!"
+	local amountLabel = frame:FindFirstChild("text1", true)
+	if amountLabel and amountLabel:IsA("TextLabel") then
+		amountLabel.Text = rewardText
+	end
+end
+
 local function getCurrentUnitCount(): number
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local units = PlayerDataController:Get("Units")
@@ -570,6 +617,8 @@ local function getStepProgress(step: string): (number, number, string?)
 		return math.min(math.floor(yen), cost), cost, "Yen"
 	elseif step == "MergeUnits" then
 		return if highestTier >= 2 then 1 else 0, 1, "Merge"
+	elseif step == "VisitGroupReward" then
+		return 0, 1, "Group"
 	elseif step == "WaitForRebirthReady" then
 		local requiredTier = TycoonConfig.Rebirth.FirstRequiredTier or 5
 		return math.min(highestTier, requiredTier), requiredTier, "Tier"
@@ -604,11 +653,16 @@ function TutorialController:GetObjectiveText(): string
 	return STEP_TEXT[currentStep] or ""
 end
 
+function TutorialController:MarkGroupRewardVisited()
+	if currentStep == "VisitGroupReward" then
+		self:setStep("WaitForRebirthReady")
+	end
+end
+
 function TutorialController:isActive(): boolean
 	return currentStep ~= "Prompt"
 		and currentStep ~= "Completed"
 		and currentStep ~= "Cancelled"
-		and currentStep ~= "WaitForRebirthReady"
 end
 
 function TutorialController:shouldTrack(): boolean
@@ -627,6 +681,9 @@ function TutorialController:updateTutorialRewardUi()
 	local frame = getTutorialRewardFrame()
 	if frame then
 		frame.Visible = self:canClaimTutorialReward()
+		if frame.Visible then
+			updateTutorialRewardAmountText()
+		end
 	end
 end
 
@@ -680,7 +737,14 @@ function TutorialController:setStep(step: string)
 		return
 	end
 
+	local previousStep = currentStep
+	local previousIndex = STEP_INDEX[previousStep]
+	local nextIndex = STEP_INDEX[step]
 	currentStep = step
+	if previousIndex and nextIndex and nextIndex > previousIndex then
+		SoundUtil.TutorialProgress()
+	end
+
 	if step == "PickupDropAgain" then
 		local PlayerDataController = Knit.GetController("PlayerDataController")
 		secondCollectBaselineMana = (tonumber(PlayerDataController:Get("ManaInBag")) or 0)
@@ -815,6 +879,8 @@ function TutorialController:connectPrompt()
 				TycoonService:CancelTutorial():andThen(function(success)
 					if success then
 						setPromptVisible(false)
+						setTutorialRewardText("No worries, here's a smaller boost!")
+						updateTutorialRewardAmountText(true)
 						self:setStep("Cancelled")
 					end
 				end)

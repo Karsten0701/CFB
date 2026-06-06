@@ -1,7 +1,9 @@
 return {
 	GlobalEpochSeconds = 0,
-	CycleSeconds = 10 * 60,
 	DefaultDurationSeconds = 5 * 60,
+	MinCooldownSeconds = 2 * 60,
+	MaxCooldownSeconds = 5 * 60,
+	CooldownSeed = 140269809669116,
 	EmptyWindowName = "Preparing next event",
 	NextWindowName = "Next event",
 	NextWindowDescription = "???",
@@ -85,17 +87,17 @@ return {
 				CapsuleSpawnChanceMultiplier = 5,
 			},
 		},
-		{
-			Id = "meteor_capsule_rain",
-			Name = "Meteor Capsule Rain",
-			Icon = "rbxassetid://121064932379247",
-			VFXKey = "MeteorCapsuleRain",
-			DurationSeconds = 5 * 60,
-			Description = "Ambient capsules spawn twice as often for 5 minutes.",
-			Effects = {
-				AmbientCapsuleIntervalMultiplier = 0.5,
-			},
-		},
+		-- {
+		-- 	Id = "meteor_capsule_rain",
+		-- 	Name = "Meteor Capsule Rain",
+		-- 	Icon = "rbxassetid://121064932379247",
+		-- 	VFXKey = "MeteorCapsuleRain",
+		-- 	DurationSeconds = 5 * 60,
+		-- 	Description = "Ambient capsules spawn twice as often for 5 minutes.",
+		-- 	Effects = {
+		-- 		AmbientCapsuleIntervalMultiplier = 0.5,
+		-- 	},
+		-- },
 		{ -- V
 			Id = "spirit_market",
 			Name = "Spirit Market",

@@ -3,16 +3,15 @@ local TycoonConfig = require(script.Parent.Parent.Parent.Data.TycoonConfig)
 local FormatUtil = require(script.Parent.FormatUtil)
 
 local Pricing = {}
-local RATE_GAIN_BASE = 1
-local RATE_GAIN_LINEAR = 0.35
-local RATE_GAIN_POWER_SCALE = 0.85
-local RATE_GAIN_EXPONENT = 1.6
-local RATE_PRICE_BASE = 12
-local RATE_PRICE_LINEAR = 6
-local RATE_PRICE_POWER_SCALE = 15
-local RATE_PRICE_EXPONENT = 1.62
+local RATE_GAIN_BASE = 2
+local RATE_GAIN_STEP_SIZE = 2
+local RATE_GAIN_STEP_POWER = 1.55
+local RATE_PRICE_BASE = 5
+local RATE_PRICE_LINEAR = 5
+local RATE_PRICE_GROWTH = 1.2
+local RATE_PRICE_GAIN_VALUE = 19
 local MAX_UNIT_BUY_AMOUNT = 1e100
-local MAX_RATE_BUY_AMOUNT = 1e100
+local MAX_RATE_BUY_AMOUNT = 10000
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
@@ -44,26 +43,6 @@ end
 
 function Pricing.getUnitPrice(baseUnitCount: number): number
 	return TycoonConfig.UnitPriceBase + baseUnitCount * TycoonConfig.UnitPriceIncrement
-end
-
-local function getArithmeticSum(first: number, last: number, count: number): number
-	return (first + last) * count / 2
-end
-
-local function getPowerRangeSum(fromLevel: number, count: number, exponent: number): number
-	if count <= 0 then
-		return 0
-	end
-
-	if count == 1 then
-		return (fromLevel + 1) ^ exponent
-	end
-
-	local first = fromLevel + 1
-	local last = fromLevel + count
-	local integral = (last ^ (exponent + 1) - first ^ (exponent + 1)) / (exponent + 1)
-	local edgeAverage = (first ^ exponent + last ^ exponent) / 2
-	return math.max(integral + edgeAverage, 0)
 end
 
 local function getUnitBulkDiscount(amount: number, useMaxDiscount: boolean?): number
@@ -128,11 +107,23 @@ local function getRateSequentialPrice(rateLevel: number, amount: number): number
 		return 0
 	end
 
-	local firstLinear = rateLevel * RATE_PRICE_LINEAR
-	local lastLinear = (rateLevel + amount - 1) * RATE_PRICE_LINEAR
-	local linearTotal = getArithmeticSum(firstLinear, lastLinear, amount)
-	local powerTotal = getPowerRangeSum(rateLevel, amount, RATE_PRICE_EXPONENT) * RATE_PRICE_POWER_SCALE
-	return RATE_PRICE_BASE * amount + linearTotal + powerTotal
+	local total = 0
+	for offset = 1, amount do
+		local nextLevel = rateLevel + offset
+		if nextLevel == 1 then
+			total += RATE_PRICE_BASE
+			continue
+		end
+
+		local levelIndex = math.max(nextLevel - 1, 0)
+		local gainStepIndex = math.floor(levelIndex / RATE_GAIN_STEP_SIZE)
+		local gainAtLevel = math.max(math.floor(RATE_GAIN_BASE * (RATE_GAIN_STEP_POWER ^ gainStepIndex) + 0.5), 2)
+		local stepPrice = RATE_PRICE_BASE + levelIndex * RATE_PRICE_LINEAR
+		stepPrice = stepPrice * (RATE_PRICE_GROWTH ^ levelIndex) + gainAtLevel * RATE_PRICE_GAIN_VALUE
+		total += math.ceil(stepPrice)
+	end
+
+	return total
 end
 
 function Pricing.getRateGain(amount: number, rateLevel: number): number
@@ -141,12 +132,14 @@ function Pricing.getRateGain(amount: number, rateLevel: number): number
 	end
 
 	amount = math.floor(amount)
-	local firstLinear = rateLevel * RATE_GAIN_LINEAR
-	local lastLinear = (rateLevel + amount - 1) * RATE_GAIN_LINEAR
-	local linearTotal = getArithmeticSum(firstLinear, lastLinear, amount)
-	local powerTotal = getPowerRangeSum(rateLevel, amount, RATE_GAIN_EXPONENT) * RATE_GAIN_POWER_SCALE
-	local totalGain = RATE_GAIN_BASE * amount + linearTotal + powerTotal
-	return math.max(math.floor(totalGain + 0.5), amount)
+	local totalGain = 0
+	for offset = 1, amount do
+		local nextLevel = rateLevel + offset
+		local stepIndex = math.floor((nextLevel - 1) / RATE_GAIN_STEP_SIZE)
+		totalGain += math.max(math.floor(RATE_GAIN_BASE * (RATE_GAIN_STEP_POWER ^ stepIndex) + 0.5), 2)
+	end
+
+	return totalGain
 end
 
 local function getRateBulkDiscount(amount: number, useMaxDiscount: boolean?): number

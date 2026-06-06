@@ -16,9 +16,11 @@ local PlayerDataService = Knit.CreateService({
 })
 
 local leaderstatValues: {
-	[Player]: { Yen: StringValue, Units: StringValue, Rebirths: StringValue, Tokens: StringValue },
-} =
-	{}
+	[Player]: { Yen: StringValue, Units: StringValue, Rebirths: StringValue },
+} = {}
+local playtimeSessionStartedAt: { [Player]: number } = {}
+
+local PLAYTIME_PERSIST_INTERVAL = 60
 
 local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
 	if type(data[newPath]) == "number" then
@@ -127,11 +129,44 @@ local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { 
 		end
 	end
 
+	local mergeTargets = {}
+	for tier, tierData in AnimeDroppers.Tiers do
+		local targetTier = tierData and tierData.MergeInto
+		if type(targetTier) == "number" and AnimeDroppers.Tiers[targetTier] then
+			mergeTargets[targetTier] = mergeTargets[targetTier] or {}
+			table.insert(mergeTargets[targetTier], tier)
+		end
+	end
+
+	local visitedTiers = {}
+	local function unlockTierAndMergeRequirements(tier: number)
+		if not AnimeDroppers.Tiers[tier] or visitedTiers[tier] == true then
+			return
+		end
+
+		visitedTiers[tier] = true
+		normalized[tier] = true
+		local sourceTiers = mergeTargets[tier]
+		if not sourceTiers then
+			return
+		end
+
+		for _, sourceTier in sourceTiers do
+			unlockTierAndMergeRequirements(sourceTier)
+		end
+	end
+
+	local alreadyUnlockedTiers = {}
+	for tier in normalized do
+		table.insert(alreadyUnlockedTiers, tier)
+	end
+	for _, tier in alreadyUnlockedTiers do
+		unlockTierAndMergeRequirements(tier)
+	end
+
 	for _, unit in units do
 		local tier = math.floor(tonumber(unit.Tier) or 0)
-		if AnimeDroppers.Tiers[tier] then
-			normalized[tier] = true
-		end
+		unlockTierAndMergeRequirements(tier)
 	end
 
 	return normalized
@@ -152,11 +187,6 @@ local function ensureManaData(data: { [string]: any })
 		data.Rebirths = 0
 	end
 	data.Rebirths = math.max(math.floor(data.Rebirths), 0)
-
-	if type(data.RebirthTokens) ~= "number" then
-		data.RebirthTokens = 0
-	end
-	data.RebirthTokens = math.max(math.floor(data.RebirthTokens), 0)
 
 	if type(data.LastGroupRewardClaimAt) ~= "number" then
 		data.LastGroupRewardClaimAt = 0
@@ -179,6 +209,26 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.ManaInDeposit) ~= "number" then
 		data.ManaInDeposit = 0
 	end
+
+	if type(data.LifetimeYen) ~= "number" then
+		data.LifetimeYen = math.max(math.floor(tonumber(data.Yen) or 0), 0)
+	end
+	data.LifetimeYen = math.max(math.floor(data.LifetimeYen), 0)
+
+	if type(data.TotalUnitsBought) ~= "number" then
+		data.TotalUnitsBought = math.max(math.floor(tonumber(data.TotalUnitsPurchased) or 0), 0)
+	end
+	data.TotalUnitsBought = math.max(math.floor(data.TotalUnitsBought), 0)
+
+	if type(data.TotalUnitsPurchased) ~= "number" then
+		data.TotalUnitsPurchased = 0
+	end
+	data.TotalUnitsPurchased = math.max(math.floor(data.TotalUnitsPurchased), 0)
+
+	if type(data.PlaytimeSeconds) ~= "number" then
+		data.PlaytimeSeconds = 0
+	end
+	data.PlaytimeSeconds = math.max(math.floor(data.PlaytimeSeconds), 0)
 
 	if type(data.ProcessedReceipts) ~= "table" then
 		data.ProcessedReceipts = {}
@@ -279,6 +329,7 @@ local function ensureManaData(data: { [string]: any })
 	if #data.Units <= 0 then
 		data.Units = normalizeUnits(getStarterUnits())
 	end
+	data.TotalUnitsBought = math.max(data.TotalUnitsBought, math.floor(Pricing.getBaseUnitCount(data.Units)))
 
 	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers(data.UnlockedAnimeDroppers, data.Units)
 end
@@ -292,12 +343,10 @@ local function syncLeaderstats(player: Player)
 	local yen = PlayerDataService:Get(player, "Yen") or 0
 	local units = PlayerDataService:GetUnits(player)
 	local rebirths = PlayerDataService:Get(player, "Rebirths") or 0
-	local rebirthTokens = PlayerDataService:Get(player, "RebirthTokens") or 0
 
 	values.Yen.Value = Pricing.formatYen(yen)
 	values.Units.Value = FormatUtil.formatNumber(Pricing.getBaseUnitCount(units))
 	values.Rebirths.Value = FormatUtil.formatNumber(rebirths)
-	values.Tokens.Value = FormatUtil.formatNumber(rebirthTokens)
 end
 
 local function setupLeaderstats(player: Player)
@@ -316,16 +365,11 @@ local function setupLeaderstats(player: Player)
 	rebirthsValue.Name = "Rebirths"
 	rebirthsValue.Parent = leaderstats
 
-	local tokensValue = Instance.new("StringValue")
-	tokensValue.Name = "Tokens"
-	tokensValue.Parent = leaderstats
-
 	leaderstats.Parent = player
 	leaderstatValues[player] = {
 		Yen = yenValue,
 		Units = unitsValue,
 		Rebirths = rebirthsValue,
-		Tokens = tokensValue,
 	}
 
 	syncLeaderstats(player)
@@ -343,6 +387,7 @@ function PlayerDataService:KnitInit()
 
 	function DataService:onPlayerInit(player: Player, data: any)
 		ensureManaData(data)
+		playtimeSessionStartedAt[player] = os.time()
 		setupLeaderstats(player)
 
 		PlayerDataService:Observe(player, "Yen", function()
@@ -356,24 +401,33 @@ function PlayerDataService:KnitInit()
 		PlayerDataService:Observe(player, "Rebirths", function()
 			syncLeaderstats(player)
 		end)
-
-		PlayerDataService:Observe(player, "RebirthTokens", function()
-			syncLeaderstats(player)
-		end)
 	end
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.24",
+		profileStoreIndex = "CFB_PlayerData.36",
 	})
 end
 
 function PlayerDataService:KnitStart()
 	game:GetService("Players").PlayerRemoving:Connect(function(player)
 		pcall(function()
+			PlayerDataService:PersistPlaytime(player)
 			PlayerDataService:Set(player, "LastLogoutAt", os.time())
 		end)
+		playtimeSessionStartedAt[player] = nil
 		leaderstatValues[player] = nil
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(PLAYTIME_PERSIST_INTERVAL)
+			for _, player in game:GetService("Players"):GetPlayers() do
+				pcall(function()
+					PlayerDataService:PersistPlaytime(player)
+				end)
+			end
+		end
 	end)
 end
 
@@ -410,8 +464,53 @@ end
 function PlayerDataService:AddYen(player: Player, amount: number)
 	assert(amount >= 0, "Yen reward amount cannot be negative")
 
+	if amount > 0 then
+		self:Update(player, "LifetimeYen", function(currentLifetimeYen: number)
+			return math.max(math.floor(tonumber(currentLifetimeYen) or 0), 0) + amount
+		end)
+	end
+
 	return self:Update(player, "Yen", function(currentYen: number)
 		return currentYen + amount
+	end)
+end
+
+function PlayerDataService:AddUnitsBought(player: Player, amount: number)
+	local normalizedAmount = math.floor(tonumber(amount) or 0)
+	if normalizedAmount <= 0 then
+		return
+	end
+
+	self:Update(player, "TotalUnitsBought", function(current: number)
+		return math.max(math.floor(tonumber(current) or 0), 0) + normalizedAmount
+	end)
+end
+
+function PlayerDataService:GetPlaytimeSeconds(player: Player): number
+	local savedPlaytime = math.max(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0)
+	local startedAt = playtimeSessionStartedAt[player]
+	if not startedAt then
+		return savedPlaytime
+	end
+
+	return savedPlaytime + math.max(os.time() - startedAt, 0)
+end
+
+function PlayerDataService:PersistPlaytime(player: Player)
+	local startedAt = playtimeSessionStartedAt[player]
+	if not startedAt then
+		return
+	end
+
+	local now = os.time()
+	local elapsed = math.max(now - startedAt, 0)
+	if elapsed <= 0 then
+		return
+	end
+
+	playtimeSessionStartedAt[player] = now
+	self:Update(player, "PlaytimeSeconds", function(current: number)
+		return math.max(math.floor(tonumber(current) or 0), 0) + elapsed
 	end)
 end
 
@@ -457,7 +556,18 @@ function PlayerDataService:GetUnits(player: Player): { { Tier: number, Slot: num
 end
 
 function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } })
+	local currentUnits = self:GetUnits(player)
+	local currentBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(currentUnits)), 0)
 	local normalizedUnits = normalizeUnits(units)
+	local nextBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(normalizedUnits)), 0)
+	local gainedBaseUnits = nextBaseUnitCount - currentBaseUnitCount
+
+	if gainedBaseUnits > 0 then
+		self:Update(player, "TotalUnitsBought", function(current: number)
+			return math.max(math.floor(tonumber(current) or 0), 0) + gainedBaseUnits
+		end)
+	end
+
 	self:Set(player, "Units", normalizedUnits)
 
 	self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)

@@ -142,6 +142,13 @@ function CapsuleUtil.getOpenPrice(
 	local unitBuyDiscount = math.clamp(tonumber(config.OpenPriceUnitBuyDiscount) or 0.62, 0.05, 1)
 	local spawnTierDiscountPower = math.clamp(tonumber(config.OpenPriceSpawnTierDiscountPower) or 1, 0, 2)
 	local ownedBaseUnitPercent = math.clamp(tonumber(config.OpenPriceOwnedBaseUnitPercent) or 0.025, 0, 1)
+	local globalMultiplier = math.max(tonumber(config.OpenPriceGlobalMultiplier) or 1.5, 0.1)
+	local ownedScalingPercent = math.max(tonumber(config.OpenPriceOwnedScalingPercent) or 0.02, 0)
+	local ownedScalingPower = math.clamp(tonumber(config.OpenPriceOwnedScalingPower) or 0.5, 0, 1.5)
+	local ownedScalingMax = math.max(tonumber(config.OpenPriceOwnedScalingMax) or 2.25, 1)
+	local currentUnitCountPercent = math.max(tonumber(config.OpenPriceCurrentUnitCountPercent) or 0.015, 0)
+	local currentUnitCountPower = math.clamp(tonumber(config.OpenPriceCurrentUnitCountPower) or 0.65, 0, 1.5)
+	local currentUnitCountMax = math.max(tonumber(config.OpenPriceCurrentUnitCountMax) or 1.8, 1)
 	purchasedUnitCount = math.max(math.floor(tonumber(purchasedUnitCount) or 0), 0)
 	spawnTier = math.clamp(math.floor(tonumber(spawnTier) or highestTier), 1, AnimeDroppers.MaxTier)
 	local spawnBaseValue = getTierRequiredBaseUnits(spawnTier)
@@ -163,12 +170,14 @@ function CapsuleUtil.getOpenPrice(
 	local tierBasedPrice = math.min(legacyTierPrice, valueBasedPrice) * spawnTierDiscount
 	local ownedUnitCost = 0
 	local ownedBaseUnits = 0
+	local currentUnitCount = 0
 	if type(units) == "table" then
 		for _, unit in units do
 			if type(unit) ~= "table" then
 				continue
 			end
 
+			currentUnitCount += 1
 			local ownedTierData = AnimeDroppers.Tiers[unit.Tier or 1]
 			ownedUnitCost += tonumber(ownedTierData and ownedTierData.EstimatedTier1Cost) or 0
 			ownedBaseUnits += getTierRequiredBaseUnits(unit.Tier or 1)
@@ -176,17 +185,26 @@ function CapsuleUtil.getOpenPrice(
 	end
 
 	local price = tierBasedPrice
+	local ownedProgressMultiplier = 1
 	if ownedUnitCost > 0 then
 		price = math.min(price, ownedUnitCost * ownedCostPercent)
 		price = math.max(price, ownedUnitCost * ownedCostFloorPercent)
 	end
 	if ownedBaseUnits > 0 and ownedBaseUnitPercent > 0 then
+		local ownedEquivalentUnits = math.max(ownedBaseUnits / spawnBaseValue, 1)
+		ownedProgressMultiplier = math.min(1 + ownedScalingPercent * (ownedEquivalentUnits ^ ownedScalingPower), ownedScalingMax)
 		local ownedProgressPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, math.max(math.floor(ownedBaseUnits / spawnBaseValue), 1), true)
 			* ownedBaseUnitPercent
 			* spawnTierDiscount
 		price = math.min(price, ownedProgressPrice)
 	end
 
+	local currentUnitCountMultiplier = math.min(
+		1 + currentUnitCountPercent * (currentUnitCount ^ currentUnitCountPower),
+		currentUnitCountMax
+	)
+
+	price *= globalMultiplier * ownedProgressMultiplier * currentUnitCountMultiplier
 	return math.max(math.floor(price), minPrice)
 end
 

@@ -64,27 +64,27 @@ Monetization.DeveloperProducts = {
 
 Monetization.GamePasses = {
 	DoubleDeposit = {
-		PassId = 1862051990,
+		PassId = 0, --1862051990,
 		Price = 249,
 	},
 	DoubleMana = {
-		PassId = 1862912773,
+		PassId = 0, --1862912773,
 		Price = 199,
 	},
 	DoubleYen = {
-		PassId = 1860952285,
+		PassId = 0, --1860952285,
 		Price = 249,
 	},
 	DoubleDropSpeed = {
-		PassId = 1859927580,
+		PassId = 0, --1859927580,
 		Price = 249,
 	},
 	AutoCollect = {
-		PassId = 1862930826,
+		PassId = 0, --1862930826,
 		Price = 49,
 	},
 	AutoDeposit = {
-		PassId = 1862972802,
+		PassId = 0, --1862972802,
 		Price = 79,
 	},
 }
