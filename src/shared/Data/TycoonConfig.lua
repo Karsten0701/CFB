@@ -32,7 +32,7 @@ return {
 	},
 	Mutations = {
 		Interval = 60,
-		BetterTierWeightPower = 4,
+		BetterTierWeightPower = 5,
 		Gold = {
 			TemplateName = "Gold",
 			Multipliers = { 2, 5, 10, 25, 100 },
@@ -79,8 +79,8 @@ return {
 	RateButtonPrefix = "Rate",
 	Capsules = {
 		SpawnChance = 0.01,
-		SpawnCooldown = 15,
-		AmbientSpawnInterval = 45,
+		SpawnCooldown = 30,
+		AmbientSpawnInterval = 75,
 		UnitScale = 0.2,
 		RevealScale = 0.5,
 		MaxActiveCapsules = 6,

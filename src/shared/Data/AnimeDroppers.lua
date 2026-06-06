@@ -427,8 +427,8 @@ local BalanceSettings = {
 	},
 	DropValueBase = 1,
 	ThreeMergeDropValueGrowth = 4.8,
-	TwoMergeDropValueGrowth = 2.3,
-	LategameDropValueGrowth = 2.45,
+	TwoMergeDropValueGrowth = 2.65,
+	LategameDropValueGrowth = 2.6,
 	EndgameDropValueGrowth = 2.65,
 }
 

@@ -59,7 +59,7 @@ return {
 			Name = "Thunderclap Rush",
 			Icon = "rbxassetid://115755999549909",
 			VFXKey = "ThunderclapRush",
-			DurationSeconds = 5 * 60,
+			DurationSeconds = 4 * 60,
 			Description = "1.5x drop speed for 5 minutes.",
 			Effects = {
 				DropSpeedMultiplier = 1.5,
@@ -81,7 +81,7 @@ return {
 			Name = "Dragon Radar Surge",
 			Icon = "rbxassetid://121064932379247",
 			VFXKey = "DragonRadarSurge",
-			DurationSeconds = 5 * 60,
+			DurationSeconds = 2 * 60,
 			Description = "5x capsule spawn chance for 5 minutes.",
 			Effects = {
 				CapsuleSpawnChanceMultiplier = 5,
@@ -103,7 +103,7 @@ return {
 			Name = "Spirit Market",
 			Icon = "rbxassetid://96573285096968",
 			VFXKey = "SpiritMarket",
-			DurationSeconds = 5 * 60,
+			DurationSeconds = 3 * 60,
 			Description = "1.5x Yen for 5 minutes.",
 			Effects = {
 				YenMultiplier = 1.5,
@@ -114,7 +114,7 @@ return {
 			Name = "Cursed Energy Leak",
 			Icon = "rbxassetid://121705665379355",
 			VFXKey = "CursedEnergyLeak",
-			DurationSeconds = 5 * 60,
+			DurationSeconds = 3 * 60,
 			Description = "1.5x Mana for 5 minutes.",
 			Effects = {
 				ManaMultiplier = 1.5,
