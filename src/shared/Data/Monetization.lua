@@ -1,36 +1,36 @@
 local Monetization = {}
 
 Monetization.DeveloperProducts = {
-	Unit5 = {
-		ProductId = 3601244927,
-		Price = 9,
-		Kind = "Units",
-		Amount = 5,
-	},
 	Unit25 = {
-		ProductId = 3601244889,
-		Price = 39,
+		ProductId = 3601244927,
+		Price = 7,
 		Kind = "Units",
 		Amount = 25,
 	},
 	Unit100 = {
-		ProductId = 3601244855,
-		Price = 119,
+		ProductId = 3601244889,
+		Price = 19,
 		Kind = "Units",
 		Amount = 100,
 	},
 	Unit999 = {
-		ProductId = 3601244815,
-		Price = 699,
+		ProductId = 3601244855,
+		Price = 79,
 		Kind = "Units",
 		Amount = 999,
 	},
 	Unit9999 = {
-		ProductId = 3601588290,
-		Price = 3999,
+		ProductId = 3601244815,
+		Price = 399,
 		Kind = "Units",
 		Amount = 9999,
 	},
+	-- Unit9999 = {
+	-- 	ProductId = 3601588290,
+	-- 	Price = 3999,
+	-- 	Kind = "Units",
+	-- 	Amount = 9999,
+	-- },
 	SellAll = {
 		ProductId = 3601245342,
 		Price = 19,
@@ -38,7 +38,7 @@ Monetization.DeveloperProducts = {
 	},
 	OpenCapsule = {
 		ProductId = 3602659865,
-		Price = 39,
+		Price = 19,
 		Kind = "OpenCapsule",
 	},
 	DoubleYen = {
@@ -50,7 +50,7 @@ Monetization.DeveloperProducts = {
 	},
 	StarterPack = {
 		ProductId = 3602430060,
-		Price = 79,
+		Price = 39,
 		Kind = "StarterPack",
 		Units = {
 			{ Tier = 4 },
@@ -58,33 +58,33 @@ Monetization.DeveloperProducts = {
 		Gamepasses = {
 			"DoubleYen",
 		},
-		Yen = 10000,
+		Yen = 100_000,
 	},
 }
 
 Monetization.GamePasses = {
 	DoubleDeposit = {
-		PassId = 0, --1862051990,
-		Price = 249,
+		PassId = 1862051990,
+		Price = 99,
 	},
 	DoubleMana = {
-		PassId = 0, --1862912773,
-		Price = 199,
+		PassId = 1862912773,
+		Price = 149,
 	},
 	DoubleYen = {
-		PassId = 0, --1860952285,
-		Price = 249,
+		PassId = 1860952285,
+		Price = 149,
 	},
 	DoubleDropSpeed = {
-		PassId = 0, --1859927580,
-		Price = 249,
+		PassId = 1859927580,
+		Price = 179,
 	},
 	AutoCollect = {
-		PassId = 0, --1862930826,
-		Price = 49,
+		PassId = 1862930826,
+		Price = 39,
 	},
 	AutoDeposit = {
-		PassId = 0, --1862972802,
+		PassId = 1862972802,
 		Price = 79,
 	},
 }

@@ -8,10 +8,11 @@ local RATE_GAIN_STEP_SIZE = 2
 local RATE_GAIN_STEP_POWER = 1.55
 local RATE_PRICE_BASE = 5
 local RATE_PRICE_LINEAR = 5
-local RATE_PRICE_GROWTH = 1.2
+local RATE_PRICE_GROWTH = 1.22
 local RATE_PRICE_GAIN_VALUE = 19
 local MAX_UNIT_BUY_AMOUNT = 1e100
 local MAX_RATE_BUY_AMOUNT = 10000
+local UNIT_INCREMENT_SCALE_INTERVAL = 1_000_000
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
@@ -41,22 +42,43 @@ function Pricing.getBaseUnitCount(units: { { Tier: number } }): number
 	return total
 end
 
-function Pricing.getUnitPrice(baseUnitCount: number): number
-	return TycoonConfig.UnitPriceBase + baseUnitCount * TycoonConfig.UnitPriceIncrement
+local function getSpawnTierPriceMultiplier(spawnTier: number?): number
+	spawnTier = math.max(math.floor(tonumber(spawnTier) or 1), 1)
+	local tierData = AnimeDroppers.Tiers[spawnTier]
+	return math.max(math.floor(tonumber(tierData and tierData.RequiredTier1) or 1), 1)
+end
+
+function Pricing.getUnitPriceIncrement(unitScaleCount: number, spawnTier: number?): number
+	local tierMultiplier = getSpawnTierPriceMultiplier(spawnTier)
+	local scalingBonus = math.max(math.floor((tonumber(unitScaleCount) or 0) / UNIT_INCREMENT_SCALE_INTERVAL), 0)
+	return TycoonConfig.UnitPriceIncrement * tierMultiplier + scalingBonus
+end
+
+function Pricing.getUnitPrice(purchaseCount: number, spawnTier: number?, unitScaleCount: number?): number
+	local scaleCount = if unitScaleCount ~= nil then unitScaleCount else purchaseCount
+	return TycoonConfig.UnitPriceBase + purchaseCount * Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
 end
 
 local function getUnitBulkDiscount(amount: number, useMaxDiscount: boolean?): number
 	return if useMaxDiscount then UNIT_BULK_DISCOUNTS.Max or 0 else UNIT_BULK_DISCOUNTS[amount] or 0
 end
 
-function Pricing.getUnitBulkPrice(baseUnitCount: number, amount: number, useMaxDiscount: boolean?): number
+function Pricing.getUnitBulkPrice(
+	purchaseCount: number,
+	amount: number,
+	useMaxDiscount: boolean?,
+	spawnTier: number?,
+	unitScaleCount: number?
+): number
 	amount = math.max(math.floor(amount), 0)
 	if amount <= 0 then
 		return 0
 	end
 
-	local firstPrice = Pricing.getUnitPrice(baseUnitCount)
-	local totalPrice = amount * firstPrice + TycoonConfig.UnitPriceIncrement * amount * (amount - 1) / 2
+	local scaleCount = if unitScaleCount ~= nil then unitScaleCount else purchaseCount
+	local increment = Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
+	local firstPrice = Pricing.getUnitPrice(purchaseCount, spawnTier, scaleCount)
+	local totalPrice = amount * firstPrice + increment * amount * (amount - 1) / 2
 	local discount = getUnitBulkDiscount(amount, useMaxDiscount)
 	return math.max(math.floor(totalPrice * (1 - discount)), 0)
 end
@@ -65,22 +87,29 @@ function Pricing.getMaxBaseUnitCapacity(): number
 	return math.huge
 end
 
-function Pricing.getMaxAffordableUnitPurchase(baseUnitCount: number, yen: number): (number, number)
+function Pricing.getMaxAffordableUnitPurchase(
+	purchaseCount: number,
+	yen: number,
+	maxAmount: number?,
+	spawnTier: number?,
+	unitScaleCount: number?
+): (number, number)
 	yen = math.max(yen or 0, 0)
-	if yen <= 0 then
+	maxAmount = math.max(math.floor(tonumber(maxAmount) or MAX_UNIT_BUY_AMOUNT), 0)
+	if yen <= 0 or maxAmount <= 0 then
 		return 0, 0
 	end
 
 	local low = 0
 	local high = 1
-	while high < MAX_UNIT_BUY_AMOUNT do
-		local price = Pricing.getUnitBulkPrice(baseUnitCount, high, true)
+	while high < maxAmount do
+		local price = Pricing.getUnitBulkPrice(purchaseCount, high, true, spawnTier, unitScaleCount)
 		if price > yen or price == math.huge then
 			break
 		end
 
 		low = high
-		high = math.min(high * 2, MAX_UNIT_BUY_AMOUNT)
+		high = math.min(high * 2, maxAmount)
 	end
 
 	local iterations = 0
@@ -91,7 +120,7 @@ function Pricing.getMaxAffordableUnitPurchase(baseUnitCount: number, yen: number
 			break
 		end
 
-		local price = Pricing.getUnitBulkPrice(baseUnitCount, mid, true)
+		local price = Pricing.getUnitBulkPrice(purchaseCount, mid, true, spawnTier, unitScaleCount)
 		if price <= yen then
 			low = mid
 		else
@@ -99,7 +128,7 @@ function Pricing.getMaxAffordableUnitPurchase(baseUnitCount: number, yen: number
 		end
 	end
 
-	return low, Pricing.getUnitBulkPrice(baseUnitCount, low, true)
+	return low, Pricing.getUnitBulkPrice(purchaseCount, low, true, spawnTier, unitScaleCount)
 end
 
 local function getRateSequentialPrice(rateLevel: number, amount: number): number
@@ -159,8 +188,17 @@ function Pricing.getRateUpgradePrice(rateLevel: number, amount: number?, useMaxD
 	return math.max(math.floor(totalPrice * (1 - discount)), 0)
 end
 
-function Pricing.getMaxAffordableRateUpgrade(rateLevel: number, yen: number): (number, number, number)
+function Pricing.getMaxAffordableRateUpgrade(
+	rateLevel: number,
+	yen: number,
+	maxAmount: number?
+): (number, number, number)
 	yen = math.max(yen or 0, 0)
+	maxAmount = math.max(math.floor(tonumber(maxAmount) or MAX_RATE_BUY_AMOUNT), 0)
+	if maxAmount <= 0 then
+		return 0, 0, 0
+	end
+
 	local nextPrice = Pricing.getRateUpgradePrice(rateLevel, 1, true)
 	if nextPrice > yen then
 		return 0, 0, 0
@@ -168,9 +206,9 @@ function Pricing.getMaxAffordableRateUpgrade(rateLevel: number, yen: number): (n
 
 	local low = 1
 	local high = 1
-	while high < MAX_RATE_BUY_AMOUNT and Pricing.getRateUpgradePrice(rateLevel, high, true) <= yen do
+	while high < maxAmount and Pricing.getRateUpgradePrice(rateLevel, high, true) <= yen do
 		low = high
-		high = math.min(high * 2, MAX_RATE_BUY_AMOUNT)
+		high = math.min(high * 2, maxAmount)
 		if high == low then
 			break
 		end

@@ -47,6 +47,9 @@ local CAPSULE_COLLISION_GROUP = "CapsuleDrops"
 local DEFAULT_MUTATION_INTERVAL = 60
 local DEFAULT_MUTATION_WEIGHT_POWER = 4
 local DEFAULT_GOLD_MULTIPLIERS = { 2, 5, 10, 25, 100 }
+local AUTO_COLLECT_RETRY_INTERVAL = 2
+local AUTO_COLLECT_BIND_TIMEOUT = 30
+local AUTO_COLLECT_BIND_POLL_INTERVAL = 0.25
 
 pcall(function()
 	PhysicsService:RegisterCollisionGroup(PLAYER_COLLISION_GROUP)
@@ -206,7 +209,12 @@ local function getDropParts(container: Instance?, fallbackPart: BasePart): { Bas
 	return parts
 end
 
-local function pivotDropContainer(container: Instance?, pickupPart: BasePart, targetCFrame: CFrame, pivotOffset: CFrame?)
+local function pivotDropContainer(
+	container: Instance?,
+	pickupPart: BasePart,
+	targetCFrame: CFrame,
+	pivotOffset: CFrame?
+)
 	if container and container:IsA("Model") then
 		container:PivotTo(targetCFrame * (pivotOffset or CFrame.identity))
 	elseif container and container:IsA("BasePart") then
@@ -342,12 +350,16 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.rebuildToken = 0
 	self.activeOrbs = {}
 	self.dropTouchConnections = {}
-	self.isOwn = true
+	self.isOwn = false
 	self.entitlements = {}
 	self.dropsFolder = nil
 	self.dropBounds = nil
+	self.autoCollectRoot = nil
 	self.autoCollectPart = nil
 	self.autoCollectVisuals = nil
+	self.autoCollectPadUpdateScheduled = false
+	self.autoCollectBindStarted = false
+	self.lastAutoCollectRetryAt = 0
 	self.pickupConnection = nil
 	self.pickupAnimationConnection = nil
 	self.pickupAnimations = {}
@@ -357,22 +369,65 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 		+ (TycoonConfig.Mutations and TycoonConfig.Mutations.Interval or DEFAULT_MUTATION_INTERVAL)
 	if janitor then
 		janitor:Add(tycoon.DescendantAdded:Connect(function(descendant)
-			if descendant.Name ~= "Display" and descendant.Name ~= "UnitSpot" then
-				return
+			if
+				descendant.Name == "DropperHolder"
+				or descendant.Name == "AutoCollect"
+				or descendant.Name == "FirstLayerStuff"
+			then
+				self:invalidateAutoCollectCache()
+				self:scheduleAutoCollectPadUpdate()
+			elseif
+				self.autoCollectRoot
+				and descendant:IsDescendantOf(self.autoCollectRoot)
+				and (descendant:IsA("BasePart") or descendant:IsA("BillboardGui"))
+			then
+				self.autoCollectVisuals = nil
+				self:scheduleAutoCollectPadUpdate()
 			end
 
-			task.defer(function()
-				if self.tycoon.Parent then
-					self:updateHighestDisplayUnit(self.lastUnits or {}, true)
-				end
-			end)
+			if descendant.Name == "Display" or descendant.Name == "UnitSpot" then
+				task.defer(function()
+					if self.tycoon.Parent then
+						self:updateHighestDisplayUnit(self.lastUnits or {}, true)
+					end
+				end)
+			end
+		end))
+		janitor:Add(tycoon.DescendantRemoving:Connect(function(descendant)
+			if descendant == self.autoCollectRoot or descendant == self.autoCollectPart then
+				self:invalidateAutoCollectCache()
+				self.autoCollectBindStarted = false
+				self:beginAutoCollectPadBinding()
+				self:scheduleAutoCollectPadUpdate()
+			elseif self.autoCollectRoot and descendant:IsDescendantOf(self.autoCollectRoot) then
+				self.autoCollectVisuals = nil
+				self:scheduleAutoCollectPadUpdate()
+			end
 		end))
 		janitor:Add(tycoon:GetAttributeChangedSignal("Claimed"):Connect(function()
 			if tycoon:GetAttribute("Claimed") ~= true then
 				self:clearHighestDisplayUnit()
 			end
 		end))
+		janitor:Add(RunService.Heartbeat:Connect(function()
+			if not self.isOwn then
+				return
+			end
+
+			local now = os.clock()
+			if now - self.lastAutoCollectRetryAt < AUTO_COLLECT_RETRY_INTERVAL then
+				return
+			end
+
+			self.lastAutoCollectRetryAt = now
+			if not self:getAutoCollectPart() then
+				self:beginAutoCollectPadBinding()
+			end
+			self:updateAutoCollectPad()
+		end))
 	end
+
+	self:beginAutoCollectPadBinding()
 	return self
 end
 
@@ -389,6 +444,64 @@ end
 
 function TycoonRenderer:setIsOwn(isOwn: boolean)
 	self.isOwn = isOwn
+	if isOwn then
+		self:beginAutoCollectPadBinding()
+		self:scheduleAutoCollectPadUpdate()
+	end
+end
+
+function TycoonRenderer:invalidateAutoCollectCache()
+	self.autoCollectRoot = nil
+	self.autoCollectPart = nil
+	self.autoCollectVisuals = nil
+end
+
+function TycoonRenderer:resolveAutoCollectInstance(): Instance?
+	local dropperHolder = self:getDropperHolder()
+	if not dropperHolder then
+		return nil
+	end
+
+	local firstLayerStuff = dropperHolder:FindFirstChild("FirstLayerStuff")
+	if not firstLayerStuff then
+		return nil
+	end
+
+	return firstLayerStuff:FindFirstChild("AutoCollect")
+end
+
+function TycoonRenderer:beginAutoCollectPadBinding()
+	if self.autoCollectBindStarted then
+		return
+	end
+
+	if self:resolveAutoCollectInstance() then
+		self:scheduleAutoCollectPadUpdate()
+		return
+	end
+
+	self.autoCollectBindStarted = true
+	task.spawn(function()
+		local deadline = os.clock() + AUTO_COLLECT_BIND_TIMEOUT
+
+		while os.clock() < deadline do
+			if not self.tycoon.Parent then
+				self.autoCollectBindStarted = false
+				return
+			end
+
+			if self:resolveAutoCollectInstance() then
+				self:invalidateAutoCollectCache()
+				self.autoCollectBindStarted = false
+				self:scheduleAutoCollectPadUpdate()
+				return
+			end
+
+			task.wait(AUTO_COLLECT_BIND_POLL_INTERVAL)
+		end
+
+		self.autoCollectBindStarted = false
+	end)
 end
 
 function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
@@ -403,6 +516,20 @@ function TycoonRenderer:setEntitlements(entitlements: { [string]: boolean })
 			self:scheduleUnitDrop(entry, unitIndex, now, true)
 		end
 	end
+end
+
+function TycoonRenderer:scheduleAutoCollectPadUpdate()
+	if self.autoCollectPadUpdateScheduled then
+		return
+	end
+
+	self.autoCollectPadUpdateScheduled = true
+	task.defer(function()
+		self.autoCollectPadUpdateScheduled = false
+		if self.tycoon.Parent then
+			self:updateAutoCollectPad()
+		end
+	end)
 end
 
 function TycoonRenderer:getDropInterval(): number
@@ -499,19 +626,30 @@ function TycoonRenderer:getDropBounds(): BasePart?
 end
 
 function TycoonRenderer:getAutoCollectPart(): BasePart?
-	if self.autoCollectPart and self.autoCollectPart.Parent then
+	if
+		self.autoCollectPart
+		and self.autoCollectPart.Parent
+		and self.autoCollectRoot
+		and self.autoCollectRoot.Parent
+	then
 		return self.autoCollectPart
 	end
 
-	local dropperHolder = self:getDropperHolder()
-	local firstLayerStuff = dropperHolder and dropperHolder:FindFirstChild("FirstLayerStuff")
-	local autoCollect = firstLayerStuff and firstLayerStuff:FindFirstChild("AutoCollect")
-	if autoCollect and autoCollect:IsA("BasePart") then
-		self.autoCollectPart = autoCollect
-		return autoCollect
+	self:invalidateAutoCollectCache()
+
+	local autoCollect = self:resolveAutoCollectInstance()
+	if not autoCollect then
+		return nil
 	end
 
-	return nil
+	local autoCollectPart = if autoCollect:IsA("BasePart") then autoCollect else getFirstBasePart(autoCollect)
+	if not autoCollectPart then
+		return nil
+	end
+
+	self.autoCollectRoot = autoCollect
+	self.autoCollectPart = autoCollectPart
+	return autoCollectPart
 end
 
 function TycoonRenderer:updateAutoCollectPad()
@@ -526,7 +664,12 @@ function TycoonRenderer:updateAutoCollectPad()
 			Parts = {},
 		}
 
-		for _, descendant in autoCollect:GetDescendants() do
+		local visualRoot = self.autoCollectRoot or autoCollect
+		if visualRoot:IsA("BasePart") then
+			table.insert(visuals.Parts, visualRoot)
+		end
+
+		for _, descendant in visualRoot:GetDescendants() do
 			if descendant:IsA("BillboardGui") then
 				table.insert(visuals.Billboards, descendant)
 			elseif descendant:IsA("BasePart") then
@@ -667,6 +810,10 @@ function TycoonRenderer:ensureFloors(unitCount: number)
 	end
 
 	for _, child in dropperHolder:GetChildren() do
+		if child.Name == "FirstLayerStuff" or child.Name == "AutoCollect" then
+			continue
+		end
+
 		local floorIndex = string.match(child.Name, "^FloorLayer_(%d+)$")
 		if floorIndex and tonumber(floorIndex) > required then
 			child:Destroy()
@@ -756,7 +903,10 @@ function TycoonRenderer:clearHighestDisplayUnit()
 	local unitSpot = self:getDisplayUnitSpot()
 	if unitSpot then
 		for _, child in unitSpot:GetChildren() do
-			if child:IsA("Model") and (child.Name == "HighestTierDisplayUnit" or child:GetAttribute("HighestTierDisplay") == true) then
+			if
+				child:IsA("Model")
+				and (child.Name == "HighestTierDisplayUnit" or child:GetAttribute("HighestTierDisplay") == true)
+			then
 				self.unitModelInfo[child] = nil
 				child:Destroy()
 			end
@@ -769,7 +919,10 @@ function TycoonRenderer:clearHighestDisplayUnit()
 			if
 				descendant:IsA("Model")
 				and descendant ~= self.highestDisplayModel
-				and (descendant.Name == "HighestTierDisplayUnit" or descendant:GetAttribute("HighestTierDisplay") == true)
+				and (
+					descendant.Name == "HighestTierDisplayUnit"
+					or descendant:GetAttribute("HighestTierDisplay") == true
+				)
 			then
 				self.unitModelInfo[descendant] = nil
 				descendant:Destroy()
@@ -817,7 +970,12 @@ function TycoonRenderer:updateHighestDisplayUnit(units: { { Tier: number } }, fo
 		return
 	end
 
-	if not forceReplace and self.highestDisplayModel and self.highestDisplayModel.Parent and self.highestDisplayTier == highestTier then
+	if
+		not forceReplace
+		and self.highestDisplayModel
+		and self.highestDisplayModel.Parent
+		and self.highestDisplayTier == highestTier
+	then
 		if self.highestDisplayModel.Parent ~= unitSpot then
 			self.highestDisplayModel.Parent = unitSpot
 		end
@@ -1287,7 +1445,13 @@ function TycoonRenderer:pickupOrb(orb: BasePart)
 	end
 end
 
-function TycoonRenderer:registerManaDrop(pickupPart: BasePart, dropInstance: Instance, value: number, velocity: Vector3, extra: { [string]: any }?)
+function TycoonRenderer:registerManaDrop(
+	pickupPart: BasePart,
+	dropInstance: Instance,
+	value: number,
+	velocity: Vector3,
+	extra: { [string]: any }?
+)
 	local entry = extra or {}
 	entry.Value = value
 	entry.Instance = dropInstance
@@ -1402,7 +1566,8 @@ function TycoonRenderer:ensurePickupAnimationLoop()
 			local endPosition = root.Position + Vector3.new(0, 0.5, 0)
 			local pulse = math.sin(alpha * math.pi)
 
-			local position = quadraticBezier(animation.StartPosition, animation.ControlPosition, endPosition, easedAlpha)
+			local position =
+				quadraticBezier(animation.StartPosition, animation.ControlPosition, endPosition, easedAlpha)
 			local rotation = animation.StartCFrame - animation.StartCFrame.Position
 			pivotDropContainer(animation.Container, orb, CFrame.new(position) * rotation, animation.PivotOffset)
 
@@ -1414,7 +1579,8 @@ function TycoonRenderer:ensurePickupAnimationLoop()
 				end
 
 				part.Size = partInfo.StartSize:Lerp(partInfo.TargetSize, easedAlpha) * (1 + pulse * 0.22)
-				part.Transparency = math.clamp(partInfo.StartTransparency + (0.9 - partInfo.StartTransparency) * easedAlpha, 0, 1)
+				part.Transparency =
+					math.clamp(partInfo.StartTransparency + (0.9 - partInfo.StartTransparency) * easedAlpha, 0, 1)
 				if scaleAlpha <= 0.02 then
 					part.Transparency = 1
 				end
@@ -1474,7 +1640,9 @@ function TycoonRenderer:animatePickupOrb(orb: BasePart, container: Instance?)
 		Container = container or orb,
 		Parts = animatedParts,
 		StartCFrame = orb.CFrame,
-		PivotOffset = if container and container:IsA("Model") then orb.CFrame:Inverse() * container:GetPivot() else CFrame.identity,
+		PivotOffset = if container and container:IsA("Model")
+			then orb.CFrame:Inverse() * container:GetPivot()
+			else CFrame.identity,
 		StartPosition = startPosition,
 		ControlPosition = startPosition:Lerp(root.Position, 0.45)
 			+ Vector3.new(0, math.clamp((root.Position - startPosition).Magnitude * 0.45, 2.5, 7), 0),

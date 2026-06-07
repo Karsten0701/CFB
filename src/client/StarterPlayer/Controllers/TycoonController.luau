@@ -63,6 +63,7 @@ local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
 local OTHER_TYCOON_BATCH_SIZE = 1
 local OTHER_TYCOON_BATCH_DELAY = 0.08
 local BUTTON_PRICE_UPDATE_DELAY = 0.04
+local ROBUX_ICON = ""
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
 	if firstArg == localPlayer then
@@ -121,6 +122,24 @@ local function getGamePassKeyFromId(gamePassId: number): string?
 	end
 
 	return nil
+end
+
+local function getRobuxUnitProduct(buttonAmount: number)
+	local product = Monetization.getUnitProduct(buttonAmount)
+	if product then
+		return product
+	end
+
+	local keyedProduct = Monetization.DeveloperProducts["Unit" .. tostring(buttonAmount)]
+	if keyedProduct and keyedProduct.Kind == "Units" then
+		return keyedProduct
+	end
+
+	return nil
+end
+
+local function formatRobuxPrice(price: number?): string
+	return ROBUX_ICON .. FormatUtil.formatNumber(math.max(math.floor(tonumber(price) or 0), 0))
 end
 
 local function retryManaPickup(TycoonService, amount: number, retryIndex: number)
@@ -357,7 +376,19 @@ local function getBillboardTextLabel(billboard: BillboardGui?, labelName: string
 		return nil
 	end
 
-	local label = billboard:FindFirstChild(labelName)
+	local label: Instance?
+	if string.find(labelName, "/", 1, true) then
+		label = billboard
+		for part in string.gmatch(labelName, "[^/]+") do
+			label = label and label:FindFirstChild(part)
+			if not label then
+				return nil
+			end
+		end
+	else
+		label = billboard:FindFirstChild(labelName, true)
+	end
+
 	return if label and label:IsA("TextLabel") then label else nil
 end
 
@@ -366,6 +397,33 @@ local function getButtonAmountLabel(billboard: BillboardGui?): TextLabel?
 		or getBillboardTextLabel(billboard, "Units")
 		or getBillboardTextLabel(billboard, "Rate")
 		or getBillboardTextLabel(billboard, "TextLabel")
+end
+
+local function getGroupRewardTimerLabel(billboard: BillboardGui?): TextLabel?
+	if not billboard then
+		return nil
+	end
+
+	local namedLabel = getBillboardTextLabel(billboard, "Group/Timer")
+		or getBillboardTextLabel(billboard, "Timer")
+		or getBillboardTextLabel(billboard, "Cooldown")
+		or getBillboardTextLabel(billboard, "Status")
+	if namedLabel then
+		return namedLabel
+	end
+
+	for _, descendant in billboard:GetDescendants() do
+		if not descendant:IsA("TextLabel") then
+			continue
+		end
+
+		local lowerText = string.lower(descendant.Text or "")
+		if string.find(lowerText, "join", 1, true) and string.find(lowerText, "group", 1, true) then
+			return descendant
+		end
+	end
+
+	return nil
 end
 
 local function getButtonDisplay(buttonModel: Instance)
@@ -384,7 +442,7 @@ local function getButtonDisplay(buttonModel: Instance)
 	cached.Price = getBillboardTextLabel(billboard, "Price")
 	cached.Rate = getBillboardTextLabel(billboard, "Rate")
 	cached.Reward = getBillboardTextLabel(billboard, "Reward")
-	cached.Timer = getBillboardTextLabel(billboard, "Group/Timer")
+	cached.Timer = getGroupRewardTimerLabel(billboard)
 	cached.DisplayScanned = true
 	buttonDisplayCache[buttonModel] = cached
 	return cached
@@ -511,8 +569,8 @@ local function mergeEntitlementsWithSettings(
 	end
 
 	if type(settings) == "table" then
-		merged.AutoCollect = settings.AutoCollect == true
-		merged.AutoDeposit = settings.AutoDeposit == true
+		merged.AutoCollect = merged.AutoCollect == true and settings.AutoCollect == true
+		merged.AutoDeposit = merged.AutoDeposit == true and settings.AutoDeposit == true
 		merged.ShowVFX = settings.ShowVFX ~= false
 		merged.ShowManaPopup = settings.ShowManaPopup ~= false
 	end
@@ -531,6 +589,12 @@ local function getCurrentUnitSpawnTier(PlayerDataController): number
 	local unitSpawnTierLevel = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
 	local eventBonus = math.max(math.floor(EventUtil.getEffectBonus("UnitSpawnTierBonus", 0)), 0)
 	return math.clamp(RebirthUpgrades.getUnitSpawnTier(unitSpawnTierLevel) + eventBonus, 1, AnimeDroppers.MaxTier)
+end
+
+local function getCurrentMaxButtonCount(PlayerDataController): number
+	local upgrades = PlayerDataController:Get("RebirthUpgrades")
+	local level = if type(upgrades) == "table" then upgrades.BetterMaxButton else 0
+	return RebirthUpgrades.getMaxButtonCount(level)
 end
 
 local function getDepositProcessInterval(): number
@@ -707,8 +771,10 @@ end
 
 function TycoonController:updateButtonPrices(tycoon: Instance)
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local baseUnitCount = math.max(math.floor(PlayerDataController:Get("TotalUnitsPurchased") or 0), 0)
+	local purchasedUnitCount = math.max(math.floor(PlayerDataController:Get("TotalUnitsPurchased") or 0), 0)
+	local unitScaleCount = math.max(math.floor(PlayerDataController:Get("TotalUnitsBought") or 0), purchasedUnitCount)
 	local buyUnitTier = getCurrentUnitSpawnTier(PlayerDataController)
+	local maxButtonCount = getCurrentMaxButtonCount(PlayerDataController)
 	local rateLevel = PlayerDataController:Get("RateLevel") or 0
 	local yen = PlayerDataController:Get("Yen") or 0
 	local buttonModels = buttonModelsByTycoon[tycoon]
@@ -733,23 +799,39 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 
 		local robuxBuyAmount = info.RobuxBuyAmount
 		if robuxBuyAmount then
+			local product = getRobuxUnitProduct(robuxBuyAmount)
+			local displayAmount = math.max(math.floor(tonumber(product and product.Amount) or robuxBuyAmount), 1)
 			local display = getButtonDisplay(child)
+			if display.Price and display.Price.Parent then
+				display.Price.Text = if product then formatRobuxPrice(product.Price) else ""
+			end
+
 			if display.Amount and display.Amount.Parent then
-				display.Amount.Text = getBuyUnitText(robuxBuyAmount, buyUnitTier)
+				display.Amount.Text = getBuyUnitText(displayAmount, buyUnitTier)
 			end
 			continue
 		end
 
 		if info.IsBuyMaxUnits then
-			local maxAmount, maxPrice = Pricing.getMaxAffordableUnitPurchase(baseUnitCount, yen)
+			local maxAmount, maxPrice = 0, 0
+			if maxButtonCount > 0 then
+				maxAmount, maxPrice =
+					Pricing.getMaxAffordableUnitPurchase(purchasedUnitCount, yen, maxButtonCount, buyUnitTier, unitScaleCount)
+			end
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getUnitBulkPrice(baseUnitCount, 1)
-				display.Price.Text = Pricing.formatYen(displayPrice)
+				if maxButtonCount <= 0 then
+					display.Price.Text = "[LOCKED]"
+				else
+					local displayPrice = if maxAmount > 0
+						then maxPrice
+						else Pricing.getUnitBulkPrice(purchasedUnitCount, 1, true, buyUnitTier, unitScaleCount)
+					display.Price.Text = Pricing.formatYen(displayPrice)
+				end
 			end
 
 			if display.Amount and display.Amount.Parent then
-				display.Amount.Text = getBuyUnitText(maxAmount, buyUnitTier)
+				display.Amount.Text = if maxButtonCount <= 0 then "Locked" else getBuyUnitText(maxAmount, buyUnitTier)
 			end
 
 			continue
@@ -759,7 +841,8 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 		if buyAmount then
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				display.Price.Text = Pricing.formatYen(Pricing.getUnitBulkPrice(baseUnitCount, buyAmount))
+				display.Price.Text =
+					Pricing.formatYen(Pricing.getUnitBulkPrice(purchasedUnitCount, buyAmount, false, buyUnitTier, unitScaleCount))
 			end
 
 			if display.Amount and display.Amount.Parent then
@@ -768,15 +851,22 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 		end
 
 		if info.IsRateMax then
-			local maxAmount, maxPrice, maxGain = Pricing.getMaxAffordableRateUpgrade(rateLevel, yen)
+			local maxAmount, maxPrice, maxGain = 0, 0, 0
+			if maxButtonCount > 0 then
+				maxAmount, maxPrice, maxGain = Pricing.getMaxAffordableRateUpgrade(rateLevel, yen, maxButtonCount)
+			end
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getRateUpgradePrice(rateLevel, 1)
-				display.Price.Text = Pricing.formatYen(displayPrice)
+				if maxButtonCount <= 0 then
+					display.Price.Text = "[LOCKED]"
+				else
+					local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getRateUpgradePrice(rateLevel, 1, true)
+					display.Price.Text = Pricing.formatYen(displayPrice)
+				end
 			end
 
 			if display.Rate and display.Rate.Parent then
-				display.Rate.Text = "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
+				display.Rate.Text = if maxButtonCount <= 0 then "Locked" else "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
 			end
 
 			continue
@@ -835,9 +925,9 @@ function TycoonController:performButtonAction(head: BasePart)
 	local TycoonService = Knit.GetService("TycoonService")
 
 	if action.kind == "robux_buy" and action.amount then
-		local product = Monetization.getUnitProduct(action.amount)
+		local product = getRobuxUnitProduct(action.amount)
 		if product then
-			pendingRobuxUnitAmount = action.amount
+			pendingRobuxUnitAmount = math.max(math.floor(tonumber(product.Amount) or action.amount), 1)
 			promptDevProduct(head, product.ProductId)
 		elseif not product then
 			warn("[TycoonController] No dev product for robux unit amount:", action.amount)
@@ -877,12 +967,24 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "buy_max" then
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		if getCurrentMaxButtonCount(PlayerDataController) <= 0 then
+			SoundUtil.Error()
+			local MainGuiController = Knit.GetController("MainGuiController")
+			MainGuiController:ShowMaxButtonLockedMessage()
+			return
+		end
+
 		TycoonService:BuyMaxUnits(action.buttonName):andThen(function(success, err, boughtAmount)
 			if success then
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowBoughtUnitsMessage(boughtAmount or 0)
 			elseif err == "Not enough yen" then
 				SoundUtil.Error()
+			elseif err == "Max button locked" then
+				SoundUtil.Error()
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowMaxButtonLockedMessage()
 			elseif err and err ~= "Not enough yen" then
 				warn("[TycoonController] Max buy failed:", err)
 			end
@@ -907,12 +1009,24 @@ function TycoonController:performButtonAction(head: BasePart)
 			end
 		end)
 	elseif action.kind == "rate_max" then
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		if getCurrentMaxButtonCount(PlayerDataController) <= 0 then
+			SoundUtil.Error()
+			local MainGuiController = Knit.GetController("MainGuiController")
+			MainGuiController:ShowMaxButtonLockedMessage()
+			return
+		end
+
 		TycoonService:UpgradeRateMax(action.buttonName):andThen(function(success, err, amount, gain)
 			if success then
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowRateUpgradeMessage(gain or 0, amount or 0)
 			elseif err == "Not enough yen" then
 				SoundUtil.Error()
+			elseif err == "Max button locked" then
+				SoundUtil.Error()
+				local MainGuiController = Knit.GetController("MainGuiController")
+				MainGuiController:ShowMaxButtonLockedMessage()
 			elseif err and err ~= "Not enough yen" then
 				warn("[TycoonController] Max rate upgrade failed:", err)
 			end
@@ -1132,6 +1246,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 
 	local renderer = TycoonRenderer.new(tycoon, janitor, onPickup)
 	renderer:setIsOwn(isOwn)
+	renderer:setEntitlements({})
 	if isOwn then
 		local CapsuleController = Knit.GetController("CapsuleController")
 		renderer:setOnManaDropSpawned(function(dropPart: BasePart, onResult: (boolean) -> (), isCancelled: () -> boolean)
@@ -1249,6 +1364,10 @@ function TycoonController:setupOwnTycoon(): boolean
 		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
+	PlayerDataController:Observe("TotalUnitsBought", function()
+		self:scheduleButtonPriceUpdate(tycoon)
+	end, janitor)
+
 	PlayerDataController:Observe({ "RebirthUpgrades", "UnitSpawnTier" }, function()
 		table.clear(buyUnitTierCache)
 		self:scheduleButtonPriceUpdate(tycoon)
@@ -1257,6 +1376,10 @@ function TycoonController:setupOwnTycoon(): boolean
 
 	PlayerDataController:Observe({ "RebirthUpgrades", "MoreMana" }, function()
 		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe({ "RebirthUpgrades", "BetterMaxButton" }, function()
+		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
 	PlayerDataController:Observe({ "PurchasedProducts", "DoubleMana" }, function()
@@ -1293,6 +1416,21 @@ function TycoonController:setupOwnTycoon(): boolean
 			entry.depositVFX:setProcessorActive(deposit > 0, getDepositProcessInterval())
 		end
 	end, janitor)
+
+	PlayerDataController:Observe({ "Settings", "AutoCollect" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe({ "Settings", "AutoDeposit" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	self:applyEntitlementsToOwnTycoon()
+	task.defer(function()
+		if renderers[tycoon] then
+			self:applyEntitlementsToOwnTycoon()
+		end
+	end)
 
 	return true
 end

@@ -1,7 +1,7 @@
 return {
 	GlobalEpochSeconds = 0,
 	DefaultDurationSeconds = 5 * 60,
-	MinCooldownSeconds = 2 * 60,
+	MinCooldownSeconds = 3 * 60,
 	MaxCooldownSeconds = 5 * 60,
 	CooldownSeed = 140269809669116,
 	EmptyWindowName = "Preparing next event",
@@ -60,7 +60,7 @@ return {
 			Icon = "rbxassetid://115755999549909",
 			VFXKey = "ThunderclapRush",
 			DurationSeconds = 4 * 60,
-			Description = "1.5x drop speed for 5 minutes.",
+			Description = "1.5x drop speed for 4 minutes.",
 			Effects = {
 				DropSpeedMultiplier = 1.5,
 			},
@@ -82,7 +82,7 @@ return {
 			Icon = "rbxassetid://121064932379247",
 			VFXKey = "DragonRadarSurge",
 			DurationSeconds = 2 * 60,
-			Description = "5x capsule spawn chance for 5 minutes.",
+			Description = "5x capsule spawn chance for 2 minutes.",
 			Effects = {
 				CapsuleSpawnChanceMultiplier = 5,
 			},
@@ -104,7 +104,7 @@ return {
 			Icon = "rbxassetid://96573285096968",
 			VFXKey = "SpiritMarket",
 			DurationSeconds = 3 * 60,
-			Description = "1.5x Yen for 5 minutes.",
+			Description = "1.5x Yen for 3 minutes.",
 			Effects = {
 				YenMultiplier = 1.5,
 			},
@@ -115,7 +115,7 @@ return {
 			Icon = "rbxassetid://121705665379355",
 			VFXKey = "CursedEnergyLeak",
 			DurationSeconds = 3 * 60,
-			Description = "1.5x Mana for 5 minutes.",
+			Description = "1.5x Mana for 3 minutes.",
 			Effects = {
 				ManaMultiplier = 1.5,
 			},

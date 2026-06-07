@@ -46,7 +46,7 @@ local Tiers = {
 		DisplayName = "Zaro",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://81864711669175",
-		DropValue = 620,
+		DropValue = 490,
 		RequiredTier1 = 81,
 		EstimatedTier1Cost = 16605,
 		MergeInto = 6,
@@ -56,7 +56,7 @@ local Tiers = {
 		DisplayName = "Danji",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://89486841791029",
-		DropValue = 3575,
+		DropValue = 2250,
 		RequiredTier1 = 243,
 		EstimatedTier1Cost = 148230,
 		MergeInto = 7,
@@ -66,7 +66,7 @@ local Tiers = {
 		DisplayName = "Saikama",
 		AnimeGroup = "One Punch",
 		IconId = "rbxassetid://75376321796564",
-		DropValue = 14645,
+		DropValue = 9960,
 		RequiredTier1 = 729,
 		EstimatedTier1Cost = 1330425,
 		MergeInto = 8,
@@ -76,7 +76,7 @@ local Tiers = {
 		DisplayName = "Meliados",
 		AnimeGroup = "Sins",
 		IconId = "rbxassetid://113520628907754",
-		DropValue = 71335,
+		DropValue = 45647,
 		RequiredTier1 = 2187,
 		EstimatedTier1Cost = 11962890,
 		MergeInto = 9,
@@ -86,7 +86,7 @@ local Tiers = {
 		DisplayName = "Duke",
 		AnimeGroup = "Heroes",
 		IconId = "rbxassetid://104188303861136",
-		DropValue = 341410,
+		DropValue = 211912,
 		RequiredTier1 = 6561,
 		EstimatedTier1Cost = 107633205,
 		MergeInto = 10,
@@ -96,7 +96,7 @@ local Tiers = {
 		DisplayName = "Midira",
 		AnimeGroup = "Ninja",
 		IconId = "rbxassetid://85526664824938",
-		DropValue = 1638055,
+		DropValue = 863604,
 		RequiredTier1 = 19683,
 		EstimatedTier1Cost = 968600430,
 		MergeInto = 11,
@@ -106,7 +106,7 @@ local Tiers = {
 		DisplayName = "Meguma",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://83965792580462",
-		DropValue = 4571876,
+		DropValue = 2158760,
 		RequiredTier1 = 39366,
 		EstimatedTier1Cost = 3874303305,
 		MergeInto = 12,
@@ -116,7 +116,7 @@ local Tiers = {
 		DisplayName = "Juyi",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://80336807101668",
-		DropValue = 14858597,
+		DropValue = 5288962,
 		RequiredTier1 = 78732,
 		EstimatedTier1Cost = 15497016390,
 		MergeInto = 13,
@@ -126,7 +126,7 @@ local Tiers = {
 		DisplayName = "Rumira",
 		AnimeGroup = "Isekai",
 		IconId = "rbxassetid://114826765552479",
-		DropValue = 48290440,
+		DropValue = 12693508,
 		RequiredTier1 = 157464,
 		EstimatedTier1Cost = 61987671900,
 		MergeInto = 14,
@@ -136,7 +136,7 @@ local Tiers = {
 		DisplayName = "Kullia",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://112624919123182",
-		DropValue = 156943930,
+		DropValue = 29195070,
 		RequiredTier1 = 314928,
 		EstimatedTier1Cost = 247949900280,
 		MergeInto = 15,
@@ -146,7 +146,7 @@ local Tiers = {
 		DisplayName = "Jansi",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://77261310168633",
-		DropValue = 510067773,
+		DropValue = 67148661,
 		RequiredTier1 = 629856,
 		EstimatedTier1Cost = 991798026480,
 		MergeInto = 16,
@@ -156,7 +156,7 @@ local Tiers = {
 		DisplayName = "Vageta",
 		AnimeGroup = "Saiyans",
 		IconId = "rbxassetid://103694110031649",
-		DropValue = 1657720262,
+		DropValue = 154441921,
 		RequiredTier1 = 1259712,
 		EstimatedTier1Cost = 3.96718895664e12,
 		MergeInto = 17,
@@ -166,7 +166,7 @@ local Tiers = {
 		DisplayName = "Yigu",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://73644041899341",
-		DropValue = 5387590852,
+		DropValue = 355216308,
 		RequiredTier1 = 2519424,
 		EstimatedTier1Cost = 1.5868749528e13,
 		MergeInto = 18,
@@ -176,7 +176,7 @@ local Tiers = {
 		DisplayName = "Mikama",
 		AnimeGroup = "Hunters",
 		IconId = "rbxassetid://117136473255872",
-		DropValue = 17509670269,
+		DropValue = 836007723,
 		RequiredTier1 = 5038848,
 		EstimatedTier1Cost = 6.34749855149e13,
 		MergeInto = 19,
@@ -186,7 +186,7 @@ local Tiers = {
 		DisplayName = "Makisa",
 		AnimeGroup = "Scouts",
 		IconId = "rbxassetid://125234501254599",
-		DropValue = 56906428374,
+		DropValue = 1904250223,
 		RequiredTier1 = 10077696,
 		EstimatedTier1Cost = 2.53899916865e14,
 		MergeInto = 20,
@@ -196,7 +196,7 @@ local Tiers = {
 		DisplayName = "Gibamara",
 		AnimeGroup = "Shinobi",
 		IconId = "rbxassetid://139146857043514",
-		DropValue = 184945892216,
+		DropValue = 4343748518,
 		RequiredTier1 = 20155392,
 		EstimatedTier1Cost = 1.01559961707e15,
 		MergeInto = 21,
@@ -206,7 +206,7 @@ local Tiers = {
 		DisplayName = "Ben",
 		AnimeGroup = "Sins",
 		IconId = "rbxassetid://70622283643922",
-		DropValue = 601074149702,
+		DropValue = 10018002272,
 		RequiredTier1 = 40310784,
 		EstimatedTier1Cost = 4.06239836751e15,
 		MergeInto = 22,
@@ -216,7 +216,7 @@ local Tiers = {
 		DisplayName = "Guko",
 		AnimeGroup = "Saiyans",
 		IconId = "rbxassetid://114526172950539",
-		DropValue = 1.95349098653e12,
+		DropValue = 24724006816,
 		RequiredTier1 = 80621568,
 		EstimatedTier1Cost = 1.62495932685e16,
 		MergeInto = 23,
@@ -226,7 +226,7 @@ local Tiers = {
 		DisplayName = "Kikoshibo",
 		AnimeGroup = "Slayers",
 		IconId = "rbxassetid://92544163407156",
-		DropValue = 6.34884570623e12,
+		DropValue = 551524910839,
 		RequiredTier1 = 161243136,
 		EstimatedTier1Cost = 6.49983726709e16,
 		MergeInto = 24,
@@ -236,7 +236,7 @@ local Tiers = {
 		DisplayName = "Ichagi",
 		AnimeGroup = "Soul Reapers",
 		IconId = "rbxassetid://79641026591513",
-		DropValue = 2.06337485452e13,
+		DropValue = 126269750349,
 		RequiredTier1 = 322486272,
 		EstimatedTier1Cost = 2.59993489877e17,
 		MergeInto = 25,
@@ -246,7 +246,7 @@ local Tiers = {
 		DisplayName = "Kaptain Live",
 		AnimeGroup = "Scouts",
 		IconId = "rbxassetid://123475869659213",
-		DropValue = 6.7059682772e13,
+		DropValue = 280360269214,
 		RequiredTier1 = 644972544,
 		EstimatedTier1Cost = 1.0399739579e18,
 		MergeInto = 26,
@@ -426,10 +426,10 @@ local BalanceSettings = {
 		[10] = 126,
 	},
 	DropValueBase = 1,
-	ThreeMergeDropValueGrowth = 4.8,
-	TwoMergeDropValueGrowth = 2.65,
-	LategameDropValueGrowth = 2.6,
-	EndgameDropValueGrowth = 2.65,
+	ThreeMergeDropValueGrowth = 4.5,
+	TwoMergeDropValueGrowth = 2.8,
+	LategameDropValueGrowth = 2.8,
+	EndgameDropValueGrowth = 2.8,
 }
 
 local MergeSettings = {
@@ -458,28 +458,24 @@ end
 
 local function getDropValueGrowth(tier: number): number
 	if tier >= 36 then
-		return BalanceSettings.EndgameDropValueGrowth or 3.65
+		return BalanceSettings.EndgameDropValueGrowth or 2.8
 	end
 
 	if tier >= 26 then
-		return BalanceSettings.LategameDropValueGrowth or 3.4
+		return BalanceSettings.LategameDropValueGrowth or 2.8
 	end
 
 	if tier >= (MergeSettings.FromTier or 10) + 1 then
-		return BalanceSettings.TwoMergeDropValueGrowth or 3.25
+		return BalanceSettings.TwoMergeDropValueGrowth or 2.8
 	end
 
-	return BalanceSettings.ThreeMergeDropValueGrowth or 4.8
+	return BalanceSettings.ThreeMergeDropValueGrowth or 4.5
 end
 
 local function getDropValue(tier: number): number
 	tier = math.max(math.floor(tonumber(tier) or 1), 1)
-	local dropValue = math.max(tonumber(BalanceSettings.DropValueBase) or 1, 1)
-	for nextTier = 2, tier do
-		dropValue = math.max(math.floor(dropValue * getDropValueGrowth(nextTier) + 0.5), dropValue + 1)
-	end
-
-	return dropValue
+	local tierData = Tiers[tier]
+	return math.max(tonumber(tierData and tierData.DropValue) or BalanceSettings.DropValueBase or 1, 1)
 end
 
 for tier, tierData in Tiers do
@@ -490,7 +486,6 @@ for tier, tierData in Tiers do
 	tierData.RequiredTier1 = requiredTier1
 	tierData.EstimatedTier1Cost =
 		math.floor(requiredTier1 * unitPriceBase + unitPriceIncrement * requiredTier1 * (requiredTier1 - 1) / 2)
-	tierData.DropValue = getDropValue(tier)
 end
 
 return {

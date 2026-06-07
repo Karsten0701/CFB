@@ -397,6 +397,7 @@ function DepositVFX:pulseBeam(force: boolean?)
 	beam.CanTouch = false
 	beam.CanQuery = false
 	beam.Transparency = 0
+	beam.CastShadow = false
 	beam.Size = Vector3.new(0.25, BEAM_THICKNESS, BEAM_THICKNESS)
 	beam.Parent = self.folder
 

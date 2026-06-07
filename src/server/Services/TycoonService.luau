@@ -13,6 +13,7 @@ local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local TycoonUtil = require(ReplicatedStorage.Shared.Features.Tycoon.TycoonUtil)
 local Knit = require(ReplicatedStorage.Packages.knit)
+local TierUnlockAnalytics = require(script.Parent.Parent.Features.Analytics.TierUnlockAnalytics)
 
 local TycoonService = Knit.CreateService({
 	Name = "TycoonService",
@@ -307,42 +308,6 @@ local function hasRequiredRebirthTier(units: { { Tier: number } }, requiredTier:
 	return false
 end
 
-local function getRebirthTokenReward(rebirthNumber: number): number
-	rebirthNumber = math.max(math.floor(rebirthNumber), 1)
-	local rebirthConfig = TycoonConfig.Rebirth or {}
-	local tokensPerRebirth = rebirthConfig.TokensPerRebirth
-	if type(tokensPerRebirth) == "table" then
-		local configuredReward = tokensPerRebirth[rebirthNumber]
-		if configuredReward == nil then
-			local fallbackRebirth = 0
-			for configuredRebirth in tokensPerRebirth do
-				local numericRebirth = math.floor(tonumber(configuredRebirth) or 0)
-				if numericRebirth > fallbackRebirth and numericRebirth <= rebirthNumber then
-					fallbackRebirth = numericRebirth
-					configuredReward = tokensPerRebirth[configuredRebirth]
-				end
-			end
-		end
-
-		if configuredReward ~= nil then
-			return math.max(math.floor(tonumber(configuredReward) or 0), 0)
-		end
-	elseif tonumber(tokensPerRebirth) then
-		return math.max(math.floor(tonumber(tokensPerRebirth) or 0), 0)
-	end
-
-	local previousReward = 1
-	local reward = 1
-
-	for _ = 2, rebirthNumber do
-		local nextReward = previousReward + reward
-		previousReward = reward
-		reward = nextReward
-	end
-
-	return reward
-end
-
 local function getGroupRewardAmount(units: { { Tier: number } }): number
 	local groupRewardConfig = TycoonConfig.GroupReward or {}
 	local baseYen = tonumber(groupRewardConfig.BaseYen) or 500
@@ -390,9 +355,17 @@ local function getManaMultiplier(player: Player): number
 	return multiplier
 end
 
-local function getDropInterval(): number
+local function getDropInterval(player: Player?): number
+	local gamePassMultiplier = 1
+	if player then
+		local MonetizationService = Knit.GetService("MonetizationService")
+		if MonetizationService:OwnsGamePass(player, "DoubleDropSpeed") then
+			gamePassMultiplier = 2
+		end
+	end
+
 	local dropSpeedMultiplier = math.max(EventUtil.getEffectMultiplier("DropSpeedMultiplier", 1), 0.1)
-	return DROP_INTERVAL / dropSpeedMultiplier
+	return DROP_INTERVAL / (gamePassMultiplier * dropSpeedMultiplier)
 end
 
 local function getMaxMutationMultiplier(): number
@@ -511,7 +484,12 @@ end
 
 local function shouldAutoDeposit(PlayerDataService, player: Player): boolean
 	local settings = getPlayerSettings(PlayerDataService, player)
-	return settings.AutoDeposit == true
+	if settings.AutoDeposit ~= true then
+		return false
+	end
+
+	local MonetizationService = Knit.GetService("MonetizationService")
+	return MonetizationService:OwnsGamePass(player, "AutoDeposit")
 end
 
 local function getUnitSpawnTier(PlayerDataService, player: Player): number
@@ -519,6 +497,12 @@ local function getUnitSpawnTier(PlayerDataService, player: Player): number
 	local level = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
 	local eventBonus = math.max(math.floor(EventUtil.getEffectBonus("UnitSpawnTierBonus", 0)), 0)
 	return math.clamp(RebirthUpgrades.getUnitSpawnTier(level) + eventBonus, 1, AnimeDroppers.MaxTier)
+end
+
+local function getMaxButtonCount(PlayerDataService, player: Player): number
+	local upgrades = PlayerDataService:Get(player, "RebirthUpgrades")
+	local level = if type(upgrades) == "table" then upgrades.BetterMaxButton else 0
+	return RebirthUpgrades.getMaxButtonCount(level)
 end
 
 local function getRebirthStarterUnits(PlayerDataService, player: Player): { { Tier: number } }
@@ -544,8 +528,8 @@ local function getRebirthStarterUnits(PlayerDataService, player: Player): { { Ti
 	return units
 end
 
-local function getMaxPickupRate(units: { { Tier: number } }): number
-	local dropInterval = getDropInterval()
+local function getMaxPickupRate(player: Player, units: { { Tier: number } }): number
+	local dropInterval = getDropInterval(player)
 	local total = 0
 	for _, unit in units do
 		local tierData = AnimeDroppers.Tiers[unit.Tier]
@@ -662,8 +646,8 @@ function TycoonService.Client:CollectMana(player: Player, amount: number): (bool
 	end
 
 	local units = PlayerDataService:GetUnits(player)
-	local maxRate = getMaxPickupRate(units)
-	local dropInterval = getDropInterval()
+	local maxRate = getMaxPickupRate(player, units)
+	local dropInterval = getDropInterval(player)
 	local now = os.clock()
 	local lastUpdated = pickupBudgetUpdatedAt[player] or now
 	local elapsed = math.max(now - lastUpdated, 0)
@@ -881,6 +865,49 @@ function TycoonService:SellAllProcessor(player: Player): number
 	return deposit
 end
 
+function TycoonService:AdminResetDeposit(player: Player)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	pendingBagMana[player] = nil
+	pendingDepositMana[player] = nil
+	manaFlushScheduled[player] = nil
+	processElapsed[player] = 0
+
+	local resetRate = TycoonConfig.Rebirth.ResetRate or 1
+	PlayerDataService:Set(player, "ManaInBag", 0)
+	PlayerDataService:Set(player, "ManaInDeposit", 0)
+	PlayerDataService:Set(player, "RateLevel", 0)
+	PlayerDataService:Set(player, "Rate", resetRate)
+
+	return resetRate
+end
+
+function TycoonService:ApplyRebirthProgressReset(player: Player)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local rebirthConfig = TycoonConfig.Rebirth
+	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
+	local starterUnits = getRebirthStarterUnits(PlayerDataService, player)
+
+	PlayerDataService:Set(player, "Yen", resetYen)
+	PlayerDataService:Set(player, "ManaInBag", 0)
+	PlayerDataService:Set(player, "ManaInDeposit", 0)
+	PlayerDataService:Set(player, "TotalUnitsPurchased", 0)
+	PlayerDataService:Set(player, "RateLevel", 0)
+	PlayerDataService:Set(player, "Rate", rebirthConfig.ResetRate or 1)
+	PlayerDataService:SetUnits(player, starterUnits, { resetUnlocks = true })
+
+	pendingBagMana[player] = nil
+	pendingDepositMana[player] = nil
+	manaFlushScheduled[player] = nil
+	processElapsed[player] = 0
+	clearPlayerCapsuleState(player, true)
+	pickupBlockedUntil[player] = os.clock() + 1
+	resetPickupBudgetTimer(player)
+end
+
 function TycoonService.Client:AcceptTutorial(player: Player): (boolean, string?)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
@@ -945,6 +972,11 @@ function TycoonService.Client:CompleteTutorial(player: Player): (boolean, string
 	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Completed" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Step" }, "Completed")
+	if PlayerDataService:Get(player, { "Analytics", "TutorialCompleteFunnelLogged" }) ~= true then
+		if TierUnlockAnalytics.logTutorialCompleted(player) then
+			PlayerDataService:Set(player, { "Analytics", "TutorialCompleteFunnelLogged" }, true)
+		end
+	end
 	return true
 end
 
@@ -1029,7 +1061,9 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 
 	local currentUnits = PlayerDataService:GetUnits(player)
 	local purchasedUnitCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0)
-	local price = Pricing.getUnitBulkPrice(purchasedUnitCount, amount)
+	local unitScaleCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsBought") or 0), purchasedUnitCount)
+	local spawnTier = getUnitSpawnTier(PlayerDataService, player)
+	local price = Pricing.getUnitBulkPrice(purchasedUnitCount, amount, false, spawnTier, unitScaleCount)
 	if not PlayerDataService:TrySpendYen(player, price) then
 		return false, "Not enough yen"
 	end
@@ -1038,11 +1072,15 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 		currentUnits,
 		amount,
 		shouldAutoMergeUnitBuy(PlayerDataService, player, #currentUnits, amount),
-		getUnitSpawnTier(PlayerDataService, player)
+		spawnTier
 	)
 
 	PlayerDataService:SetUnits(player, units)
-	PlayerDataService:Set(player, "TotalUnitsPurchased", purchasedUnitCount + amount)
+	PlayerDataService:Set(
+		player,
+		"TotalUnitsPurchased",
+		math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0) + amount
+	)
 
 	return true
 end
@@ -1068,8 +1106,16 @@ function TycoonService.Client:BuyMaxUnits(player: Player, buttonName: string): (
 
 	local currentUnits = PlayerDataService:GetUnits(player)
 	local purchasedUnitCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0)
+	local unitScaleCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsBought") or 0), purchasedUnitCount)
 	local yen = PlayerDataService:Get(player, "Yen") or 0
-	local amount, price = Pricing.getMaxAffordableUnitPurchase(purchasedUnitCount, yen)
+	local maxButtonCount = getMaxButtonCount(PlayerDataService, player)
+	if maxButtonCount <= 0 then
+		return false, "Max button locked"
+	end
+
+	local spawnTier = getUnitSpawnTier(PlayerDataService, player)
+	local amount, price =
+		Pricing.getMaxAffordableUnitPurchase(purchasedUnitCount, yen, maxButtonCount, spawnTier, unitScaleCount)
 	if amount <= 0 or price <= 0 then
 		return false, "Not enough yen"
 	end
@@ -1078,10 +1124,14 @@ function TycoonService.Client:BuyMaxUnits(player: Player, buttonName: string): (
 		return false, "Not enough yen"
 	end
 
-	local units = addTierOneUnits(currentUnits, amount, true, getUnitSpawnTier(PlayerDataService, player))
+	local units = addTierOneUnits(currentUnits, amount, true, spawnTier)
 
 	PlayerDataService:SetUnits(player, units)
-	PlayerDataService:Set(player, "TotalUnitsPurchased", purchasedUnitCount + amount)
+	PlayerDataService:Set(
+		player,
+		"TotalUnitsPurchased",
+		math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0) + amount
+	)
 
 	return true, nil, amount
 end
@@ -1132,33 +1182,17 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 		return false, "Required tier missing"
 	end
 
-	local rebirthConfig = TycoonConfig.Rebirth
 	local nextRebirths = rebirths + 1
-	local tokenReward = getRebirthTokenReward(nextRebirths)
-	local currentTokens = math.max(math.floor(PlayerDataService:Get(player, "RebirthTokens") or 0), 0)
-	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
-	local starterUnits = getRebirthStarterUnits(PlayerDataService, player)
+	local tokenReward = PlayerDataService:GetRebirthTokenReward(nextRebirths)
 	PlayerDataService:Set(player, "Rebirths", nextRebirths)
-	PlayerDataService:Set(player, "RebirthTokens", currentTokens + tokenReward)
-	PlayerDataService:Set(player, "Yen", resetYen)
-	PlayerDataService:Set(player, "ManaInBag", 0)
-	PlayerDataService:Set(player, "ManaInDeposit", 0)
-	PlayerDataService:Set(player, "TotalUnitsPurchased", 0)
-	PlayerDataService:Set(player, "RateLevel", 0)
-	PlayerDataService:Set(player, "Rate", rebirthConfig.ResetRate or 1)
-	PlayerDataService:SetUnits(player, starterUnits)
-	pendingBagMana[player] = nil
-	pendingDepositMana[player] = nil
-	manaFlushScheduled[player] = nil
-	clearPlayerCapsuleState(player, true)
-	pickupBlockedUntil[player] = os.clock() + 1
-	resetPickupBudgetTimer(player)
+	PlayerDataService:GrantRebirthTokenReward(player, nextRebirths)
+	self:ApplyRebirthProgressReset(player)
 
 	return true, nil, nextRebirths, tokenReward
 end
 
 function TycoonService.Client:BuyRebirthUpgrade(player: Player, upgradeKey: string): (boolean, string?, number?)
-	if upgradeKey ~= "UnitSpawnTier" and upgradeKey ~= "MoreMana" then
+	if upgradeKey ~= "UnitSpawnTier" and upgradeKey ~= "MoreMana" and upgradeKey ~= "BetterMaxButton" then
 		return false, "Invalid upgrade"
 	end
 
@@ -1180,13 +1214,22 @@ function TycoonService.Client:BuyRebirthUpgrade(player: Player, upgradeKey: stri
 		return false, "Maxed"
 	end
 
-	local tokens = math.max(math.floor(PlayerDataService:Get(player, "RebirthTokens") or 0), 0)
-	if tokens < cost then
-		return false, "Not enough tokens"
+	local config = RebirthUpgrades[upgradeKey]
+	local kind = if type(config) == "table" then config.kind else "RebirthTokens"
+	if kind == "Yen" then
+		if not PlayerDataService:TrySpendYen(player, cost) then
+			return false, "Not enough yen"
+		end
+	else
+		local tokens = math.max(math.floor(PlayerDataService:Get(player, "RebirthTokens") or 0), 0)
+		if tokens < cost then
+			return false, "Not enough tokens"
+		end
+
+		PlayerDataService:Set(player, "RebirthTokens", tokens - cost)
 	end
 
 	local nextLevel = currentLevel + 1
-	PlayerDataService:Set(player, "RebirthTokens", tokens - cost)
 	PlayerDataService:Set(player, { "RebirthUpgrades", upgradeKey }, nextLevel)
 
 	if upgradeKey == "UnitSpawnTier" then
@@ -1264,7 +1307,12 @@ function TycoonService.Client:UpgradeRateMax(player: Player, buttonName: string)
 
 	local rateLevel = PlayerDataService:Get(player, "RateLevel")
 	local yen = PlayerDataService:Get(player, "Yen") or 0
-	local amount, price, gain = Pricing.getMaxAffordableRateUpgrade(rateLevel, yen)
+	local maxButtonCount = getMaxButtonCount(PlayerDataService, player)
+	if maxButtonCount <= 0 then
+		return false, "Max button locked"
+	end
+
+	local amount, price, gain = Pricing.getMaxAffordableRateUpgrade(rateLevel, yen, maxButtonCount)
 	if amount <= 0 or price <= 0 then
 		return false, "Not enough yen"
 	end
@@ -1556,14 +1604,33 @@ function TycoonService:KnitStart()
 		self:AssignTycoon(player)
 	end)
 
+	local shuttingDown = false
+	local processConnection: RBXScriptConnection?
+
+	game:BindToClose(function()
+		shuttingDown = true
+		if processConnection then
+			processConnection:Disconnect()
+			processConnection = nil
+		end
+	end)
+
 	Players.PlayerRemoving:Connect(function(player)
+		if shuttingDown then
+			return
+		end
+
 		clearPlayerCapsuleState(player, true)
 		self:ReleaseTycoon(player)
 	end)
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 
-	RunService.Heartbeat:Connect(function(dt)
+	processConnection = RunService.Heartbeat:Connect(function(dt)
+		if shuttingDown then
+			return
+		end
+
 		for _, player in Players:GetPlayers() do
 			if not playerTycoons[player] then
 				continue

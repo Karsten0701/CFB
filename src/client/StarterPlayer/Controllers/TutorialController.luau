@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
@@ -67,6 +68,9 @@ local secondCollectBaselineMana: number? = nil
 local secondCollectBaselineYen: number? = nil
 local secondDepositBaselineDeposit: number? = nil
 local secondDepositBaselineYen: number? = nil
+local tutorialFingerTweens: { [GuiObject]: { Tween: Tween, OriginalPosition: UDim2 } } = {}
+local tutorialFingerConnections: { RBXScriptConnection } = {}
+local dismissedRebirthButtonFingerStep: string? = nil
 
 local function getTutorialConfig(): { [string]: any }
 	return TycoonConfig.Tutorial or {}
@@ -483,6 +487,165 @@ local function getTextLabelByNames(root: Instance?, names: { string }): TextLabe
 	return nil
 end
 
+local function getMainGui(): ScreenGui?
+	local playerGui = localPlayer:FindFirstChild("PlayerGui")
+	local mainGui = playerGui and playerGui:FindFirstChild("MainGui")
+	return if mainGui and mainGui:IsA("ScreenGui") then mainGui else nil
+end
+
+local function getGuiObjectByPath(root: Instance?, path: { string }): GuiObject?
+	local current = root
+	for _, name in path do
+		current = current and (current:FindFirstChild(name) or current:FindFirstChild(name, true))
+		if not current then
+			return nil
+		end
+	end
+
+	return if current and current:IsA("GuiObject") then current else nil
+end
+
+local function getTutorialFingerByPath(path: { string }): GuiObject?
+	return getGuiObjectByPath(getMainGui(), path)
+end
+
+local function getRebirthFrame(): GuiObject?
+	local mainGui = getMainGui()
+	local frame = mainGui and mainGui:FindFirstChild("RebirthFrame")
+	return if frame and frame:IsA("GuiObject") then frame else nil
+end
+
+local function getUpgradesFrame(): GuiObject?
+	local mainGui = getMainGui()
+	local frame = mainGui and mainGui:FindFirstChild("UpgradesFrame")
+	return if frame and frame:IsA("GuiObject") then frame else nil
+end
+
+local function getRebirthButton(): GuiObject?
+	return getGuiObjectByPath(getMainGui(), { "RightSide", "RebirthButton" })
+end
+
+local function setTutorialFingerActive(finger: GuiObject?, active: boolean, offset: UDim2)
+	if not finger then
+		return
+	end
+
+	local activeTween = tutorialFingerTweens[finger]
+	if not active then
+		if activeTween then
+			activeTween.Tween:Cancel()
+			finger.Position = activeTween.OriginalPosition
+			tutorialFingerTweens[finger] = nil
+		end
+		finger.Visible = false
+		return
+	end
+
+	finger.Visible = true
+	if activeTween then
+		return
+	end
+
+	local originalPosition = finger.Position
+	local tween = TweenService:Create(
+		finger,
+		TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Position = originalPosition + offset }
+	)
+	tutorialFingerTweens[finger] = {
+		Tween = tween,
+		OriginalPosition = originalPosition,
+	}
+	tween:Play()
+end
+
+local function clearTutorialFingers()
+	for finger, data in tutorialFingerTweens do
+		data.Tween:Cancel()
+		if finger and finger.Parent then
+			finger.Position = data.OriginalPosition
+			finger.Visible = false
+		end
+	end
+
+	table.clear(tutorialFingerTweens)
+
+	for _, connection in tutorialFingerConnections do
+		connection:Disconnect()
+	end
+	table.clear(tutorialFingerConnections)
+	dismissedRebirthButtonFingerStep = nil
+end
+
+local connectRebirthTutorialFingerDismiss
+
+local function updateRebirthTutorialFingers()
+	if #tutorialFingerConnections <= 0 then
+		connectRebirthTutorialFingerDismiss()
+	end
+
+	local isTutorialActive = currentStep ~= "Prompt" and currentStep ~= "Completed" and currentStep ~= "Cancelled"
+	local rebirthFrame = getRebirthFrame()
+	local upgradesFrame = getUpgradesFrame()
+	local rebirthFrameVisible = rebirthFrame and rebirthFrame.Visible == true
+	local upgradesFrameVisible = upgradesFrame and upgradesFrame.Visible == true
+
+	local rebirthButtonFinger = getTutorialFingerByPath({ "RightSide", "RebirthButton", "TutorialFinger" })
+	local acceptButtonFinger = getTutorialFingerByPath({ "RebirthFrame", "AcceptButton", "TutorialFinger" })
+	local upgradesButtonFinger = getTutorialFingerByPath({ "RebirthFrame", "Upgrades", "TutorialFinger" })
+	local unitSpawnTierBuyFinger =
+		getTutorialFingerByPath({ "UpgradesFrame", "UnitSpawnTier", "BuyButton", "TutorialFinger" })
+
+	local shouldShowRebirthButton = isTutorialActive
+		and (currentStep == "Rebirth" or currentStep == "OpenUpgrades")
+		and not rebirthFrameVisible
+		and dismissedRebirthButtonFingerStep ~= currentStep
+
+	setTutorialFingerActive(rebirthButtonFinger, shouldShowRebirthButton, UDim2.fromOffset(14, 0))
+	setTutorialFingerActive(
+		acceptButtonFinger,
+		isTutorialActive and currentStep == "Rebirth" and rebirthFrameVisible,
+		UDim2.fromOffset(0, -12)
+	)
+	setTutorialFingerActive(
+		upgradesButtonFinger,
+		isTutorialActive and currentStep == "OpenUpgrades" and rebirthFrameVisible,
+		UDim2.fromOffset(0, -10)
+	)
+	setTutorialFingerActive(
+		unitSpawnTierBuyFinger,
+		isTutorialActive and currentStep == "UpgradeUnitSpawnTier" and upgradesFrameVisible,
+		UDim2.fromOffset(0, -10)
+	)
+end
+
+function connectRebirthTutorialFingerDismiss()
+	for _, connection in tutorialFingerConnections do
+		connection:Disconnect()
+	end
+	table.clear(tutorialFingerConnections)
+
+	local rebirthButton = getRebirthButton()
+	if not rebirthButton then
+		return
+	end
+
+	local clickable = if rebirthButton:IsA("GuiButton") then rebirthButton else rebirthButton:FindFirstChildWhichIsA("GuiButton", true)
+	if not clickable then
+		return
+	end
+
+	table.insert(
+		tutorialFingerConnections,
+		clickable.Activated:Connect(function()
+			if currentStep == "Rebirth" or currentStep == "OpenUpgrades" then
+				dismissedRebirthButtonFingerStep = currentStep
+				updateRebirthTutorialFingers()
+			end
+		end)
+	)
+end
+
 local function getProgressStepText(frame: Instance?): TextLabel?
 	local progress = frame and frame:FindFirstChild("Progress", true)
 	if progress then
@@ -741,6 +904,7 @@ function TutorialController:setStep(step: string)
 	local previousIndex = STEP_INDEX[previousStep]
 	local nextIndex = STEP_INDEX[step]
 	currentStep = step
+	dismissedRebirthButtonFingerStep = nil
 	if previousIndex and nextIndex and nextIndex > previousIndex then
 		SoundUtil.TutorialProgress()
 	end
@@ -763,10 +927,12 @@ function TutorialController:setStep(step: string)
 		secondDepositBaselineYen = nil
 	end
 	self:updateOptionalProgressUi()
+	updateRebirthTutorialFingers()
 	self:persistStep(step)
 
 	if step == "Completed" or step == "Cancelled" then
 		clearGuide()
+		clearTutorialFingers()
 	end
 end
 
@@ -784,8 +950,11 @@ function TutorialController:startGuideLoop()
 	guideConnection = RunService.RenderStepped:Connect(function()
 		if not self:shouldTrack() then
 			clearGuide()
+			clearTutorialFingers()
 			return
 		end
+
+		updateRebirthTutorialFingers()
 
 		if currentStep == "WaitForRebirthReady" then
 			clearGuideVisuals()
@@ -949,8 +1118,10 @@ function TutorialController:KnitStart()
 
 		self:connectPrompt()
 		self:connectReward()
+		connectRebirthTutorialFingerDismiss()
 		setPromptVisible(shouldPrompt)
 		self:updateOptionalProgressUi()
+		updateRebirthTutorialFingers()
 	end)
 
 	PlayerDataController:Observe("Tutorial", function()
@@ -961,6 +1132,7 @@ function TutorialController:KnitStart()
 		self:startProgressTracking()
 	else
 		self:updateOptionalProgressUi()
+		clearTutorialFingers()
 	end
 
 	localPlayer.CharacterAdded:Connect(function()

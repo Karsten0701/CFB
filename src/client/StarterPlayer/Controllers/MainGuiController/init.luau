@@ -878,6 +878,10 @@ function MainGuiController:ShowMissingRebirthTierMessage()
 	self:showMessage("RebirthMissingTier", "You dont have the Required Tier neccesary to rebirth.")
 end
 
+function MainGuiController:ShowRebirthReadyMessage()
+	self:showMessage("RebirthReady", '<font color="#47FF6A">You can rebirth now!</font>')
+end
+
 function MainGuiController:ShowRebirthMessage(rebirths: number, tokenReward: number?)
 	tokenReward = math.max(math.floor(tokenReward or 0), 0)
 	local tokenText = ""
@@ -899,8 +903,16 @@ function MainGuiController:ShowNotEnoughRebirthTokensMessage()
 	self:showMessage("NotEnoughTokens", "Not enough Rebirth Tokens!")
 end
 
+function MainGuiController:ShowNotEnoughYenMessage()
+	self:showMessage("NotEnoughYen", "Not enough Yen!")
+end
+
 function MainGuiController:ShowRebirthUpgradeMaxedMessage()
 	self:showMessage("UpgradeMaxed", "This upgrade is already MAX!")
+end
+
+function MainGuiController:ShowMaxButtonLockedMessage()
+	self:showMessage("MaxButtonLocked", "Unlock this button in the Rebirth Upgrades.")
 end
 
 function MainGuiController:setupHomeIcon()
@@ -1166,6 +1178,7 @@ function MainGuiController:KnitStart()
 		PlayerDataController:WaitForData()
 		self:updateAll()
 		self:onUnlockedAnimeDroppersChanged(PlayerDataController:Get("UnlockedAnimeDroppers"))
+		self:syncRebirthReadyState(false)
 		self:refreshSettingsFeature()
 		self:setupFavoritePrompt()
 		self:showOfflineEarningAfterDelay()
@@ -1194,6 +1207,7 @@ function MainGuiController:KnitStart()
 
 		PlayerDataController:Observe("Rebirths", function()
 			self:updateRebirthFrame()
+			self:syncRebirthReadyState(false)
 		end)
 
 		PlayerDataController:Observe("RebirthTokens", function()
@@ -1215,8 +1229,17 @@ function MainGuiController:KnitStart()
 			self:updateUpgradesFrame()
 		end)
 
+		PlayerDataController:Observe({ "RebirthUpgrades", "BetterMaxButton" }, function()
+			self:updateUpgradesFrame()
+		end)
+
 		PlayerDataController:Observe("UnlockedAnimeDroppers", function()
 			self:onUnlockedAnimeDroppersChanged(PlayerDataController:Get("UnlockedAnimeDroppers"))
+		end)
+
+		PlayerDataController:Observe("Units", function()
+			self:updateRebirthFrame()
+			self:syncRebirthReadyState(true)
 		end)
 
 		PlayerDataController:Observe("Settings", function(settings)

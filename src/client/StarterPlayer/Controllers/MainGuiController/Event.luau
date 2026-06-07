@@ -88,9 +88,7 @@ function EventFeature.Install(MainGuiController)
 	function MainGuiController:getEventHoverInfo(): GuiObject?
 		local mainGui = self:getMainGui()
 		local hoverInfoFrame = mainGui and mainGui:FindFirstChild("EventHoverInfo", true)
-		return if hoverInfoFrame and hoverInfoFrame:IsA("GuiObject")
-			then hoverInfoFrame
-			else warn("No hover info frame")
+		return if hoverInfoFrame and hoverInfoFrame:IsA("GuiObject") then hoverInfoFrame else nil
 	end
 
 	function MainGuiController:getEventIcon(): GuiObject?
@@ -155,7 +153,6 @@ function EventFeature.Install(MainGuiController)
 		local icon = self:getEventIcon()
 		local hoverInfo = self:getEventHoverInfo()
 		if not eventFrame or not icon or not hoverInfo then
-			warn("No event frame, icon, or hover info")
 			return
 		end
 
@@ -167,8 +164,6 @@ function EventFeature.Install(MainGuiController)
 		self:updateTutorialBoostIcon(icon, hoverInfo)
 		if hoverInfo then
 			hoverInfo.Visible = hoverActive
-		else
-			print("No hover info")
 		end
 
 		if activeEvent then

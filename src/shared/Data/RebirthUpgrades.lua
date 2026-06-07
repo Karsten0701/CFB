@@ -2,13 +2,38 @@ local RebirthUpgrades = {}
 
 RebirthUpgrades.UnitSpawnTier = {
 	MaxLevel = 4,
-	Costs = { 1, 3, 6, 10 },
+	kind = "RebirthTokens",
+	Costs = { 1, 4, 8, 20 },
 }
 
 RebirthUpgrades.MoreMana = {
 	MaxLevel = 5,
+	kind = "RebirthTokens",
 	MultiplierPerLevel = 0.2,
-	Costs = { 2, 4, 8, 16, 32 },
+	Costs = { 2, 3, 8, 13, 21 },
+}
+
+RebirthUpgrades.BetterMaxButton = {
+	MaxLevel = 5,
+	kind = "Yen",
+	Costs = { 1e9, 5e11, 5e12, 1e14, 2.5e16 },
+	Levels = {
+		[1] = {
+			MaxButtonCount = 1000,
+		},
+		[2] = {
+			MaxButtonCount = 5000,
+		},
+		[3] = {
+			MaxButtonCount = 25000,
+		},
+		[4] = {
+			MaxButtonCount = 100000,
+		},
+		[5] = {
+			MaxButtonCount = 1000000,
+		},
+	},
 }
 
 function RebirthUpgrades.getUnitSpawnTier(level: number): number
@@ -71,6 +96,19 @@ function RebirthUpgrades.isMaxed(upgradeKey: string, level: number): boolean
 	end
 
 	return math.floor(level or 0) >= (config.MaxLevel or 0)
+end
+
+function RebirthUpgrades.getMaxButtonCount(level: number): number
+	local config = RebirthUpgrades.BetterMaxButton
+	local clampedLevel = math.clamp(math.floor(level or 0), 0, config.MaxLevel)
+	local levelData = config.Levels[clampedLevel]
+	return if type(levelData) == "table" then levelData.MaxButtonCount or 0 else 0
+end
+
+function RebirthUpgrades.getNextMaxButtonCount(level: number): number
+	local config = RebirthUpgrades.BetterMaxButton
+	local nextLevel = math.clamp(math.floor(level or 0) + 1, 0, config.MaxLevel)
+	return RebirthUpgrades.getMaxButtonCount(nextLevel)
 end
 
 return RebirthUpgrades

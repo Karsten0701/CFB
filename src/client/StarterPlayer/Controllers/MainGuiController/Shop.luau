@@ -50,6 +50,15 @@ local function getEntitlements(controller): { [string]: boolean }
 	return controller:getSettingsEntitlements()
 end
 
+local function ownsShopGamePass(controller, gamePassKey: string): boolean
+	return getEntitlements(controller)[gamePassKey .. "GamePass"] == true
+end
+
+local function ownsDoubleYenProduct(): boolean
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	return PlayerDataController:Get({ "PurchasedProducts", "DoubleYen" }) == true
+end
+
 function MainGuiController:getShopFrame(): GuiObject?
 	local mainGui = self:getMainGui()
 	if not mainGui then
@@ -145,7 +154,6 @@ end
 function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey: string)
 	local gamePass = Monetization.GamePasses[gamePassKey]
 	if not gamePass or type(gamePass.PassId) ~= "number" or gamePass.PassId <= 0 then
-		warn("[MainGuiController] Missing gamepass for shop button:", buttonRoot.Name, gamePassKey)
 		return
 	end
 
@@ -155,7 +163,7 @@ function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey:
 			return
 		end
 
-		if getEntitlements(self)[gamePassKey] == true then
+		if ownsShopGamePass(self, gamePassKey) then
 			self:ShowAlreadyOwnGamePassMessage()
 			return
 		end
@@ -167,7 +175,7 @@ function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey:
 				self:setSettingsEntitlements(entitlements or {})
 				self:refreshGamePassSettings()
 
-				if getEntitlements(self)[gamePassKey] == true then
+				if ownsShopGamePass(self, gamePassKey) then
 					gamePassPromptOpen = false
 					self:ShowAlreadyOwnGamePassMessage()
 					return
@@ -298,9 +306,7 @@ function MainGuiController:updateDoubleYenOffer()
 		return
 	end
 
-	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local purchased = PlayerDataController:Get({ "PurchasedProducts", "DoubleYen" }) == true
-	if purchased or getEntitlements(self).DoubleYen == true then
+	if ownsDoubleYenProduct() then
 		offer.Visible = false
 		if doubleYenClickConnection then
 			doubleYenClickConnection:Disconnect()
@@ -324,11 +330,7 @@ function MainGuiController:updateDoubleYenOffer()
 			return
 		end
 
-		local PlayerDataController = Knit.GetController("PlayerDataController")
-		if
-			PlayerDataController:Get({ "PurchasedProducts", "DoubleYen" }) == true
-			or getEntitlements(self).DoubleYen == true
-		then
+		if ownsDoubleYenProduct() then
 			self:ShowAlreadyOwnGamePassMessage()
 			self:updateDoubleYenOffer()
 			return
@@ -341,7 +343,7 @@ function MainGuiController:updateDoubleYenOffer()
 				self:setSettingsEntitlements(entitlements or {})
 				self:refreshGamePassSettings()
 
-				if getEntitlements(self).DoubleYen == true then
+				if ownsDoubleYenProduct() or entitlements.DoubleYenProduct == true then
 					doubleYenPromptOpen = false
 					self:ShowAlreadyOwnGamePassMessage()
 					self:updateDoubleYenOffer()

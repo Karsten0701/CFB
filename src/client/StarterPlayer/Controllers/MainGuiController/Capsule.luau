@@ -68,7 +68,7 @@ function CapsuleFeature.Install(MainGuiController)
 		if robuxButton then
 			local priceLabel = robuxButton:FindFirstChild("Price", true)
 			if priceLabel and priceLabel:IsA("TextLabel") then
-				priceLabel.Text = `{OPEN_CAPSULE_PRODUCT.Price or 49} Robux`
+				priceLabel.Text = `{OPEN_CAPSULE_PRODUCT.Price or 19} Robux`
 			end
 		end
 

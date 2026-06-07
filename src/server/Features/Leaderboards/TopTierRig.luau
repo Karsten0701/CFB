@@ -5,9 +5,18 @@ local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUt
 
 local TopTierRig = {}
 
-local R15_DANCE_ANIMATION_ID = "rbxassetid://507771019"
-local R6_DANCE_ANIMATION_ID = "rbxassetid://182435998"
-local RIG_SCALE = 2
+local R15_DANCE_ANIMATION_IDS = {
+	"rbxassetid://507771019",
+	"rbxassetid://507776043",
+	"rbxassetid://507777268",
+}
+local R6_DANCE_ANIMATION_IDS = {
+	"rbxassetid://182435998",
+	"rbxassetid://182436842",
+	"rbxassetid://182436935",
+}
+local RIG_SCALE = 1
+local DANCE_RESTART_DELAY = 0.35
 
 local currentUserId: number? = nil
 local currentHighestTier = 0
@@ -20,17 +29,32 @@ local function getLeaderboardsFolder(): Instance?
 end
 
 local function getRig(): Model?
-	local leaderboards = getLeaderboardsFolder()
-	local rig = leaderboards and leaderboards:FindFirstChild("Rig")
+	local map = workspace:FindFirstChild("Map")
+	local hub = map and map:FindFirstChild("Hub")
+	local rig = hub and hub:FindFirstChild("Rig")
+	if not rig then
+		local leaderboards = getLeaderboardsFolder()
+		rig = leaderboards and leaderboards:FindFirstChild("Rig")
+	end
+
 	return if rig and rig:IsA("Model") then rig else nil
 end
 
-local function getHumanoid(rig: Model): Humanoid?
-	local humanoid = rig:FindFirstChildOfClass("Humanoid")
-	return humanoid
+local function getUsernameLabel(): TextLabel?
+	local map = workspace:FindFirstChild("Map")
+	local hub = map and map:FindFirstChild("Hub")
+	local middle = hub and hub:FindFirstChild("Middle2")
+	local bb = middle and middle:FindFirstChild("BB")
+	local billboard = bb and bb:FindFirstChild("BillboardGui")
+	local username = billboard and billboard:FindFirstChild("Username", true)
+	return if username and username:IsA("TextLabel") then username else nil
 end
 
-local function applyRigScale(rig: Model)
+local function getHumanoid(rig: Model): Humanoid?
+	return rig:FindFirstChildOfClass("Humanoid")
+end
+
+local function normalizeRigScale(rig: Model)
 	pcall(function()
 		rig:ScaleTo(RIG_SCALE)
 	end)
@@ -42,85 +66,52 @@ local function getRootPart(rig: Model): BasePart?
 end
 
 local function lockRig(rig: Model)
+	local root = getRootPart(rig)
 	for _, descendant in rig:GetDescendants() do
 		if descendant:IsA("BasePart") then
-			if descendant.Name == "TopTierRigAnchor" then
-				continue
-			end
-
-			descendant.Anchored = false
+			descendant.Anchored = descendant == root
 			descendant.CanCollide = false
 			descendant.CanTouch = false
 			descendant.CanQuery = false
-			descendant.Massless = true
 		end
 	end
 end
 
-local function ensureRigAnchor(rig: Model, humanoid: Humanoid)
+local function cleanupOldRigAnchor(rig: Model)
 	local root = getRootPart(rig)
-	if not root then
-		return
+	if root then
+		for _, child in root:GetChildren() do
+			if
+				child.Name == "TopTierRigRootAttachment"
+				or child.Name == "TopTierRigAlignPosition"
+				or child.Name == "TopTierRigAlignOrientation"
+			then
+				child:Destroy()
+			end
+		end
 	end
 
 	local anchor = rig:FindFirstChild("TopTierRigAnchor")
-	if not anchor or not anchor:IsA("BasePart") then
-		anchor = Instance.new("Part")
-		anchor.Name = "TopTierRigAnchor"
-		anchor.Size = Vector3.one
-		anchor.Transparency = 1
-		anchor.Anchored = true
-		anchor.CanCollide = false
-		anchor.CanTouch = false
-		anchor.CanQuery = false
-		anchor.Parent = rig
+	if anchor then
+		anchor:Destroy()
 	end
-	anchor.CFrame = root.CFrame
+end
 
-	local rootAttachment = root:FindFirstChild("TopTierRigRootAttachment")
-	if not rootAttachment or not rootAttachment:IsA("Attachment") then
-		rootAttachment = Instance.new("Attachment")
-		rootAttachment.Name = "TopTierRigRootAttachment"
-		rootAttachment.Parent = root
-	end
-
-	local anchorAttachment = anchor:FindFirstChild("TopTierRigAnchorAttachment")
-	if not anchorAttachment or not anchorAttachment:IsA("Attachment") then
-		anchorAttachment = Instance.new("Attachment")
-		anchorAttachment.Name = "TopTierRigAnchorAttachment"
-		anchorAttachment.Parent = anchor
-	end
-
-	local alignPosition = root:FindFirstChild("TopTierRigAlignPosition")
-	if not alignPosition or not alignPosition:IsA("AlignPosition") then
-		alignPosition = Instance.new("AlignPosition")
-		alignPosition.Name = "TopTierRigAlignPosition"
-		alignPosition.Parent = root
-	end
-	alignPosition.Attachment0 = rootAttachment
-	alignPosition.Attachment1 = anchorAttachment
-	alignPosition.MaxForce = math.huge
-	alignPosition.MaxVelocity = math.huge
-	alignPosition.Responsiveness = 200
-	alignPosition.RigidityEnabled = true
-
-	local alignOrientation = root:FindFirstChild("TopTierRigAlignOrientation")
-	if not alignOrientation or not alignOrientation:IsA("AlignOrientation") then
-		alignOrientation = Instance.new("AlignOrientation")
-		alignOrientation.Name = "TopTierRigAlignOrientation"
-		alignOrientation.Parent = root
-	end
-	alignOrientation.Attachment0 = rootAttachment
-	alignOrientation.Attachment1 = anchorAttachment
-	alignOrientation.MaxTorque = math.huge
-	alignOrientation.MaxAngularVelocity = math.huge
-	alignOrientation.Responsiveness = 200
-	alignOrientation.RigidityEnabled = true
-
+local function setupStaticRig(rig: Model, humanoid: Humanoid)
+	cleanupOldRigAnchor(rig)
 	humanoid.AutoRotate = false
 	humanoid.WalkSpeed = 0
 	humanoid.JumpPower = 0
-	root:SetNetworkOwner(nil)
+
+	local root = getRootPart(rig)
+	if root then
+		pcall(function()
+			root:SetNetworkOwner(nil)
+		end)
+		root.Anchored = true
+	end
+
+	lockRig(rig)
 end
 
 local function getServerTopTierPlayer(PlayerDataService): (Player?, number)
@@ -164,67 +155,144 @@ local function playDance(humanoid: Humanoid)
 		animator.Parent = humanoid
 	end
 
-	local animation = Instance.new("Animation")
-	animation.AnimationId = if humanoid.RigType == Enum.HumanoidRigType.R6 then R6_DANCE_ANIMATION_ID else R15_DANCE_ANIMATION_ID
+	for _, track in animator:GetPlayingAnimationTracks() do
+		track:Stop(0)
+	end
 
-	local ok, track = pcall(function()
-		return animator:LoadAnimation(animation)
-	end)
-	animation:Destroy()
+	local animationIds = if humanoid.RigType == Enum.HumanoidRigType.R6
+		then R6_DANCE_ANIMATION_IDS
+		else R15_DANCE_ANIMATION_IDS
 
-	if not ok or not track then
+	for _, animationId in animationIds do
+		local animation = Instance.new("Animation")
+		animation.AnimationId = animationId
+
+		local ok, trackOrError = pcall(function()
+			return animator:LoadAnimation(animation)
+		end)
+		animation:Destroy()
+
+		if not ok or not trackOrError then
+			continue
+		end
+
+		local track = trackOrError
+		track.Looped = true
+		track.Priority = Enum.AnimationPriority.Action4
+		track:Play(0.1, 1, 1)
+		track:AdjustWeight(1, 0)
+		track:AdjustSpeed(1)
+
+		currentTrack = track
+		return
+	end
+end
+
+local function startDanceForRig(rig: Model)
+	local humanoid = getHumanoid(rig)
+	if not humanoid then
 		return
 	end
 
-	track.Looped = true
-	track.Priority = Enum.AnimationPriority.Action
-	track:Play(0.15)
-	currentTrack = track
+	setupStaticRig(rig, humanoid)
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	playDance(humanoid)
+end
+
+local function startDanceAfterReload(rig: Model, userId: number)
+	startDanceForRig(rig)
+	task.delay(DANCE_RESTART_DELAY, function()
+		if not rig.Parent or rig:GetAttribute("TopTierUserId") ~= userId then
+			return
+		end
+
+		startDanceForRig(rig)
+	end)
+end
+
+local function setUsername(player: Player?)
+	local label = getUsernameLabel()
+	if not label then
+		return
+	end
+
+	label.Text = if player then "@" .. player.Name else "@..."
+end
+
+local function applyPlayerDescription(rig: Model, humanoid: Humanoid, player: Player): boolean
+	local ok, descriptionOrError = pcall(function()
+		return Players:GetHumanoidDescriptionFromUserId(player.UserId)
+	end)
+
+	if not ok or not descriptionOrError then
+		return false
+	end
+
+	local pivot = rig:GetPivot()
+	local applied, applyError = pcall(function()
+		humanoid:ApplyDescriptionReset(descriptionOrError)
+	end)
+
+	if not applied then
+		applied, applyError = pcall(function()
+			humanoid:ApplyDescription(descriptionOrError)
+		end)
+	end
+
+	if not applied then
+		return false
+	end
+
+	normalizeRigScale(rig)
+	rig:PivotTo(pivot)
+	rig:SetAttribute("TopTierUserId", player.UserId)
+	return true
 end
 
 function TopTierRig.refresh(PlayerDataService)
 	local rig = getRig()
 	if not rig then
+		setUsername(nil)
 		return
 	end
 
 	local humanoid = getHumanoid(rig)
 	if not humanoid then
+		setUsername(nil)
 		return
 	end
-	applyRigScale(rig)
-	lockRig(rig)
-	ensureRigAnchor(rig, humanoid)
 
 	local player, highestTier = getServerTopTierPlayer(PlayerDataService)
 	if not player then
 		stopCurrentTrack()
 		currentUserId = nil
 		currentHighestTier = 0
+		rig:SetAttribute("TopTierUserId", nil)
+		setUsername(nil)
+		setupStaticRig(rig, humanoid)
+		return
+	end
+	setUsername(player)
+
+	if
+		currentUserId == player.UserId
+		and currentHighestTier == highestTier
+		and rig:GetAttribute("TopTierUserId") == player.UserId
+		and currentTrack
+		and currentTrack.IsPlaying
+	then
+		startDanceForRig(rig)
 		return
 	end
 
-	if currentUserId == player.UserId and currentHighestTier == highestTier and currentTrack and currentTrack.IsPlaying then
+	if not applyPlayerDescription(rig, humanoid, player) then
+		currentUserId = nil
+		currentHighestTier = 0
+		setupStaticRig(rig, humanoid)
 		return
 	end
 
-	local pivot = rig:GetPivot()
-	local ok, description = pcall(function()
-		return Players:GetHumanoidDescriptionFromUserId(player.UserId)
-	end)
-
-	if ok and description then
-		pcall(function()
-			humanoid:ApplyDescription(description)
-		end)
-		applyRigScale(rig)
-		rig:PivotTo(pivot)
-		lockRig(rig)
-		ensureRigAnchor(rig, humanoid)
-	end
-
-	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-	playDance(humanoid)
+	startDanceAfterReload(rig, player.UserId)
 
 	currentUserId = player.UserId
 	currentHighestTier = highestTier

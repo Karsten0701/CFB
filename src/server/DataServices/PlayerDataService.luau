@@ -1,12 +1,15 @@
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local DataService = require(ReplicatedStorage.Packages.dataservice).server
 local Knit = require(ReplicatedStorage.Packages.knit)
 local DataTemplate = require(script.Parent.DataTemplate)
+local TierUnlockAnalytics = require(script.Parent.Parent.Features.Analytics.TierUnlockAnalytics)
 
 type Path = string | { string | number }
 
@@ -172,6 +175,90 @@ local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { 
 	return normalized
 end
 
+local function getRebirthTokenReward(rebirthNumber: number): number
+	rebirthNumber = math.max(math.floor(rebirthNumber), 1)
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	local tokensPerRebirth = rebirthConfig.TokensPerRebirth
+	if type(tokensPerRebirth) == "table" then
+		local configuredReward = tokensPerRebirth[rebirthNumber]
+		if configuredReward == nil then
+			local fallbackRebirth = 0
+			for configuredRebirth in tokensPerRebirth do
+				local numericRebirth = math.floor(tonumber(configuredRebirth) or 0)
+				if numericRebirth > fallbackRebirth and numericRebirth <= rebirthNumber then
+					fallbackRebirth = numericRebirth
+					configuredReward = tokensPerRebirth[configuredRebirth]
+				end
+			end
+		end
+
+		if configuredReward ~= nil then
+			return math.max(math.floor(tonumber(configuredReward) or 0), 0)
+		end
+	elseif tonumber(tokensPerRebirth) then
+		return math.max(math.floor(tonumber(tokensPerRebirth) or 0), 0)
+	end
+
+	local previousReward = 1
+	local reward = 1
+
+	for _ = 2, rebirthNumber do
+		local nextReward = previousReward + reward
+		previousReward = reward
+		reward = nextReward
+	end
+
+	return reward
+end
+
+local function getTotalRebirthTokenEntitlement(rebirths: number): number
+	local total = 0
+	for rebirthNumber = 1, math.max(math.floor(tonumber(rebirths) or 0), 0) do
+		total += getRebirthTokenReward(rebirthNumber)
+	end
+
+	return total
+end
+
+local function getSpentRebirthTokensFromData(data: { [string]: any }): number
+	local upgrades = if type(data.RebirthUpgrades) == "table" then data.RebirthUpgrades else {}
+	local spent = 0
+
+	for upgradeKey, config in RebirthUpgrades do
+		if type(config) ~= "table" or config.kind ~= "RebirthTokens" then
+			continue
+		end
+
+		local level = math.max(math.floor(tonumber(upgrades[upgradeKey]) or 0), 0)
+		for paidLevel = 0, level - 1 do
+			spent += math.max(math.floor(tonumber(RebirthUpgrades.getCost(upgradeKey, paidLevel)) or 0), 0)
+		end
+	end
+
+	return spent
+end
+
+local function repairRebirthTokenEntitlement(data: { [string]: any })
+	data.RebirthTokens = math.max(math.floor(tonumber(data.RebirthTokens) or 0), 0)
+
+	local expectedTotal = getTotalRebirthTokenEntitlement(data.Rebirths)
+	local grantedTotal
+	if data.RebirthTokenEntitlementMigrated == true then
+		grantedTotal = math.max(math.floor(tonumber(data.RebirthTokenEntitlementGranted) or 0), 0)
+	else
+		grantedTotal = data.RebirthTokens + getSpentRebirthTokensFromData(data)
+	end
+
+	local missingTokens = expectedTotal - grantedTotal
+	if missingTokens > 0 then
+		data.RebirthTokens += missingTokens
+		grantedTotal += missingTokens
+	end
+
+	data.RebirthTokenEntitlementGranted = math.max(grantedTotal, 0)
+	data.RebirthTokenEntitlementMigrated = true
+end
+
 local function ensureManaData(data: { [string]: any })
 	migrateNumberFieldInData(data, "Money", "Yen", TycoonConfig.StarterYen or 0)
 	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
@@ -187,6 +274,11 @@ local function ensureManaData(data: { [string]: any })
 		data.Rebirths = 0
 	end
 	data.Rebirths = math.max(math.floor(data.Rebirths), 0)
+
+	if type(data.RebirthTokens) ~= "number" then
+		data.RebirthTokens = 0
+	end
+	data.RebirthTokens = math.max(math.floor(data.RebirthTokens), 0)
 
 	if type(data.LastGroupRewardClaimAt) ~= "number" then
 		data.LastGroupRewardClaimAt = 0
@@ -238,11 +330,26 @@ local function ensureManaData(data: { [string]: any })
 		data.PurchasedProducts = {}
 	end
 
+	if type(data.GrantedGamePasses) ~= "table" then
+		data.GrantedGamePasses = {}
+	end
+
+	if type(data.Analytics) ~= "table" then
+		data.Analytics = {}
+	end
+	data.Analytics.FirstJoinFunnelLogged = data.Analytics.FirstJoinFunnelLogged == true
+	data.Analytics.TutorialCompleteFunnelLogged = data.Analytics.TutorialCompleteFunnelLogged == true
+	if type(data.Analytics.TierUnlockFunnelLogged) ~= "table" then
+		data.Analytics.TierUnlockFunnelLogged = {}
+	end
+
 	if type(data.RebirthUpgrades) ~= "table" then
 		data.RebirthUpgrades = {}
 	end
 	data.RebirthUpgrades.UnitSpawnTier = math.max(math.floor(tonumber(data.RebirthUpgrades.UnitSpawnTier) or 0), 0)
 	data.RebirthUpgrades.MoreMana = math.max(math.floor(tonumber(data.RebirthUpgrades.MoreMana) or 0), 0)
+	data.RebirthUpgrades.BetterMaxButton = math.max(math.floor(tonumber(data.RebirthUpgrades.BetterMaxButton) or 0), 0)
+	repairRebirthTokenEntitlement(data)
 
 	if type(data.Tutorial) ~= "table" then
 		data.Tutorial = {}
@@ -300,6 +407,12 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.Settings.AutoDeposit) ~= "boolean" then
 		data.Settings.AutoDeposit = false
 	end
+
+	if type(data.Settings.GamePassSettingDisabled) ~= "table" then
+		data.Settings.GamePassSettingDisabled = {}
+	end
+	data.Settings.GamePassSettingDisabled.AutoCollect = data.Settings.GamePassSettingDisabled.AutoCollect == true
+	data.Settings.GamePassSettingDisabled.AutoDeposit = data.Settings.GamePassSettingDisabled.AutoDeposit == true
 
 	if type(data.Settings.ShowVFX) ~= "boolean" then
 		data.Settings.ShowVFX = true
@@ -389,6 +502,9 @@ function PlayerDataService:KnitInit()
 		ensureManaData(data)
 		playtimeSessionStartedAt[player] = os.time()
 		setupLeaderstats(player)
+		if data.Analytics.FirstJoinFunnelLogged ~= true and TierUnlockAnalytics.logFirstJoin(player) then
+			data.Analytics.FirstJoinFunnelLogged = true
+		end
 
 		PlayerDataService:Observe(player, "Yen", function()
 			syncLeaderstats(player)
@@ -405,11 +521,16 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "CFB_PlayerData.36",
+		profileStoreIndex = "PLAYERDATA", --PLAYERDATA gameversion
 	})
 end
 
 function PlayerDataService:KnitStart()
+	local shuttingDown = false
+	game:BindToClose(function()
+		shuttingDown = true
+	end)
+
 	game:GetService("Players").PlayerRemoving:Connect(function(player)
 		pcall(function()
 			PlayerDataService:PersistPlaytime(player)
@@ -420,8 +541,12 @@ function PlayerDataService:KnitStart()
 	end)
 
 	task.spawn(function()
-		while true do
+		while not shuttingDown do
 			task.wait(PLAYTIME_PERSIST_INTERVAL)
+			if shuttingDown then
+				break
+			end
+
 			for _, player in game:GetService("Players"):GetPlayers() do
 				pcall(function()
 					PlayerDataService:PersistPlaytime(player)
@@ -475,6 +600,39 @@ function PlayerDataService:AddYen(player: Player, amount: number)
 	end)
 end
 
+function PlayerDataService:GetRebirthTokenReward(rebirthNumber: number): number
+	return getRebirthTokenReward(rebirthNumber)
+end
+
+function PlayerDataService:GetTotalRebirthTokenEntitlement(rebirths: number): number
+	return getTotalRebirthTokenEntitlement(rebirths)
+end
+
+function PlayerDataService:AddRebirthTokens(player: Player, amount: number)
+	local normalizedAmount = math.max(math.floor(tonumber(amount) or 0), 0)
+	if normalizedAmount <= 0 then
+		return self:Get(player, "RebirthTokens")
+	end
+
+	return self:Update(player, "RebirthTokens", function(currentTokens: number)
+		return math.max(math.floor(tonumber(currentTokens) or 0), 0) + normalizedAmount
+	end)
+end
+
+function PlayerDataService:GrantRebirthTokenReward(player: Player, rebirthNumber: number): number
+	local tokenReward = getRebirthTokenReward(rebirthNumber)
+	if tokenReward <= 0 then
+		return 0
+	end
+
+	self:AddRebirthTokens(player, tokenReward)
+	self:Update(player, "RebirthTokenEntitlementGranted", function(currentGranted: number)
+		return math.max(math.floor(tonumber(currentGranted) or 0), 0) + tokenReward
+	end)
+	self:Set(player, "RebirthTokenEntitlementMigrated", true)
+	return tokenReward
+end
+
 function PlayerDataService:AddUnitsBought(player: Player, amount: number)
 	local normalizedAmount = math.floor(tonumber(amount) or 0)
 	if normalizedAmount <= 0 then
@@ -512,6 +670,102 @@ function PlayerDataService:PersistPlaytime(player: Player)
 	self:Update(player, "PlaytimeSeconds", function(current: number)
 		return math.max(math.floor(tonumber(current) or 0), 0) + elapsed
 	end)
+end
+
+local function getUnitSpawnTierFromData(data: { [string]: any }): number
+	local upgrades = data.RebirthUpgrades
+	local level = if type(upgrades) == "table"
+		then math.max(math.floor(tonumber(upgrades.UnitSpawnTier) or 0), 0)
+		else 0
+	return RebirthUpgrades.getUnitSpawnTier(level)
+end
+
+local function getRebirthStarterUnitsFromData(data: { [string]: any }): { { Tier: number } }
+	local spawnTier = getUnitSpawnTierFromData(data)
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	local configuredUnits = rebirthConfig.StarterUnits or { { Tier = 1 } }
+	local units = {}
+
+	for _, unit in configuredUnits do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		table.insert(units, {
+			Tier = math.max(tonumber(unit.Tier) or 1, spawnTier),
+		})
+	end
+
+	if #units <= 0 then
+		table.insert(units, { Tier = spawnTier })
+	end
+
+	return units
+end
+
+local function applyLeaderboardStatsReset(data: { [string]: any })
+	data.LifetimeYen = 0
+	data.Rebirths = 0
+	data.TotalUnitsBought = 0
+	data.PlaytimeSeconds = 0
+end
+
+local function applyRebirthProgressResetToData(data: { [string]: any })
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
+	local starterUnits = getRebirthStarterUnitsFromData(data)
+	local normalizedUnits = normalizeUnits(starterUnits)
+	local nextBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(normalizedUnits)), 0)
+
+	data.Yen = resetYen
+	data.ManaInBag = 0
+	data.ManaInDeposit = 0
+	data.TotalUnitsPurchased = 0
+	data.RateLevel = 0
+	data.Rate = rebirthConfig.ResetRate or 1
+	data.Units = normalizedUnits
+	data.TotalUnitsBought = nextBaseUnitCount
+	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers({}, normalizedUnits)
+end
+
+function PlayerDataService:ResetLeaderboardStats(player: Player)
+	self:Set(player, "LifetimeYen", 0)
+	self:Set(player, "Rebirths", 0)
+	self:Set(player, "TotalUnitsBought", 0)
+	self:Set(player, "PlaytimeSeconds", 0)
+	playtimeSessionStartedAt[player] = os.time()
+
+	Knit.GetService("TycoonService"):ApplyRebirthProgressReset(player)
+end
+
+function PlayerDataService:ResetLeaderboardStatsByUserId(userId: number): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, "UserId must be greater than 0."
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		self:WaitForData(onlinePlayer)
+		self:ResetLeaderboardStats(onlinePlayer)
+		return true, nil
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile then
+		return false, `No saved data found for user {userId}.`
+	end
+
+	applyLeaderboardStatsReset(profile.Data)
+	applyRebirthProgressResetToData(profile.Data)
+	local ok, err = pcall(function()
+		profile:SetAsync()
+	end)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	return true, nil
 end
 
 function PlayerDataService:TrySpendYen(player: Player, amount: number): boolean
@@ -555,24 +809,38 @@ function PlayerDataService:GetUnits(player: Player): { { Tier: number, Slot: num
 	return self:Get(player, "Units") or {}
 end
 
-function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } })
+function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } }, options: { resetUnlocks: boolean }?)
 	local currentUnits = self:GetUnits(player)
 	local currentBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(currentUnits)), 0)
 	local normalizedUnits = normalizeUnits(units)
 	local nextBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(normalizedUnits)), 0)
 	local gainedBaseUnits = nextBaseUnitCount - currentBaseUnitCount
+	local resetUnlocks = options ~= nil and options.resetUnlocks == true
 
 	if gainedBaseUnits > 0 then
 		self:Update(player, "TotalUnitsBought", function(current: number)
 			return math.max(math.floor(tonumber(current) or 0), 0) + gainedBaseUnits
 		end)
+	elseif nextBaseUnitCount < currentBaseUnitCount then
+		self:Set(player, "TotalUnitsPurchased", 0)
+		self:Set(player, "TotalUnitsBought", nextBaseUnitCount)
 	end
 
 	self:Set(player, "Units", normalizedUnits)
 
-	self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)
+	local previousUnlocked = self:Get(player, "UnlockedAnimeDroppers")
+	local nextUnlocked = self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)
+		if resetUnlocks then
+			return normalizeUnlockedAnimeDroppers({}, normalizedUnits)
+		end
 		return normalizeUnlockedAnimeDroppers(currentUnlocked, normalizedUnits)
 	end)
+	local loggedTiers = self:Get(player, { "Analytics", "TierUnlockFunnelLogged" })
+	for _, tier in TierUnlockAnalytics.getNewUnlockTiers(previousUnlocked, nextUnlocked, loggedTiers) do
+		if TierUnlockAnalytics.logTierUnlocked(player, tier) then
+			self:Set(player, { "Analytics", "TierUnlockFunnelLogged", tostring(tier) }, true)
+		end
+	end
 end
 
 function PlayerDataService:Observe(player: Player, path: Path, callback: (any, any?) -> ())
@@ -628,7 +896,8 @@ function PlayerDataService.Client:SetSetting(player: Player, settingName: string
 		return false
 	end
 
-	if value == true and (settingName == "AutoCollect" or settingName == "AutoDeposit") then
+	local isGamePassSetting = settingName == "AutoCollect" or settingName == "AutoDeposit"
+	if value == true and isGamePassSetting then
 		local MonetizationService = Knit.GetService("MonetizationService")
 		if not MonetizationService:OwnsGamePass(player, settingName) then
 			self.Server:Set(player, { "Settings", settingName }, false)
@@ -641,6 +910,9 @@ function PlayerDataService.Client:SetSetting(player: Player, settingName: string
 	end
 
 	self.Server:Set(player, { "Settings", settingName }, value)
+	if isGamePassSetting then
+		self.Server:Set(player, { "Settings", "GamePassSettingDisabled", settingName }, value ~= true)
+	end
 	return true
 end
 
