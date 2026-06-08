@@ -176,7 +176,7 @@ function WorldLeaderboardRenderer.render(boardName: string, entries: { any }, su
 	for rank, entry in entries do
 		local userId = tonumber(entry.UserId)
 		local value = tonumber(entry.Value) or 0
-		if not userId or userId <= 0 or value <= 0 then
+		if not userId or userId <= 0 or value < 0 then
 			continue
 		end
 

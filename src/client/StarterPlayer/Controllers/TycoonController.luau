@@ -53,7 +53,7 @@ local lastGroupRewardDisplayAt = 0
 local groupJoinPromptOpen = false
 local otherTycoonRefreshToken = 0
 local otherTycoonRefreshRunning = false
-local lastAppliedEventId: string? = nil
+local lastGameplayEffectsSignature: string? = nil
 local groupRewardWasOnCooldown = false
 local groupRewardReadyNotified = false
 
@@ -532,18 +532,37 @@ local function formatCountdown(seconds: number): string
 	return string.format("%02d:%02d", minutes, remainingSeconds)
 end
 
+local function getGroupLikeReminderRequired(): number
+	return math.max(math.floor(tonumber(getGroupRewardConfig().LikeReminderRequired) or 3), 1)
+end
+
+local function isGroupRewardLikeUnlocked(): boolean
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	if PlayerDataController:Get("GroupRewardLikeUnlocked") == true then
+		return true
+	end
+
+	local count = math.max(math.floor(PlayerDataController:Get("GroupLikeReminderCount") or 0), 0)
+	return count >= getGroupLikeReminderRequired()
+end
+
 local function promptJoinRewardGroup()
-	if groupJoinPromptOpen then
+	if groupJoinPromptOpen or isLocalPlayerInRewardGroup() then
 		return
 	end
 
-	local groupId = tonumber(getGroupRewardConfig().GroupId) or 0
+	local groupId = math.floor(tonumber(getGroupRewardConfig().GroupId) or 0)
 	if groupId <= 0 then
 		return
 	end
 
 	groupJoinPromptOpen = true
 	task.spawn(function()
+		if isLocalPlayerInRewardGroup() then
+			groupJoinPromptOpen = false
+			return
+		end
+
 		local ok, err = pcall(function()
 			GroupService:PromptJoinAsync(groupId)
 		end)
@@ -575,11 +594,8 @@ local function mergeEntitlementsWithSettings(
 		merged.ShowManaPopup = settings.ShowManaPopup ~= false
 	end
 
-	local activeEvent = EventUtil.getActiveEvent()
-	if activeEvent then
-		merged.ManaMultiplier *= math.max(tonumber(activeEvent.Effects.ManaMultiplier) or 1, 0)
-		merged.DropSpeedMultiplier = math.max(tonumber(activeEvent.Effects.DropSpeedMultiplier) or 1, 0.1)
-	end
+	merged.ManaMultiplier *= math.max(EventUtil.getEffectMultiplier("ManaMultiplier", 1), 0)
+	merged.DropSpeedMultiplier = math.max(EventUtil.getEffectMultiplier("DropSpeedMultiplier", 1), 0.1)
 
 	return merged
 end
@@ -715,11 +731,11 @@ end
 
 function TycoonController:updateGroupRewardDisplay(tycoon: Instance)
 	local isInGroup = isLocalPlayerInRewardGroup()
+	local likeUnlocked = isGroupRewardLikeUnlocked()
 	local remaining = getGroupRewardRemaining()
 	local reward = getGroupRewardAmount()
 	local buttonModels = buttonModelsByTycoon[tycoon] or {}
-	local isReady = isInGroup and remaining <= 0
-
+	local isReady = isInGroup and likeUnlocked and remaining <= 0
 	if isInGroup and remaining > 0 then
 		groupRewardWasOnCooldown = true
 		groupRewardReadyNotified = false
@@ -744,6 +760,8 @@ function TycoonController:updateGroupRewardDisplay(tycoon: Instance)
 		if display.Timer and display.Timer.Parent then
 			if not isInGroup then
 				display.Timer.Text = "Join Group!"
+			elseif not likeUnlocked then
+				display.Timer.Text = "Like Game!"
 			elseif remaining <= 0 then
 				display.Timer.Text = "Ready!"
 			else
@@ -936,6 +954,7 @@ function TycoonController:performButtonAction(head: BasePart)
 		promptDevProduct(head, Monetization.DeveloperProducts.SellAll.ProductId)
 	elseif action.kind == "group_reward" then
 		local TutorialController = Knit.GetController("TutorialController")
+		local MainGuiController = Knit.GetController("MainGuiController")
 		TutorialController:MarkGroupRewardVisited()
 
 		if not isLocalPlayerInRewardGroup() then
@@ -943,16 +962,39 @@ function TycoonController:performButtonAction(head: BasePart)
 			return
 		end
 
+		if not isGroupRewardLikeUnlocked() then
+			TycoonService:RegisterGroupLikeReminder():andThen(function(success, err, count, unlocked)
+				if not success then
+					if err == "Not in group" then
+						promptJoinRewardGroup()
+					end
+					return
+				end
+
+				MainGuiController:ShowNeedToLikeGameMessage()
+
+				if unlocked then
+					MainGuiController:ShowGroupRewardLikeUnlockedMessage()
+				end
+
+				if actionTycoon then
+					self:updateGroupRewardDisplay(actionTycoon)
+				end
+			end)
+			return
+		end
+
 		TycoonService:ClaimGroupReward(action.buttonName):andThen(function(success, err, reward)
 			if success then
 				SoundUtil.RewardClaim()
-				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowGroupRewardMessage(reward or 0)
 				if actionTycoon then
 					self:updateGroupRewardDisplay(actionTycoon)
 				end
 			elseif err == "Not in group" then
 				promptJoinRewardGroup()
+			elseif err == "Like required" then
+				MainGuiController:ShowNeedToLikeGameMessage()
 			elseif err and err ~= "Cooldown" then
 				warn("[TycoonController] Group reward failed:", err)
 			end
@@ -1390,6 +1432,14 @@ function TycoonController:setupOwnTycoon(): boolean
 		self:updateGroupRewardDisplay(tycoon)
 	end, janitor)
 
+	PlayerDataController:Observe("GroupLikeReminderCount", function()
+		self:updateGroupRewardDisplay(tycoon)
+	end, janitor)
+
+	PlayerDataController:Observe("GroupRewardLikeUnlocked", function()
+		self:updateGroupRewardDisplay(tycoon)
+	end, janitor)
+
 	PlayerDataController:Observe("ManaInDeposit", function(newDeposit)
 		self:updateDepositVFX(tycoon, newDeposit)
 		self:updateProcesserDisplay(tycoon)
@@ -1611,16 +1661,28 @@ function TycoonController:refreshOwnTycoonForEvent()
 	end
 end
 
+local function getGameplayEffectsSignature(): string
+	local now = EventUtil.getNow()
+	local activeEvent = EventUtil.getActiveEvent(now)
+	local eventId = if activeEvent then activeEvent.Id else ""
+	return table.concat({
+		eventId,
+		EventUtil.getEffectMultiplier("ManaMultiplier", 1, now),
+		EventUtil.getEffectMultiplier("DropSpeedMultiplier", 1, now),
+		EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1, now),
+		EventUtil.getEffectBonus("UnitSpawnTierBonus", 0, now),
+	}, ":")
+end
+
 function TycoonController:startEventRefreshLoop()
 	task.spawn(function()
 		local PlayerDataController = Knit.GetController("PlayerDataController")
 		PlayerDataController:WaitForData()
 
 		while true do
-			local activeEvent = EventUtil.getActiveEvent()
-			local eventId = if activeEvent then activeEvent.Id else nil
-			if eventId ~= lastAppliedEventId then
-				lastAppliedEventId = eventId
+			local signature = getGameplayEffectsSignature()
+			if signature ~= lastGameplayEffectsSignature then
+				lastGameplayEffectsSignature = signature
 				self:refreshOwnTycoonForEvent()
 			end
 
@@ -1698,6 +1760,16 @@ function TycoonController:KnitStart()
 	end)
 
 	self:startEventRefreshLoop()
+
+	local AdminService = Knit.GetService("AdminService")
+	AdminService.SpawnMutationDrops:Connect(function(count: number)
+		for _, entry in renderers do
+			if entry.isOwn and entry.renderer then
+				entry.renderer:spawnMutatedDrops(count)
+				break
+			end
+		end
+	end)
 end
 
 return TycoonController

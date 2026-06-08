@@ -22,8 +22,17 @@ local leaderstatValues: {
 	[Player]: { Yen: StringValue, Units: StringValue, Rebirths: StringValue },
 } = {}
 local playtimeSessionStartedAt: { [Player]: number } = {}
+local recordingLeaderboardAchievedAt = false
 
 local PLAYTIME_PERSIST_INTERVAL = 60
+local MAX_REASONABLE_PLAYTIME_SECONDS = 10 * 365 * 24 * 60 * 60
+
+local LEADERBOARD_STAT_PATHS = {
+	Rebirths = true,
+	LifetimeYen = true,
+	TotalUnitsBought = true,
+	PlaytimeSeconds = true,
+}
 
 local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
 	if type(data[newPath]) == "number" then
@@ -285,6 +294,19 @@ local function ensureManaData(data: { [string]: any })
 	end
 	data.LastGroupRewardClaimAt = math.max(math.floor(data.LastGroupRewardClaimAt), 0)
 
+	if type(data.GroupLikeReminderCount) ~= "number" then
+		data.GroupLikeReminderCount = 0
+	end
+	data.GroupLikeReminderCount = math.max(math.floor(data.GroupLikeReminderCount), 0)
+
+	if type(data.GroupRewardLikeUnlocked) ~= "boolean" then
+		local likeRequired = math.max(
+			math.floor(tonumber(TycoonConfig.GroupReward and TycoonConfig.GroupReward.LikeReminderRequired) or 3),
+			1
+		)
+		data.GroupRewardLikeUnlocked = data.GroupLikeReminderCount >= likeRequired or data.LastGroupRewardClaimAt > 0
+	end
+
 	if type(data.LastLogoutAt) ~= "number" then
 		data.LastLogoutAt = 0
 	end
@@ -320,7 +342,19 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.PlaytimeSeconds) ~= "number" then
 		data.PlaytimeSeconds = 0
 	end
-	data.PlaytimeSeconds = math.max(math.floor(data.PlaytimeSeconds), 0)
+	data.PlaytimeSeconds = math.clamp(math.floor(data.PlaytimeSeconds), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
+
+	if type(data.LeaderboardAchievedAt) ~= "table" then
+		data.LeaderboardAchievedAt = {}
+	end
+	for statPath in LEADERBOARD_STAT_PATHS do
+		local achievedAt = data.LeaderboardAchievedAt[statPath]
+		if type(achievedAt) ~= "number" then
+			data.LeaderboardAchievedAt[statPath] = 0
+		else
+			data.LeaderboardAchievedAt[statPath] = math.max(math.floor(achievedAt), 0)
+		end
+	end
 
 	if type(data.ProcessedReceipts) ~= "table" then
 		data.ProcessedReceipts = {}
@@ -565,12 +599,48 @@ function PlayerDataService:Get(player: Player, path: Path?)
 	return DataService:get(player, path)
 end
 
-function PlayerDataService:Set(player: Player, path: Path, value: any)
-	self:WaitForData(player)
-	if deepEqual(DataService:get(player, path), value) then
+local function getLeaderboardStatPath(path: Path): string?
+	if type(path) == "string" then
+		return if LEADERBOARD_STAT_PATHS[path] then path else nil
+	end
+
+	if type(path) == "table" and #path == 1 and type(path[1]) == "string" then
+		local statPath = path[1]
+		return if LEADERBOARD_STAT_PATHS[statPath] then statPath else nil
+	end
+
+	return nil
+end
+
+local function maybeRecordLeaderboardAchieved(player: Player, path: Path, oldValue: any, newValue: any)
+	if recordingLeaderboardAchievedAt then
 		return
 	end
 
+	local statPath = getLeaderboardStatPath(path)
+	if not statPath then
+		return
+	end
+
+	local previousValue = math.max(math.floor(tonumber(oldValue) or 0), 0)
+	local nextValue = math.max(math.floor(tonumber(newValue) or 0), 0)
+	if nextValue <= 0 or nextValue <= previousValue then
+		return
+	end
+
+	recordingLeaderboardAchievedAt = true
+	DataService:set(player, { "LeaderboardAchievedAt", statPath }, os.time())
+	recordingLeaderboardAchievedAt = false
+end
+
+function PlayerDataService:Set(player: Player, path: Path, value: any)
+	self:WaitForData(player)
+	local currentValue = DataService:get(player, path)
+	if deepEqual(currentValue, value) then
+		return
+	end
+
+	maybeRecordLeaderboardAchieved(player, path, currentValue, value)
 	DataService:set(player, path, value)
 end
 
@@ -582,8 +652,19 @@ function PlayerDataService:Update(player: Player, path: Path, callback: (any) ->
 		return currentValue
 	end
 
+	maybeRecordLeaderboardAchieved(player, path, currentValue, nextValue)
 	DataService:set(player, path, nextValue)
 	return nextValue
+end
+
+function PlayerDataService:GetLeaderboardAchievedAt(player: Player, statPath: string): number
+	self:WaitForData(player)
+	local achievedAt = self:Get(player, { "LeaderboardAchievedAt", statPath })
+	if type(achievedAt) == "number" and achievedAt > 0 then
+		return math.floor(achievedAt)
+	end
+
+	return 0
 end
 
 function PlayerDataService:AddYen(player: Player, amount: number)
@@ -645,13 +726,13 @@ function PlayerDataService:AddUnitsBought(player: Player, amount: number)
 end
 
 function PlayerDataService:GetPlaytimeSeconds(player: Player): number
-	local savedPlaytime = math.max(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0)
+	local savedPlaytime = math.clamp(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
 	local startedAt = playtimeSessionStartedAt[player]
 	if not startedAt then
 		return savedPlaytime
 	end
 
-	return savedPlaytime + math.max(os.time() - startedAt, 0)
+	return math.min(savedPlaytime + math.max(os.time() - startedAt, 0), MAX_REASONABLE_PLAYTIME_SECONDS)
 end
 
 function PlayerDataService:PersistPlaytime(player: Player)
@@ -668,7 +749,8 @@ function PlayerDataService:PersistPlaytime(player: Player)
 
 	playtimeSessionStartedAt[player] = now
 	self:Update(player, "PlaytimeSeconds", function(current: number)
-		return math.max(math.floor(tonumber(current) or 0), 0) + elapsed
+		local nextPlaytime = math.max(math.floor(tonumber(current) or 0), 0) + elapsed
+		return math.min(nextPlaytime, MAX_REASONABLE_PLAYTIME_SECONDS)
 	end)
 end
 
@@ -708,9 +790,40 @@ local function applyLeaderboardStatsReset(data: { [string]: any })
 	data.Rebirths = 0
 	data.TotalUnitsBought = 0
 	data.PlaytimeSeconds = 0
+	data.LeaderboardAchievedAt = {
+		Rebirths = 0,
+		LifetimeYen = 0,
+		TotalUnitsBought = 0,
+		PlaytimeSeconds = 0,
+	}
 end
 
-local function applyRebirthProgressResetToData(data: { [string]: any })
+local function deepCopy(value: any): any
+	if type(value) ~= "table" then
+		return value
+	end
+
+	local copy = {}
+	for key, child in value do
+		copy[key] = deepCopy(child)
+	end
+
+	return copy
+end
+
+local function wipeDataToTemplate(data: { [string]: any })
+	for key in data do
+		data[key] = nil
+	end
+
+	for key, value in deepCopy(DataTemplate) do
+		data[key] = value
+	end
+
+	ensureManaData(data)
+end
+
+local function _applyRebirthProgressResetToData(data: { [string]: any })
 	local rebirthConfig = TycoonConfig.Rebirth or {}
 	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
 	local starterUnits = getRebirthStarterUnitsFromData(data)
@@ -728,14 +841,92 @@ local function applyRebirthProgressResetToData(data: { [string]: any })
 	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers({}, normalizedUnits)
 end
 
+function PlayerDataService:ResetLeaderboardStat(player: Player, statPath: string)
+	self:WaitForData(player)
+
+	if statPath == "PlaytimeSeconds" then
+		self:Set(player, statPath, 0)
+		playtimeSessionStartedAt[player] = os.time()
+	else
+		self:Set(player, statPath, 0)
+	end
+
+	recordingLeaderboardAchievedAt = true
+	self:Set(player, { "LeaderboardAchievedAt", statPath }, 0)
+	recordingLeaderboardAchievedAt = false
+end
+
 function PlayerDataService:ResetLeaderboardStats(player: Player)
+	recordingLeaderboardAchievedAt = true
 	self:Set(player, "LifetimeYen", 0)
 	self:Set(player, "Rebirths", 0)
 	self:Set(player, "TotalUnitsBought", 0)
 	self:Set(player, "PlaytimeSeconds", 0)
+	self:Set(player, "LeaderboardAchievedAt", {
+		Rebirths = 0,
+		LifetimeYen = 0,
+		TotalUnitsBought = 0,
+		PlaytimeSeconds = 0,
+	})
+	recordingLeaderboardAchievedAt = false
 	playtimeSessionStartedAt[player] = os.time()
+end
 
-	Knit.GetService("TycoonService"):ApplyRebirthProgressReset(player)
+function PlayerDataService:ResetPlayerData(player: Player)
+	self:WaitForData(player)
+	local userId = player.UserId
+
+	pcall(function()
+		Knit.GetService("TycoonService"):ReleaseTycoon(player)
+	end)
+
+	pcall(function()
+		local LeaderboardService = Knit.GetService("LeaderboardService")
+		LeaderboardService:RemoveUserFromAllBoards(userId, {
+			ExcludeFromRepublish = false,
+			Rerender = false,
+		})
+		LeaderboardService:RestoreUserToLeaderboards(userId)
+	end)
+
+	DataService:resetData(player)
+end
+
+function PlayerDataService:ResetPlayerDataByUserId(userId: number): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, "UserId must be greater than 0."
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		self:ResetPlayerData(onlinePlayer)
+		return true, nil
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile then
+		return false, `No saved data found for user {userId}.`
+	end
+
+	wipeDataToTemplate(profile.Data)
+	local ok, err = pcall(function()
+		profile:SetAsync()
+	end)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	pcall(function()
+		local LeaderboardService = Knit.GetService("LeaderboardService")
+		LeaderboardService:RemoveUserFromAllBoards(userId, {
+			ExcludeFromRepublish = false,
+			Rerender = true,
+		})
+		LeaderboardService:RestoreUserToLeaderboards(userId)
+	end)
+
+	return true, nil
 end
 
 function PlayerDataService:ResetLeaderboardStatsByUserId(userId: number): (boolean, string?)
@@ -757,7 +948,6 @@ function PlayerDataService:ResetLeaderboardStatsByUserId(userId: number): (boole
 	end
 
 	applyLeaderboardStatsReset(profile.Data)
-	applyRebirthProgressResetToData(profile.Data)
 	local ok, err = pcall(function()
 		profile:SetAsync()
 	end)

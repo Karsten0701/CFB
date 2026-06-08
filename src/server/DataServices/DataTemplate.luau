@@ -19,6 +19,8 @@ return {
 	},
 	TutorialBoostEndsAt = 0,
 	LastGroupRewardClaimAt = 0,
+	GroupLikeReminderCount = 0,
+	GroupRewardLikeUnlocked = false,
 	LastLogoutAt = 0,
 	FavoritePromptShown = false,
 	ManaInBag = 0,
@@ -27,6 +29,12 @@ return {
 	TotalUnitsPurchased = 0,
 	TotalUnitsBought = 0,
 	PlaytimeSeconds = 0,
+	LeaderboardAchievedAt = {
+		Rebirths = 0,
+		LifetimeYen = 0,
+		TotalUnitsBought = 0,
+		PlaytimeSeconds = 0,
+	},
 	RateLevel = 0,
 	Rate = 1,
 	Units = {

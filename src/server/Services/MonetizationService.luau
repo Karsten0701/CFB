@@ -181,6 +181,11 @@ function MonetizationService:AdminGrantProduct(player: Player, productKey: strin
 		if not TycoonService:OpenPendingCapsulePurchase(player) then
 			return false, "open_capsule_failed"
 		end
+	elseif product.Kind == "Offline5xReward" then
+		local granted, reward = TycoonService:ClaimOffline5xReward(player)
+		if not granted or (reward or 0) <= 0 then
+			return false, "offline_5x_failed"
+		end
 	elseif product.Kind == "StarterPack" then
 		local currentUnits = PlayerDataService:GetUnits(player)
 		local nextUnits = table.clone(currentUnits)
@@ -278,6 +283,9 @@ function MonetizationService:KnitStart()
 			success = true
 		elseif product.Kind == "OpenCapsule" then
 			success = TycoonService:OpenPendingCapsulePurchase(player)
+		elseif product.Kind == "Offline5xReward" then
+			local granted, reward = TycoonService:ClaimOffline5xReward(player)
+			success = granted and (reward or 0) > 0
 		elseif product.Kind == "StarterPack" then
 			if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
 				success = true

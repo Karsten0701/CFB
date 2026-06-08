@@ -19,6 +19,7 @@ local TycoonService = Knit.CreateService({
 	Name = "TycoonService",
 	Client = {
 		CapsuleRobuxOpened = Knit.CreateSignal(),
+		Offline5xRewardClaimed = Knit.CreateSignal(),
 	},
 })
 
@@ -34,6 +35,7 @@ local processElapsed: { [Player]: number } = {}
 local visualDataRequestAt: { [Player]: { [string]: number } } = {}
 local pickupBlockedUntil: { [Player]: number } = {}
 local pendingOfflineRewards: { [Player]: any } = {}
+local pendingOffline5xReward: { [Player]: boolean } = {}
 local activeCapsules: { [Player]: { [string]: any } } = {}
 local lastCapsuleSpawnAt: { [Player]: number } = {}
 local lastAmbientCapsuleAt: { [Player]: number } = {}
@@ -231,6 +233,7 @@ local function getOfflineYenMultiplier(player: Player): number
 	local rebirths = math.max(math.floor(PlayerDataService:Get(player, "Rebirths") or 0), 0)
 	local rebirthConfig = TycoonConfig.Rebirth
 	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
+	multiplier *= EventUtil.getEffectMultiplier("YenMultiplier", 1)
 
 	return multiplier
 end
@@ -611,6 +614,7 @@ function TycoonService:ReleaseTycoon(player: Player)
 	visualDataRequestAt[player] = nil
 	pickupBlockedUntil[player] = nil
 	pendingOfflineRewards[player] = nil
+	pendingOffline5xReward[player] = nil
 
 	local characterConnection = playerCharacterConnections[player]
 	if characterConnection then
@@ -759,15 +763,67 @@ function TycoonService.Client:GetOfflineReward(player: Player): (boolean, any)
 end
 
 function TycoonService.Client:ClaimOfflineReward(player: Player): (boolean, string?, number?)
+	if pendingOffline5xReward[player] then
+		return false, "Purchase pending", 0
+	end
+
 	local payload = getOfflineRewardPayload(player)
 	if not payload then
 		return false, "No reward", 0
 	end
 
+	pendingOffline5xReward[player] = nil
 	pendingOfflineRewards[player] = false
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:AddYen(player, payload.Reward)
 	return true, nil, payload.Reward
+end
+
+function TycoonService:ClaimOffline5xReward(player: Player): (boolean, number?)
+	if not pendingOffline5xReward[player] then
+		return false, 0
+	end
+
+	local payload = getOfflineRewardPayload(player)
+	if not payload then
+		pendingOffline5xReward[player] = nil
+		return false, 0
+	end
+
+	local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
+	local product = Monetization.DeveloperProducts.Offline5xReward
+	local multiplier = math.max(math.floor(tonumber(product and product.Multiplier) or 5), 2)
+
+	pendingOffline5xReward[player] = nil
+	pendingOfflineRewards[player] = false
+
+	local reward = math.max(math.floor(payload.Reward * multiplier), 0)
+	if reward <= 0 then
+		return false, 0
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:AddYen(player, reward)
+	self.Client.Offline5xRewardClaimed:Fire(player, reward, multiplier)
+	return true, reward
+end
+
+function TycoonService.Client:PrepareOffline5xReward(player: Player): boolean
+	if pendingOffline5xReward[player] then
+		return true
+	end
+
+	local payload = getOfflineRewardPayload(player)
+	if not payload then
+		return false
+	end
+
+	pendingOffline5xReward[player] = true
+	return true
+end
+
+function TycoonService.Client:CancelOffline5xReward(player: Player)
+	pendingOffline5xReward[player] = nil
 end
 
 function TycoonService.Client:GetTycoonVisualData(player: Player, tycoonName: string): (boolean, any)
@@ -1186,7 +1242,7 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 	local tokenReward = PlayerDataService:GetRebirthTokenReward(nextRebirths)
 	PlayerDataService:Set(player, "Rebirths", nextRebirths)
 	PlayerDataService:GrantRebirthTokenReward(player, nextRebirths)
-	self:ApplyRebirthProgressReset(player)
+	TycoonService:ApplyRebirthProgressReset(player)
 
 	return true, nil, nextRebirths, tokenReward
 end
@@ -1328,6 +1384,45 @@ function TycoonService.Client:UpgradeRateMax(player: Player, buttonName: string)
 	return true, nil, amount, gain
 end
 
+local function getGroupLikeReminderRequired(): number
+	local groupRewardConfig = TycoonConfig.GroupReward or {}
+	return math.max(math.floor(tonumber(groupRewardConfig.LikeReminderRequired) or 3), 1)
+end
+
+local function hasGroupRewardLikeUnlocked(PlayerDataService, player: Player): boolean
+	if PlayerDataService:Get(player, "GroupRewardLikeUnlocked") == true then
+		return true
+	end
+
+	local count = math.max(math.floor(PlayerDataService:Get(player, "GroupLikeReminderCount") or 0), 0)
+	return count >= getGroupLikeReminderRequired()
+end
+
+function TycoonService.Client:RegisterGroupLikeReminder(player: Player): (boolean, string?, number?, boolean?)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	if not isPlayerInRewardGroup(player) then
+		return false, "Not in group", 0, false
+	end
+
+	if hasGroupRewardLikeUnlocked(PlayerDataService, player) then
+		local count = math.max(math.floor(PlayerDataService:Get(player, "GroupLikeReminderCount") or 0), 0)
+		return true, nil, count, true
+	end
+
+	local required = getGroupLikeReminderRequired()
+	local count = math.max(math.floor(PlayerDataService:Get(player, "GroupLikeReminderCount") or 0), 0) + 1
+	PlayerDataService:Set(player, "GroupLikeReminderCount", count)
+
+	local unlocked = count >= required
+	if unlocked then
+		PlayerDataService:Set(player, "GroupRewardLikeUnlocked", true)
+	end
+
+	return true, nil, count, unlocked
+end
+
 function TycoonService.Client:ClaimGroupReward(player: Player, buttonName: string): (boolean, string?, number?, number?)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
@@ -1349,6 +1444,10 @@ function TycoonService.Client:ClaimGroupReward(player: Player, buttonName: strin
 
 	if not isPlayerInRewardGroup(player) then
 		return false, "Not in group"
+	end
+
+	if not hasGroupRewardLikeUnlocked(PlayerDataService, player) then
+		return false, "Like required"
 	end
 
 	local now = os.time()
@@ -1410,6 +1509,10 @@ local function createCapsuleEntry(player: Player): (boolean, any?)
 	local highestTier = CapsuleUtil.getHighestUnitTier(units)
 	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
 	local purchasedUnitCount = math.max(math.floor(PlayerDataService:Get(player, "TotalUnitsPurchased") or 0), 0)
+	local unitScaleCount = math.max(
+		math.floor(PlayerDataService:Get(player, "TotalUnitsBought") or 0),
+		purchasedUnitCount
+	)
 	local spawnTier = getUnitSpawnTier(PlayerDataService, player)
 	local capsuleId = HttpService:GenerateGUID(false)
 
@@ -1417,7 +1520,7 @@ local function createCapsuleEntry(player: Player): (boolean, any?)
 	activeCapsules[player][capsuleId] = {
 		HighestTier = highestTier,
 		PreviewTiers = previewTiers,
-		OpenPrice = CapsuleUtil.getOpenPrice(highestTier, units, purchasedUnitCount, spawnTier),
+		OpenPrice = CapsuleUtil.getOpenPrice(highestTier, units, purchasedUnitCount, spawnTier, unitScaleCount),
 		CreatedAt = os.clock(),
 	}
 

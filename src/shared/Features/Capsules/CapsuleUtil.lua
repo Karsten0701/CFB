@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
+local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 
 local CapsuleUtil = {}
@@ -86,125 +87,107 @@ function CapsuleUtil.rollRewardTier(highestTier: number): number?
 	return highestTier
 end
 
-local function getExpectedRewardBaseUnits(highestTier: number): number
+local function getOpenPriceConfig(): { [string]: any }
+	local config = getCapsuleConfig()
+	local openPrice = config.OpenPrice
+	if type(openPrice) == "table" then
+		return openPrice
+	end
+
+	return {
+		Min = config.MinOpenPrice,
+		Discount = config.OpenPriceUnitBuyDiscount,
+		MinValueRatio = 1,
+		ReferenceSpawnTierCap = RebirthUpgrades.UnitSpawnTier.MaxLevel + 1,
+		EconomyScaleExponent = 0.5,
+		LateGameUnitThreshold = 50_000_000,
+		MinMarginalMultiplier = 400,
+	}
+end
+
+local function getPricingSpawnTier(actualSpawnTier: number): number
+	local openPrice = getOpenPriceConfig()
+	local configuredCap = math.floor(tonumber(openPrice.ReferenceSpawnTierCap) or 0)
+	local defaultCap = RebirthUpgrades.UnitSpawnTier.MaxLevel + 1
+	local cap = if configuredCap > 0 then configuredCap else defaultCap
+	return math.clamp(math.min(actualSpawnTier, cap), 1, AnimeDroppers.MaxTier)
+end
+
+local function getMarginalUnitPrice(
+	purchasedUnitCount: number,
+	spawnTier: number,
+	unitScaleCount: number
+): number
+	return Pricing.getUnitBulkPrice(purchasedUnitCount, 1, true, spawnTier, unitScaleCount)
+end
+
+function CapsuleUtil.getExpectedRewardBaseUnits(highestTier: number): number
+	highestTier = math.clamp(math.floor(highestTier or 1), 1, AnimeDroppers.MaxTier)
+	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
 	local config = getCapsuleConfig()
 	local weights = config.TierWeights
-	local previewTiers = CapsuleUtil.getPreviewTiers(highestTier)
 	if type(weights) ~= "table" or #weights <= 0 then
 		return getTierRequiredBaseUnits(highestTier)
 	end
 
-	local expectedValue = 0
-	local totalChance = 0
+	local expectedBaseUnits = 0
 	for index, tier in previewTiers do
-		local entry = weights[index]
-		local chance = if type(entry) == "table" then math.max(tonumber(entry.Chance) or 0, 0) else 0
-		expectedValue += getTierRequiredBaseUnits(tier) * chance
-		totalChance += chance
+		local weightEntry = weights[index]
+		local chance = if type(weightEntry) == "table" then tonumber(weightEntry.Chance) or 0 else 0
+		expectedBaseUnits += chance * getTierRequiredBaseUnits(tier)
 	end
 
-	if totalChance <= 0 then
-		return getTierRequiredBaseUnits(highestTier)
-	end
-
-	return expectedValue / totalChance
+	return math.max(expectedBaseUnits, 0)
 end
 
-local function getEstimatedUnitBuyCost(baseUnitValue: number, spawnTier: number, purchasedUnitCount: number): number
-	local spawnBaseValue = getTierRequiredBaseUnits(spawnTier)
-	local equivalentUnits = math.max((baseUnitValue or 1) / spawnBaseValue, 0.05)
-	local lowerAmount = math.floor(equivalentUnits)
-	local upperAmount = math.max(lowerAmount + 1, 1)
-	local alpha = equivalentUnits - lowerAmount
-
-	if lowerAmount <= 0 then
-		return Pricing.getUnitBulkPrice(purchasedUnitCount, 1, true) * equivalentUnits
-	end
-
-	local lowerPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, lowerAmount, true)
-	local upperPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, upperAmount, true)
-	return lowerPrice + (upperPrice - lowerPrice) * alpha
-end
-
+--[[
+	Open price = (+1 buy price) × (expected reward RequiredTier1 / rebirth spawn RequiredTier1)
+	× economy scale × discount. Spawn tier from events is capped for the ratio so late-game
+	capsules stay in the trillions instead of collapsing to billions.
+]]
 function CapsuleUtil.getOpenPrice(
 	highestTier: number,
-	units: { { Tier: number } }?,
+	_units: { { Tier: number } }?,
 	purchasedUnitCount: number?,
-	spawnTier: number?
+	spawnTier: number?,
+	unitScaleCount: number?
 ): number
 	highestTier = math.clamp(math.floor(highestTier or 1), 1, AnimeDroppers.MaxTier)
-	local config = getCapsuleConfig()
-	local minPrice = tonumber(config.MinOpenPrice) or 100
-	local discount = math.clamp(tonumber(config.OpenPriceUnitCostDiscount) or 0.45, 0.01, 1)
-	local dropMultiplier = math.max(tonumber(config.OpenPriceMultiplier) or 50, 1)
-	local ownedCostPercent = math.clamp(tonumber(config.OpenPriceOwnedUnitCostPercent) or 0.18, 0.01, 1)
-	local ownedCostFloorPercent = math.clamp(tonumber(config.OpenPriceOwnedUnitCostFloorPercent) or 0.04, 0, ownedCostPercent)
-	local unitBuyDiscount = math.clamp(tonumber(config.OpenPriceUnitBuyDiscount) or 0.62, 0.05, 1)
-	local spawnTierDiscountPower = math.clamp(tonumber(config.OpenPriceSpawnTierDiscountPower) or 1, 0, 2)
-	local ownedBaseUnitPercent = math.clamp(tonumber(config.OpenPriceOwnedBaseUnitPercent) or 0.025, 0, 1)
-	local globalMultiplier = math.max(tonumber(config.OpenPriceGlobalMultiplier) or 1.5, 0.1)
-	local ownedScalingPercent = math.max(tonumber(config.OpenPriceOwnedScalingPercent) or 0.02, 0)
-	local ownedScalingPower = math.clamp(tonumber(config.OpenPriceOwnedScalingPower) or 0.5, 0, 1.5)
-	local ownedScalingMax = math.max(tonumber(config.OpenPriceOwnedScalingMax) or 2.25, 1)
-	local currentUnitCountPercent = math.max(tonumber(config.OpenPriceCurrentUnitCountPercent) or 0.015, 0)
-	local currentUnitCountPower = math.clamp(tonumber(config.OpenPriceCurrentUnitCountPower) or 0.65, 0, 1.5)
-	local currentUnitCountMax = math.max(tonumber(config.OpenPriceCurrentUnitCountMax) or 1.8, 1)
-	purchasedUnitCount = math.max(math.floor(tonumber(purchasedUnitCount) or 0), 0)
-	spawnTier = math.clamp(math.floor(tonumber(spawnTier) or highestTier), 1, AnimeDroppers.MaxTier)
-	local spawnBaseValue = getTierRequiredBaseUnits(spawnTier)
-	local floorTier = highestTier
+	local openPrice = getOpenPriceConfig()
+	local minPrice = math.max(math.floor(tonumber(openPrice.Min) or 100), 0)
+	local discount = math.clamp(tonumber(openPrice.Discount) or 0.85, 0.05, 1)
+	local minValueRatio = math.max(tonumber(openPrice.MinValueRatio) or 1, 1)
+	local economyScaleExponent = math.clamp(tonumber(openPrice.EconomyScaleExponent) or 0.5, 0, 2)
+	local lateGameUnitThreshold = math.max(tonumber(openPrice.LateGameUnitThreshold) or 50_000_000, 0)
+	local minMarginalMultiplier = math.max(tonumber(openPrice.MinMarginalMultiplier) or 350, 1)
 
-	for _, tier in CapsuleUtil.getPreviewTiers(highestTier) do
-		floorTier = math.min(floorTier, tier)
+	local resolvedPurchasedCount = math.max(math.floor(tonumber(purchasedUnitCount) or 0), 0)
+	local resolvedUnitScaleCount =
+		math.max(math.floor(tonumber(unitScaleCount) or resolvedPurchasedCount), resolvedPurchasedCount)
+	local resolvedSpawnTier = math.clamp(math.floor(tonumber(spawnTier) or highestTier), 1, AnimeDroppers.MaxTier)
+	local pricingSpawnTier = getPricingSpawnTier(resolvedSpawnTier)
+	local pricingSpawnBase = math.max(getTierRequiredBaseUnits(pricingSpawnTier), 1)
+	local highestBaseUnits = math.max(getTierRequiredBaseUnits(highestTier), 1)
+
+	local marginalUnitPrice =
+		getMarginalUnitPrice(resolvedPurchasedCount, resolvedSpawnTier, resolvedUnitScaleCount)
+	if marginalUnitPrice <= 0 then
+		return minPrice
 	end
 
-	local tierData = AnimeDroppers.Tiers[floorTier]
-	local requiredTierOneUnits = math.max(math.floor(tonumber(tierData and tierData.RequiredTier1) or 1), 1)
-	local estimatedUnitCost = tonumber(tierData and tierData.EstimatedTier1Cost)
-		or Pricing.getUnitBulkPrice(0, requiredTierOneUnits, true)
-	local dropValue = math.max(tonumber(tierData and tierData.DropValue) or 1, 1)
-	local legacyTierPrice = math.max(estimatedUnitCost * discount, dropValue * dropMultiplier)
-	local expectedBaseUnits = getExpectedRewardBaseUnits(highestTier)
-	local valueBasedPrice = getEstimatedUnitBuyCost(expectedBaseUnits, spawnTier, purchasedUnitCount) * unitBuyDiscount
-	local spawnTierDiscount = 1 / (spawnBaseValue ^ spawnTierDiscountPower)
-	local tierBasedPrice = math.min(legacyTierPrice, valueBasedPrice) * spawnTierDiscount
-	local ownedUnitCost = 0
-	local ownedBaseUnits = 0
-	local currentUnitCount = 0
-	if type(units) == "table" then
-		for _, unit in units do
-			if type(unit) ~= "table" then
-				continue
-			end
-
-			currentUnitCount += 1
-			local ownedTierData = AnimeDroppers.Tiers[unit.Tier or 1]
-			ownedUnitCost += tonumber(ownedTierData and ownedTierData.EstimatedTier1Cost) or 0
-			ownedBaseUnits += getTierRequiredBaseUnits(unit.Tier or 1)
-		end
+	local expectedRewardBaseUnits = CapsuleUtil.getExpectedRewardBaseUnits(highestTier)
+	if expectedRewardBaseUnits <= 0 then
+		return minPrice
 	end
 
-	local price = tierBasedPrice
-	local ownedProgressMultiplier = 1
-	if ownedUnitCost > 0 then
-		price = math.min(price, ownedUnitCost * ownedCostPercent)
-		price = math.max(price, ownedUnitCost * ownedCostFloorPercent)
-	end
-	if ownedBaseUnits > 0 and ownedBaseUnitPercent > 0 then
-		local ownedEquivalentUnits = math.max(ownedBaseUnits / spawnBaseValue, 1)
-		ownedProgressMultiplier = math.min(1 + ownedScalingPercent * (ownedEquivalentUnits ^ ownedScalingPower), ownedScalingMax)
-		local ownedProgressPrice = Pricing.getUnitBulkPrice(purchasedUnitCount, math.max(math.floor(ownedBaseUnits / spawnBaseValue), 1), true)
-			* ownedBaseUnitPercent
-			* spawnTierDiscount
-		price = math.min(price, ownedProgressPrice)
+	local valueRatio = math.max(expectedRewardBaseUnits / pricingSpawnBase, minValueRatio)
+	local economyScale = math.max(resolvedUnitScaleCount / highestBaseUnits, 1) ^ economyScaleExponent
+	local price = marginalUnitPrice * valueRatio * economyScale * discount
+
+	if resolvedUnitScaleCount >= lateGameUnitThreshold then
+		price = math.max(price, marginalUnitPrice * minMarginalMultiplier * discount)
 	end
 
-	local currentUnitCountMultiplier = math.min(
-		1 + currentUnitCountPercent * (currentUnitCount ^ currentUnitCountPower),
-		currentUnitCountMax
-	)
-
-	price *= globalMultiplier * ownedProgressMultiplier * currentUnitCountMultiplier
 	return math.max(math.floor(price), minPrice)
 end
 

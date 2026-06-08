@@ -13,8 +13,11 @@ local LeaderboardService = Knit.CreateService({
 })
 
 local orderedStores: { [string]: OrderedDataStore } = {}
-local valueStores: { [string]: GlobalDataStore } = {}
+local displayValueStores: { [string]: GlobalDataStore } = {}
 local lastPublishedValues: { [number]: { [string]: number } } = {}
+local failedOrderedReads: { [string]: { [number]: boolean } } = {}
+local failedDisplayReads: { [string]: { [number]: boolean } } = {}
+local sortedReadUnavailable: { [string]: boolean } = {}
 local playerPublishConnections: { [Player]: { RBXScriptConnection } } = {}
 local dirtyPlayers: { [Player]: boolean } = {}
 local displayValueCache: { [string]: { [number]: { Value: number, FetchedAt: number } } } = {}
@@ -22,12 +25,97 @@ local dirtyDebounceScheduled: { [Player]: boolean } = {}
 local publishQueue: { [Player]: boolean } = {}
 local lastPublishAttemptAt: { [Player]: number } = {}
 local publishWorkerRunning = false
+local excludedFromBoards: { [number]: { [string]: boolean } } = {}
+local isShuttingDown = false
+
+type PublishOptions = {
+	fast: boolean?,
+	allowOnShutdown: boolean?,
+}
+
+local function resolvePublishOptions(options: PublishOptions?): PublishOptions
+	return options or {}
+end
 
 local LOG_SORT_SCALE = 1_000_000
+local ORDERED_SORT_MAX = 2_147_483_647
 local DISPLAY_VALUE_CACHE_SECONDS = 300
 local lastLowBudgetWarnAt = -math.huge
 local lastPublishErrorWarnAt = -math.huge
 local lastReadErrorWarnAt = -math.huge
+
+local function normalizeValue(value: any): number
+	return math.max(math.floor(tonumber(value) or 0), 0)
+end
+
+local function getLegacyTieBreakModulus(): number
+	return math.max(math.floor(tonumber(LeaderboardConfig.LegacyTieBreakModulus) or LOG_SORT_SCALE), 2)
+end
+
+local function getSanityMax(boardConfig): number?
+	local sanityMax = LeaderboardConfig.SanityMax
+	if type(sanityMax) ~= "table" or type(boardConfig.DataPath) ~= "string" then
+		return nil
+	end
+
+	local maxValue = tonumber(sanityMax[boardConfig.DataPath])
+	if maxValue == nil or maxValue ~= maxValue then
+		return nil
+	end
+
+	return math.max(math.floor(maxValue), 1)
+end
+
+local function shouldResetExcessiveValue(boardConfig, value: number): boolean
+	local maxValue = getSanityMax(boardConfig)
+	if not maxValue then
+		return false
+	end
+
+	return normalizeValue(value) > maxValue
+end
+
+local function resetLeaderboardStatForPlayer(PlayerDataService, player: Player, statPath: string)
+	pcall(function()
+		PlayerDataService:ResetLeaderboardStat(player, statPath)
+	end)
+end
+
+local publishBoardForUserId
+
+local function prepareLeaderboardValue(
+	PlayerDataService,
+	player: Player?,
+	boardConfig,
+	rawValue: number
+): number
+	rawValue = normalizeValue(rawValue)
+	if not shouldResetExcessiveValue(boardConfig, rawValue) then
+		return rawValue
+	end
+
+	if player and type(boardConfig.DataPath) == "string" then
+		resetLeaderboardStatForPlayer(PlayerDataService, player, boardConfig.DataPath)
+	end
+
+	return 0
+end
+
+local function decodeLegacyLinearSortValue(sortValue: number): number
+	sortValue = normalizeValue(sortValue)
+	local modulus = getLegacyTieBreakModulus()
+	if sortValue < modulus then
+		return sortValue
+	end
+
+	local legacyPrimary = math.floor(sortValue / modulus)
+	local remainder = sortValue % modulus
+	if remainder > 0 and legacyPrimary > 0 and legacyPrimary < sortValue then
+		return legacyPrimary
+	end
+
+	return sortValue
+end
 
 local function getStore(boardConfig): OrderedDataStore
 	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName
@@ -41,16 +129,97 @@ local function getStore(boardConfig): OrderedDataStore
 	return store
 end
 
-local function getValueStore(boardConfig): GlobalDataStore
+local function getDisplayValueStore(boardConfig): GlobalDataStore?
+	if boardConfig.SortMode ~= "Logarithmic" then
+		return nil
+	end
+
 	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName .. "_DisplayValues"
-	local store = valueStores[storeName]
+	local store = displayValueStores[storeName]
 	if store then
 		return store
 	end
 
 	store = DataStoreService:GetDataStore(storeName)
-	valueStores[storeName] = store
+	displayValueStores[storeName] = store
 	return store
+end
+
+local function hasDisplayReadFailed(storeName: string, userId: number): boolean
+	local failedUsers = failedDisplayReads[storeName]
+	return type(failedUsers) == "table" and failedUsers[userId] == true
+end
+
+local function markDisplayReadFailed(storeName: string, userId: number)
+	failedDisplayReads[storeName] = failedDisplayReads[storeName] or {}
+	failedDisplayReads[storeName][userId] = true
+end
+
+local function safeDisplayValueGetAsync(boardConfig, userId: number): (boolean, number?)
+	local valueStore = getDisplayValueStore(boardConfig)
+	if not valueStore then
+		return false, nil
+	end
+
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, nil
+	end
+
+	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName .. "_DisplayValues"
+	if hasDisplayReadFailed(storeName, userId) then
+		return false, nil
+	end
+
+	local ok, result = pcall(function()
+		return valueStore:GetAsync(tostring(userId))
+	end)
+	if ok and type(result) == "number" and result >= 0 then
+		return true, normalizeValue(result)
+	end
+
+	markDisplayReadFailed(storeName, userId)
+	return false, nil
+end
+
+local function getReadRetrySettings(): (number, number)
+	local readRetries = math.max(math.floor(tonumber(LeaderboardConfig.ReadRetryCount) or 3), 1)
+	local readRetryDelay = math.max(tonumber(LeaderboardConfig.ReadRetryDelaySeconds) or 2, 0.5)
+	return readRetries, readRetryDelay
+end
+
+local function hasOrderedReadFailed(storeName: string, userId: number): boolean
+	local failedUsers = failedOrderedReads[storeName]
+	return type(failedUsers) == "table" and failedUsers[userId] == true
+end
+
+local function markOrderedReadFailed(storeName: string, userId: number)
+	failedOrderedReads[storeName] = failedOrderedReads[storeName] or {}
+	failedOrderedReads[storeName][userId] = true
+end
+
+local function safeOrderedGetAsync(store: OrderedDataStore, storeName: string, userId: number): (boolean, number?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 or hasOrderedReadFailed(storeName, userId) then
+		return false, nil
+	end
+
+	local readRetries, readRetryDelay = getReadRetrySettings()
+	for attempt = 1, readRetries do
+		local ok, result = pcall(function()
+			return store:GetAsync(tostring(userId))
+		end)
+		if ok and type(result) == "number" then
+			return true, normalizeValue(result)
+		end
+
+		if attempt < readRetries then
+			task.wait(readRetryDelay * attempt)
+		end
+	end
+
+	markOrderedReadFailed(storeName, userId)
+	return false, nil
 end
 
 local function getBudget(requestType: Enum.DataStoreRequestType): number
@@ -62,6 +231,10 @@ local function waitForBudget(
 	minimumBudget: number,
 	timeoutSeconds: number?
 ): boolean
+	if isShuttingDown then
+		return getBudget(requestType) >= minimumBudget
+	end
+
 	local timeout = timeoutSeconds or LeaderboardConfig.WriteBudgetWaitTimeout or 25
 	local deadline = os.clock() + timeout
 
@@ -73,6 +246,31 @@ local function waitForBudget(
 	end
 
 	return false
+end
+
+local function hasWriteBudget(requestType: Enum.DataStoreRequestType, minimumBudget: number): boolean
+	return getBudget(requestType) >= minimumBudget
+end
+
+local function safeDisplayValueSetAsync(boardConfig, userId: number, value: number): boolean
+	local valueStore = getDisplayValueStore(boardConfig)
+	if not valueStore then
+		return false
+	end
+
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false
+	end
+
+	if not waitForBudget(Enum.DataStoreRequestType.SetIncrementAsync, 1, 5) then
+		return false
+	end
+
+	local ok = pcall(function()
+		valueStore:SetAsync(tostring(userId), normalizeValue(value))
+	end)
+	return ok
 end
 
 local function warnLowBudget(requestType: Enum.DataStoreRequestType)
@@ -105,11 +303,7 @@ local function warnReadFailed(message: string, ...)
 	warn(message, ...)
 end
 
-local function normalizeValue(value: any): number
-	return math.max(math.floor(tonumber(value) or 0), 0)
-end
-
-local function getSortValue(boardConfig, value: number): number
+local function getPrimarySortValue(boardConfig, value: number): number
 	value = normalizeValue(value)
 	if boardConfig.SortMode == "Logarithmic" then
 		if value <= 1 then
@@ -122,25 +316,293 @@ local function getSortValue(boardConfig, value: number): number
 	return value
 end
 
-local function getApproximateValueFromSort(boardConfig, sortValue: number): number
+local function decodeLogSortValue(sortValue: number): number
+	return math.floor(10 ^ (normalizeValue(sortValue) / LOG_SORT_SCALE))
+end
+
+local function isLogEncodedSortValue(sortValue: number): boolean
 	sortValue = normalizeValue(sortValue)
-	if boardConfig.SortMode == "Logarithmic" then
-		return math.max(math.floor(10 ^ (sortValue / LOG_SORT_SCALE)), 0)
+	if sortValue <= 1 then
+		return true
 	end
 
-	return sortValue
+	local decodedValue = decodeLogSortValue(sortValue)
+	if decodedValue < 2 then
+		return false
+	end
+
+	-- Legacy boards stored raw yen directly in the ordered datastore.
+	if sortValue >= LOG_SORT_SCALE and decodedValue < sortValue / 10 then
+		return false
+	end
+
+	local reencoded = math.floor(math.log10(decodedValue) * LOG_SORT_SCALE)
+	return math.abs(reencoded - sortValue) <= 1
+end
+
+local function resolveLogarithmicDisplayValue(sortValue: number): number
+	sortValue = normalizeValue(sortValue)
+	if sortValue <= 1 then
+		return sortValue
+	end
+
+	if isLogEncodedSortValue(sortValue) then
+		return decodeLogSortValue(sortValue)
+	end
+
+	return decodeLegacyLinearSortValue(sortValue)
+end
+
+local function getSortValue(boardConfig, value: number): number
+	return getPrimarySortValue(boardConfig, value)
 end
 
 local function getPlayerValue(PlayerDataService, player: Player, boardConfig): number
-	if boardConfig.DataPath == "PlaytimeSeconds" then
-		return normalizeValue(PlayerDataService:GetPlaytimeSeconds(player))
+	local rawValue = if boardConfig.DataPath == "PlaytimeSeconds"
+		then PlayerDataService:GetPlaytimeSeconds(player)
+		else PlayerDataService:Get(player, boardConfig.DataPath)
+
+	return prepareLeaderboardValue(PlayerDataService, player, boardConfig, rawValue)
+end
+
+local function resolveDisplayValue(boardConfig, sortValue: number): number
+	if boardConfig.SortMode == "Logarithmic" then
+		return resolveLogarithmicDisplayValue(sortValue)
 	end
 
-	return normalizeValue(PlayerDataService:Get(player, boardConfig.DataPath))
+	return decodeLegacyLinearSortValue(sortValue)
+end
+
+local function isCorruptOrderedSortValue(boardConfig, sortValue: number): boolean
+	sortValue = normalizeValue(sortValue)
+	if boardConfig.SortMode ~= "Logarithmic" and sortValue > ORDERED_SORT_MAX then
+		return true
+	end
+
+	return shouldResetExcessiveValue(boardConfig, resolveDisplayValue(boardConfig, sortValue))
+end
+
+local function tryGetSortedPages(
+	store: OrderedDataStore,
+	ascending: boolean,
+	pageSize: number,
+	readRetries: number,
+	readRetryDelay: number
+): (boolean, any)
+	local ok = false
+	local pagesOrErr: any = nil
+
+	for attempt = 1, readRetries do
+		ok, pagesOrErr = pcall(function()
+			return store:GetSortedAsync(ascending, pageSize)
+		end)
+		if ok then
+			return true, pagesOrErr
+		end
+
+		if attempt < readRetries then
+			task.wait(readRetryDelay * attempt)
+		end
+	end
+
+	return false, pagesOrErr
 end
 
 local function getWriteSpacing(): number
 	return LeaderboardConfig.WriteSpacing or 0.6
+end
+
+local function isUserExcludedFromBoard(userId: number, boardName: string): boolean
+	local userBoards = excludedFromBoards[userId]
+	return type(userBoards) == "table" and userBoards[boardName] == true
+end
+
+local function excludeUserFromBoard(userId: number, boardName: string)
+	excludedFromBoards[userId] = excludedFromBoards[userId] or {}
+	excludedFromBoards[userId][boardName] = true
+end
+
+local function clearOnlinePublishState(userId: number)
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if not onlinePlayer then
+		return
+	end
+
+	dirtyPlayers[onlinePlayer] = nil
+	dirtyDebounceScheduled[onlinePlayer] = nil
+	publishQueue[onlinePlayer] = nil
+	lastPublishAttemptAt[onlinePlayer] = nil
+end
+
+local function correctExcessiveDatastoreEntry(
+	boardName: string,
+	boardConfig,
+	userId: number,
+	PlayerDataService
+)
+	task.spawn(function()
+		if isShuttingDown then
+			return
+		end
+
+		publishBoardForUserId(userId, boardName, boardConfig, 0, 0)
+		displayValueCache[boardName] = displayValueCache[boardName] or {}
+		displayValueCache[boardName][userId] = {
+			Value = 0,
+			FetchedAt = os.clock(),
+		}
+
+		local onlinePlayer = Players:GetPlayerByUserId(userId)
+		if onlinePlayer and type(boardConfig.DataPath) == "string" then
+			resetLeaderboardStatForPlayer(PlayerDataService, onlinePlayer, boardConfig.DataPath)
+		end
+	end)
+end
+
+publishBoardForUserId = function(
+	userId: number,
+	boardName: string,
+	boardConfig,
+	value: number,
+	sortValue: number,
+	options: PublishOptions?
+): boolean
+	local publishOptions = resolvePublishOptions(options)
+	local fast = publishOptions.fast == true
+
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false
+	end
+
+	displayValueCache[boardName] = displayValueCache[boardName] or {}
+	displayValueCache[boardName][userId] = {
+		Value = value,
+		FetchedAt = os.clock(),
+	}
+
+	if boardConfig.SortMode == "Logarithmic" and not fast and not isShuttingDown then
+		safeDisplayValueSetAsync(boardConfig, userId, value)
+		task.wait(getWriteSpacing())
+	end
+
+	local budgetOk = if fast or isShuttingDown
+		then hasWriteBudget(Enum.DataStoreRequestType.OrderedWrite, 1)
+		else waitForBudget(Enum.DataStoreRequestType.OrderedWrite, 1)
+	if not budgetOk then
+		if not fast then
+			warnLowBudget(Enum.DataStoreRequestType.OrderedWrite)
+		end
+		return false
+	end
+
+	local store = getStore(boardConfig)
+	local ok, err = pcall(function()
+		store:SetAsync(tostring(userId), sortValue)
+	end)
+
+	if not ok then
+		if not fast then
+			warnPublishFailed(boardName, userId, err)
+		end
+		return false
+	end
+
+	lastPublishedValues[userId] = lastPublishedValues[userId] or {}
+	lastPublishedValues[userId][boardName] = sortValue
+	return true
+end
+
+local function collectRecoveryCandidateUserIds(boardName: string): { number }
+	local userIds = {}
+	local seen: { [number]: boolean } = {}
+
+	local function addUserId(userId: number)
+		userId = math.floor(tonumber(userId) or 0)
+		if userId <= 0 or seen[userId] or isUserExcludedFromBoard(userId, boardName) then
+			return
+		end
+
+		seen[userId] = true
+		table.insert(userIds, userId)
+	end
+
+	for _, player in Players:GetPlayers() do
+		addUserId(player.UserId)
+	end
+
+	for userId, boards in lastPublishedValues do
+		if type(boards) == "table" and boards[boardName] ~= nil then
+			addUserId(userId)
+		end
+	end
+
+	return userIds
+end
+
+local function recoverCorruptBoardEntries(
+	boardName: string,
+	boardConfig,
+	PlayerDataService
+): number
+	local store = getStore(boardConfig)
+	local fixed = 0
+
+	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName
+	for _, userId in collectRecoveryCandidateUserIds(boardName) do
+		local readOk, sortValue = safeOrderedGetAsync(store, storeName, userId)
+		if not readOk or sortValue == nil then
+			continue
+		end
+
+		if isCorruptOrderedSortValue(boardConfig, sortValue) then
+			correctExcessiveDatastoreEntry(boardName, boardConfig, userId, PlayerDataService)
+			fixed += 1
+			task.wait(getWriteSpacing())
+		end
+	end
+
+	return fixed
+end
+
+local function finalizeEntriesForRender(
+	boardName: string,
+	boardConfig,
+	entries: { { UserId: number, Value: number } }
+)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local validEntries = {}
+	for _, entry in entries do
+		local value = normalizeValue(entry.Value)
+		if value < 0 then
+			continue
+		end
+
+		if shouldResetExcessiveValue(boardConfig, value) then
+			correctExcessiveDatastoreEntry(boardName, boardConfig, entry.UserId, PlayerDataService)
+			value = 0
+		end
+
+		table.insert(validEntries, {
+			UserId = entry.UserId,
+			Value = value,
+		})
+	end
+
+	table.sort(validEntries, function(left, right)
+		if left.Value == right.Value then
+			return left.UserId < right.UserId
+		end
+
+		return left.Value > right.Value
+	end)
+
+	local maxEntries = LeaderboardConfig.MaxEntries or 100
+	while #validEntries > maxEntries do
+		table.remove(validEntries)
+	end
+
+	return validEntries
 end
 
 function LeaderboardService:publishBoard(
@@ -148,92 +610,99 @@ function LeaderboardService:publishBoard(
 	boardName: string,
 	boardConfig,
 	value: number,
-	sortValue: number
+	sortValue: number,
+	options: PublishOptions?
 ): boolean
-	if boardConfig.SortMode == "Logarithmic" then
-		if not waitForBudget(Enum.DataStoreRequestType.SetIncrementAsync, 1) then
-			warnLowBudget(Enum.DataStoreRequestType.SetIncrementAsync)
-			return false
+	return publishBoardForUserId(player.UserId, boardName, boardConfig, value, sortValue, options)
+end
+
+function LeaderboardService:publishZeroLeaderboardForUser(userId: number): (number, boolean)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return 0, false
+	end
+
+	local published = 0
+	for boardName, boardConfig in LeaderboardConfig.Boards do
+		if isUserExcludedFromBoard(userId, boardName) then
+			continue
 		end
 
-		local valueStore = getValueStore(boardConfig)
-		local displayOk, displayErr = pcall(function()
-			valueStore:SetAsync(tostring(player.UserId), value)
-		end)
-		if not displayOk then
-			warnPublishFailed(boardName, player.UserId, displayErr)
-			return false
+		if not publishBoardForUserId(userId, boardName, boardConfig, 0, 0) then
+			return published, false
 		end
 
-		displayValueCache[boardName] = displayValueCache[boardName] or {}
-		displayValueCache[boardName][player.UserId] = {
-			Value = value,
-			FetchedAt = os.clock(),
-		}
-
+		published += 1
 		task.wait(getWriteSpacing())
 	end
 
-	if not waitForBudget(Enum.DataStoreRequestType.OrderedWrite, 1) then
-		warnLowBudget(Enum.DataStoreRequestType.OrderedWrite)
-		return false
-	end
-
-	local store = getStore(boardConfig)
-	local ok, err = pcall(function()
-		store:SetAsync(tostring(player.UserId), sortValue)
-	end)
-
-	if not ok then
-		warnPublishFailed(boardName, player.UserId, err)
-		return false
-	end
-
-	lastPublishedValues[player.UserId] = lastPublishedValues[player.UserId] or {}
-	lastPublishedValues[player.UserId][boardName] = value
-	return true
+	return published, true
 end
 
-function LeaderboardService:publishPlayer(player: Player, force: boolean?): boolean
+function LeaderboardService:publishPlayer(player: Player, force: boolean?, options: PublishOptions?): boolean
+	local publishOptions = resolvePublishOptions(options)
+	if isShuttingDown and not publishOptions.allowOnShutdown then
+		return false
+	end
+
 	local PlayerDataService = Knit.GetService("PlayerDataService")
-	PlayerDataService:WaitForData(player)
+	local dataReady, dataErr = pcall(function()
+		PlayerDataService:WaitForData(player)
+	end)
+	if not dataReady then
+		if not publishOptions.fast then
+			warn("[LeaderboardService] Skipping publish; player data unavailable.", dataErr)
+		end
+		return false
+	end
 
 	lastPublishedValues[player.UserId] = lastPublishedValues[player.UserId] or {}
 	local hadFailure = false
+	local fast = publishOptions.fast == true
 
 	for boardName, boardConfig in LeaderboardConfig.Boards do
+		if isShuttingDown and not publishOptions.allowOnShutdown then
+			break
+		end
+
+		if isUserExcludedFromBoard(player.UserId, boardName) then
+			continue
+		end
+
 		local value = getPlayerValue(PlayerDataService, player, boardConfig)
-		if value <= 0 then
+		if value <= 0 and not force then
 			continue
 		end
 
 		local sortValue = getSortValue(boardConfig, value)
-		if not force and lastPublishedValues[player.UserId][boardName] == value then
+		if not force and lastPublishedValues[player.UserId][boardName] == sortValue then
 			continue
 		end
 
-		if not self:publishBoard(player, boardName, boardConfig, value, sortValue) then
+		if not self:publishBoard(player, boardName, boardConfig, value, sortValue, publishOptions) then
 			hadFailure = true
-			break
+			if not fast then
+				break
+			end
+			continue
 		end
 
-		task.wait(getWriteSpacing())
+		if not fast and not isShuttingDown then
+			task.wait(getWriteSpacing())
+		end
 	end
 
-	if hadFailure then
+	if hadFailure and not fast then
 		dirtyPlayers[player] = true
 		return false
 	end
 
 	dirtyPlayers[player] = nil
-	return true
+	return not hadFailure
 end
 
 function LeaderboardService:getDisplayValue(boardName: string, boardConfig, userId: number, sortValue: number): number
-	if boardConfig.SortMode ~= "Logarithmic" then
-		return normalizeValue(sortValue)
-	end
-
+	local PlayerDataService = Knit.GetService("PlayerDataService")
 	displayValueCache[boardName] = displayValueCache[boardName] or {}
 	local cached = displayValueCache[boardName][userId]
 	if cached and os.clock() - cached.FetchedAt < DISPLAY_VALUE_CACHE_SECONDS then
@@ -242,20 +711,58 @@ function LeaderboardService:getDisplayValue(boardName: string, boardConfig, user
 
 	local onlinePlayer = Players:GetPlayerByUserId(userId)
 	if onlinePlayer then
-		local PlayerDataService = Knit.GetService("PlayerDataService")
 		local ok, value = pcall(function()
 			return getPlayerValue(PlayerDataService, onlinePlayer, boardConfig)
 		end)
-		if ok and value > 0 then
+		if ok and value >= 0 then
+			local displayValue = prepareLeaderboardValue(PlayerDataService, onlinePlayer, boardConfig, value)
 			displayValueCache[boardName][userId] = {
-				Value = value,
+				Value = displayValue,
 				FetchedAt = os.clock(),
 			}
-			return value
+			return displayValue
 		end
 	end
 
-	return getApproximateValueFromSort(boardConfig, sortValue)
+	if isCorruptOrderedSortValue(boardConfig, sortValue) then
+		correctExcessiveDatastoreEntry(boardName, boardConfig, userId, PlayerDataService)
+		return 0
+	end
+
+	return resolveDisplayValue(boardConfig, sortValue)
+end
+
+local function enrichEntriesFromDisplayStore(
+	boardName: string,
+	boardConfig,
+	entries: { { UserId: number, Value: number } },
+	PlayerDataService
+)
+	if boardConfig.SortMode ~= "Logarithmic" then
+		return
+	end
+
+	local spacing = math.max(tonumber(LeaderboardConfig.DisplayReadSpacing) or getWriteSpacing(), 0.25)
+	for _, entry in entries do
+		if isShuttingDown then
+			break
+		end
+
+		if waitForBudget(Enum.DataStoreRequestType.GetAsync, 1, 5) then
+			local readOk, storedValue = safeDisplayValueGetAsync(boardConfig, entry.UserId)
+			if readOk and storedValue ~= nil then
+				local displayValue = prepareLeaderboardValue(PlayerDataService, nil, boardConfig, storedValue)
+				entry.Value = displayValue
+				displayValueCache[boardName] = displayValueCache[boardName] or {}
+				displayValueCache[boardName][entry.UserId] = {
+					Value = displayValue,
+					FetchedAt = os.clock(),
+				}
+			end
+		end
+
+		task.wait(spacing)
+	end
 end
 
 function LeaderboardService:markPlayerDirty(player: Player, immediate: boolean?)
@@ -286,6 +793,10 @@ function LeaderboardService:markPlayerDirty(player: Player, immediate: boolean?)
 end
 
 function LeaderboardService:schedulePlayerPublish(player: Player, force: boolean?)
+	if isShuttingDown then
+		return
+	end
+
 	if force then
 		publishQueue[player] = true
 	else
@@ -296,13 +807,20 @@ function LeaderboardService:schedulePlayerPublish(player: Player, force: boolean
 end
 
 function LeaderboardService:startPublishWorker()
-	if publishWorkerRunning then
+	if publishWorkerRunning or isShuttingDown then
 		return
 	end
 
 	publishWorkerRunning = true
 	task.spawn(function()
 		while next(publishQueue) ~= nil do
+			if isShuttingDown then
+				for queuedPlayer in publishQueue do
+					publishQueue[queuedPlayer] = nil
+				end
+				break
+			end
+
 			local nextPlayer: Player? = nil
 			local forcePublish = false
 
@@ -351,26 +869,15 @@ function LeaderboardService:publishOnlinePlayers(force: boolean?)
 	end
 end
 
-function LeaderboardService:renderBoard(boardName: string, boardConfig)
-	if not waitForBudget(Enum.DataStoreRequestType.OrderedList, 1, 10) then
-		warnReadFailed("[LeaderboardService] Skipping leaderboard read; datastore read budget is low.")
-		return
-	end
-
-	local store = getStore(boardConfig)
-	local ok, pagesOrErr = pcall(function()
-		return store:GetSortedAsync(false, LeaderboardConfig.MaxEntries)
-	end)
-
-	if not ok then
-		warnReadFailed("[LeaderboardService] Failed to read", boardName, pagesOrErr)
-		return
-	end
-
+function LeaderboardService:buildBoardEntriesFromPages(
+	boardName: string,
+	boardConfig,
+	pages: any
+): { { UserId: number, Value: number } }
 	local entries = {}
-	for _, item in pagesOrErr:GetCurrentPage() do
+	for _, item in pages:GetCurrentPage() do
 		local userId = tonumber(item.key)
-		if not userId then
+		if not userId or isUserExcludedFromBoard(userId, boardName) then
 			continue
 		end
 
@@ -381,8 +888,131 @@ function LeaderboardService:renderBoard(boardName: string, boardConfig)
 		})
 	end
 
+	return entries
+end
+
+function LeaderboardService:buildFallbackBoardEntries(boardName: string, boardConfig): { { UserId: number, Value: number } }
+	local store = getStore(boardConfig)
+	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName
+	local entriesByUser: { [number]: { UserId: number, Value: number } } = {}
+
+	local function addEntry(userId: number, sortValue: number)
+		if isUserExcludedFromBoard(userId, boardName) then
+			return
+		end
+
+		entriesByUser[userId] = {
+			UserId = userId,
+			Value = self:getDisplayValue(boardName, boardConfig, userId, sortValue),
+		}
+	end
+
+	for _, userId in collectRecoveryCandidateUserIds(boardName) do
+		local readOk, sortValue = safeOrderedGetAsync(store, storeName, userId)
+		if readOk and sortValue ~= nil then
+			addEntry(userId, sortValue)
+			continue
+		end
+
+		local publishedBoards = lastPublishedValues[userId]
+		if type(publishedBoards) == "table" and publishedBoards[boardName] ~= nil then
+			addEntry(userId, publishedBoards[boardName])
+		end
+	end
+
+	if not sortedReadUnavailable[boardName] then
+		local _, readRetryDelay = getReadRetrySettings()
+		local ascendingOk, ascendingPages = tryGetSortedPages(
+			store,
+			true,
+			LeaderboardConfig.MaxEntries,
+			1,
+			readRetryDelay
+		)
+		if ascendingOk then
+			for _, entry in self:buildBoardEntriesFromPages(boardName, boardConfig, ascendingPages) do
+				entriesByUser[entry.UserId] = entry
+			end
+		end
+	end
+
+	local entries = {}
+	for _, entry in entriesByUser do
+		table.insert(entries, entry)
+	end
+
+	return entries
+end
+
+function LeaderboardService:renderBoard(boardName: string, boardConfig)
+	if isShuttingDown then
+		return
+	end
+
+	if not waitForBudget(Enum.DataStoreRequestType.OrderedList, 1, 10) then
+		warnReadFailed("[LeaderboardService] Skipping leaderboard read; datastore read budget is low.")
+		return
+	end
+
+	local store = getStore(boardConfig)
+	local readRetries, readRetryDelay = getReadRetrySettings()
+	local maxEntries = LeaderboardConfig.MaxEntries or 100
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+
+	local entries
+	if sortedReadUnavailable[boardName] then
+		entries = self:buildFallbackBoardEntries(boardName, boardConfig)
+	else
+		local ok, pagesOrErr = tryGetSortedPages(store, false, maxEntries, readRetries, readRetryDelay)
+		if not ok then
+			local fixed = recoverCorruptBoardEntries(boardName, boardConfig, PlayerDataService)
+			if fixed > 0 then
+				task.wait(readRetryDelay)
+				ok, pagesOrErr = tryGetSortedPages(store, false, maxEntries, 1, readRetryDelay)
+			end
+		end
+
+		if ok then
+			sortedReadUnavailable[boardName] = nil
+			entries = self:buildBoardEntriesFromPages(boardName, boardConfig, pagesOrErr)
+		else
+			sortedReadUnavailable[boardName] = true
+			warnReadFailed(
+				"[LeaderboardService] Failed to read",
+				boardName,
+				pagesOrErr,
+				"- using fallback entries for this server session."
+			)
+			entries = self:buildFallbackBoardEntries(boardName, boardConfig)
+		end
+	end
+
+	entries = finalizeEntriesForRender(boardName, boardConfig, entries)
 	WorldLeaderboardRenderer.render(boardName, entries, boardConfig.AmountSuffix)
-	task.wait(getWriteSpacing())
+
+	if boardConfig.SortMode == "Logarithmic" and #entries > 0 and not isShuttingDown then
+		task.spawn(function()
+			local enrichedEntries = table.create(#entries)
+			for index, entry in entries do
+				enrichedEntries[index] = {
+					UserId = entry.UserId,
+					Value = entry.Value,
+				}
+			end
+
+			enrichEntriesFromDisplayStore(boardName, boardConfig, enrichedEntries, PlayerDataService)
+			if isShuttingDown then
+				return
+			end
+
+			local refreshedEntries = finalizeEntriesForRender(boardName, boardConfig, enrichedEntries)
+			WorldLeaderboardRenderer.render(boardName, refreshedEntries, boardConfig.AmountSuffix)
+		end)
+	end
+
+	if not isShuttingDown then
+		task.wait(getWriteSpacing())
+	end
 end
 
 function LeaderboardService:renderBoards()
@@ -391,7 +1021,11 @@ function LeaderboardService:renderBoards()
 	end
 end
 
-function LeaderboardService:RemoveUserFromBoard(boardName: string, userId: number): boolean
+function LeaderboardService:RemoveUserFromBoard(
+	boardName: string,
+	userId: number,
+	options: { ExcludeFromRepublish: boolean?, Rerender: boolean? }?
+): boolean
 	local boardConfig = LeaderboardConfig.Boards[boardName]
 	if not boardConfig then
 		return false
@@ -411,13 +1045,6 @@ function LeaderboardService:RemoveUserFromBoard(boardName: string, userId: numbe
 		return false
 	end
 
-	if boardConfig.SortMode == "Logarithmic" then
-		local valueStore = getValueStore(boardConfig)
-		pcall(function()
-			valueStore:RemoveAsync(key)
-		end)
-	end
-
 	if displayValueCache[boardName] then
 		displayValueCache[boardName][userId] = nil
 	end
@@ -425,17 +1052,103 @@ function LeaderboardService:RemoveUserFromBoard(boardName: string, userId: numbe
 		lastPublishedValues[userId][boardName] = nil
 	end
 
+	if options and options.ExcludeFromRepublish then
+		excludeUserFromBoard(userId, boardName)
+		clearOnlinePublishState(userId)
+	end
+
+	if options and options.Rerender then
+		task.spawn(function()
+			self:renderBoard(boardName, boardConfig)
+		end)
+	end
+
 	return true
 end
 
-function LeaderboardService:RemoveUserFromAllBoards(userId: number): number
+function LeaderboardService:RemoveUserFromAllBoards(
+	userId: number,
+	options: { ExcludeFromRepublish: boolean?, Rerender: boolean? }?
+): number
 	local cleared = 0
+	local perBoardOptions = if options
+		then {
+			ExcludeFromRepublish = options.ExcludeFromRepublish,
+			Rerender = false,
+		}
+		else nil
+
 	for boardName in LeaderboardConfig.Boards do
-		if self:RemoveUserFromBoard(boardName, userId) then
+		if self:RemoveUserFromBoard(boardName, userId, perBoardOptions) then
 			cleared += 1
 		end
 	end
+
+	if cleared > 0 and options and options.Rerender then
+		task.spawn(function()
+			self:renderBoards()
+		end)
+	end
+
 	return cleared
+end
+
+local function includeUserFromBoard(userId: number, boardName: string)
+	local userBoards = excludedFromBoards[userId]
+	if type(userBoards) ~= "table" then
+		return
+	end
+
+	userBoards[boardName] = nil
+	if next(userBoards) == nil then
+		excludedFromBoards[userId] = nil
+	end
+end
+
+function LeaderboardService:RestoreUserToLeaderboards(userId: number): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, "UserId must be greater than 0."
+	end
+
+	for boardName in LeaderboardConfig.Boards do
+		includeUserFromBoard(userId, boardName)
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		dirtyPlayers[onlinePlayer] = true
+		self:schedulePlayerPublish(onlinePlayer, true)
+	end
+
+	return true, nil
+end
+
+function LeaderboardService:ClearUserFromLeaderboards(userId: number, boardName: string?): (number, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return 0, "UserId must be greater than 0."
+	end
+
+	local options = {
+		ExcludeFromRepublish = true,
+		Rerender = true,
+	}
+
+	if boardName == "all" or boardName == nil or boardName == "" then
+		local cleared = self:RemoveUserFromAllBoards(userId, options)
+		return cleared, nil
+	end
+
+	if not LeaderboardConfig.Boards[boardName] then
+		return 0, `Unknown leaderboard board "{boardName}".`
+	end
+
+	if not self:RemoveUserFromBoard(boardName, userId, options) then
+		return 0, `Failed to remove user {userId} from {boardName}.`
+	end
+
+	return 1, nil
 end
 
 function LeaderboardService:ResetUserLeaderboard(userId: number): (number?, string?)
@@ -444,23 +1157,25 @@ function LeaderboardService:ResetUserLeaderboard(userId: number): (number?, stri
 		return nil, "UserId must be greater than 0."
 	end
 
+	self:RestoreUserToLeaderboards(userId)
+
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local ok, err = PlayerDataService:ResetLeaderboardStatsByUserId(userId)
 	if not ok then
 		return nil, err or "Failed to reset leaderboard stats."
 	end
 
-	local cleared = self:RemoveUserFromAllBoards(userId)
-	lastPublishedValues[userId] = nil
-
-	local onlinePlayer = Players:GetPlayerByUserId(userId)
-	if onlinePlayer then
-		dirtyPlayers[onlinePlayer] = nil
-		publishQueue[onlinePlayer] = nil
-		lastPublishAttemptAt[onlinePlayer] = nil
+	lastPublishedValues[userId] = {}
+	local published, publishOk = self:publishZeroLeaderboardForUser(userId)
+	if not publishOk then
+		return published, "Leaderboard stats reset, but publishing zero values to some boards failed."
 	end
 
-	return cleared, nil
+	task.spawn(function()
+		self:renderBoards()
+	end)
+
+	return published, nil
 end
 
 function LeaderboardService:updateNow(forcePublish: boolean?)
@@ -486,10 +1201,6 @@ function LeaderboardService:setupPlayerPublishing(player: Player)
 	playerPublishConnections[player] = connections
 
 	for _, boardConfig in LeaderboardConfig.Boards do
-		if boardConfig.DataPath == "PlaytimeSeconds" then
-			continue
-		end
-
 		table.insert(
 			connections,
 			PlayerDataService:Observe(player, boardConfig.DataPath, function()
@@ -498,7 +1209,7 @@ function LeaderboardService:setupPlayerPublishing(player: Player)
 		)
 	end
 
-	self:markPlayerDirty(player, false)
+	self:markPlayerDirty(player, true)
 end
 
 function LeaderboardService:clearPlayerPublishing(player: Player)
@@ -519,7 +1230,6 @@ end
 
 function LeaderboardService:KnitStart()
 	local PlayerDataService = Knit.GetService("PlayerDataService")
-	local shuttingDown = false
 
 	Players.PlayerAdded:Connect(function(player)
 		task.spawn(function()
@@ -530,17 +1240,23 @@ function LeaderboardService:KnitStart()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		if shuttingDown then
-			self:clearPlayerPublishing(player)
+		self:clearPlayerPublishing(player)
+
+		if isShuttingDown then
 			return
 		end
 
-		publishQueue[player] = true
-		pcall(function()
-			self:publishPlayer(player, true)
+		task.spawn(function()
+			pcall(function()
+				self:publishPlayer(player, true, { fast = true })
+			end)
 		end)
-		self:clearPlayerPublishing(player)
+
 		task.defer(function()
+			if isShuttingDown then
+				return
+			end
+
 			pcall(function()
 				TopTierRig.refresh(PlayerDataService)
 			end)
@@ -548,17 +1264,21 @@ function LeaderboardService:KnitStart()
 	end)
 
 	game:BindToClose(function()
-		shuttingDown = true
+		isShuttingDown = true
+
 		local startedAt = os.clock()
+		local shutdownBudget = math.min(tonumber(LeaderboardConfig.ShutdownPublishBudgetSeconds) or 8, 20)
 		for _, player in Players:GetPlayers() do
-			if os.clock() - startedAt >= 25 then
+			if os.clock() - startedAt >= shutdownBudget then
 				break
 			end
 
 			pcall(function()
-				self:publishPlayer(player, true)
+				self:publishPlayer(player, true, {
+					fast = true,
+					allowOnShutdown = true,
+				})
 			end)
-			task.wait(LeaderboardConfig.PublishPlayerDelay or 2)
 		end
 	end)
 
@@ -569,8 +1289,12 @@ function LeaderboardService:KnitStart()
 			end)
 		end
 
-		task.wait(LeaderboardConfig.InitialUpdateDelay or 60)
-		while not shuttingDown do
+		task.wait(math.min(LeaderboardConfig.InitialUpdateDelay or 60, 20))
+		if not isShuttingDown then
+			self:renderBoards()
+		end
+
+		while not isShuttingDown do
 			for _, player in Players:GetPlayers() do
 				self:schedulePlayerPublish(player, false)
 			end
@@ -581,7 +1305,7 @@ function LeaderboardService:KnitStart()
 
 	task.spawn(function()
 		task.wait(5)
-		while not shuttingDown do
+		while not isShuttingDown do
 			pcall(function()
 				TopTierRig.refresh(PlayerDataService)
 			end)

@@ -21,6 +21,7 @@ local ShopFeature = require(script.Shop)
 local CapsuleFeature = require(script.Capsule)
 local TeleportFeature = require(script.Teleport)
 local EventFeature = require(script.Event)
+local AdminMessagesFeature = require(script.AdminMessages)
 
 local MainGuiController = Knit.CreateController({
 	Name = "MainGuiController",
@@ -222,6 +223,7 @@ ShopFeature.Install(MainGuiController)
 CapsuleFeature.Install(MainGuiController)
 TeleportFeature.Install(MainGuiController)
 EventFeature.Install(MainGuiController)
+AdminMessagesFeature.Install(MainGuiController)
 
 function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 	local mainGui = self:getMainGui()
@@ -832,15 +834,48 @@ function MainGuiController:ShowGroupRewardReadyMessage()
 	self:showMessage("GroupRewardReady", '<font color="#47FF6A">Group reward is ready to claim!</font>')
 end
 
-function MainGuiController:ShowOfflineRewardMessage(amount: number)
+function MainGuiController:ShowNeedToLikeGameMessage()
+	self:showMessage("GroupLikeRequired", '<font color="#FFCC33">You need to like the game.</font>')
+end
+
+function MainGuiController:ShowGroupRewardLikeUnlockedMessage()
+	self:showMessage("GroupLikeUnlocked", '<font color="#47FF6A">You can now claim the group reward forever!</font>')
+end
+
+function MainGuiController:PromptGameFavorite()
+	local promptConfig = TycoonConfig.FavoritePrompt or {}
+	local itemId = tonumber(promptConfig.ItemId) or 0
+	if itemId <= 0 then
+		return
+	end
+
+	task.spawn(function()
+		local ok, err = pcall(function()
+			AvatarEditorService:PromptSetFavorite(itemId, Enum.AvatarItemType.Asset, true)
+		end)
+		if not ok then
+			warn("[MainGuiController] Favorite prompt failed:", err)
+		end
+	end)
+end
+
+function MainGuiController:ShowOfflineRewardMessage(amount: number, multiplier: number?)
 	amount = math.max(math.floor(amount), 0)
 	if amount <= 0 then
 		return
 	end
 
+	local multiplierText = ""
+	if type(multiplier) == "number" and multiplier > 1 then
+		multiplierText = ' <font color="#47FF6A">(' .. multiplier .. "x)</font>"
+	end
+
 	self:showMessage(
-		"OfflineReward:" .. amount,
-		'You claimed <font color="#FFD86B">' .. Pricing.formatYen(amount) .. "</font> offline earnings"
+		"OfflineReward:" .. amount .. ":" .. tostring(multiplier or 1),
+		'You claimed <font color="#FFD86B">'
+			.. Pricing.formatYen(amount)
+			.. "</font> offline earnings"
+			.. multiplierText
 	)
 end
 

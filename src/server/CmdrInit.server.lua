@@ -27,6 +27,14 @@ local CUSTOM_COMMAND_NAMES = {
 	"sellAll",
 	"clearLeaderboard",
 	"resetUserLeaderboard",
+	"resetData",
+	"resetDataUser",
+	"addLeaderboard",
+	"startAdminEvent",
+	"stopAdminEvent",
+	"startAdminBoost",
+	"stopAdminBoosts",
+	"spawnMutationBalls",
 	"viewData",
 }
 

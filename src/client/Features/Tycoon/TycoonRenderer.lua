@@ -1838,6 +1838,22 @@ function TycoonRenderer:spawnMutatedDrop(skipPrune: boolean?): boolean
 	return true
 end
 
+function TycoonRenderer:spawnMutatedDrops(count: number): number
+	count = math.max(math.floor(tonumber(count) or 0), 0)
+	if count <= 0 or not self.isOwn then
+		return 0
+	end
+
+	local spawned = 0
+	for _ = 1, count do
+		if self:spawnMutatedDrop(true) then
+			spawned += 1
+		end
+	end
+
+	return spawned
+end
+
 function TycoonRenderer:ensureDropLoop()
 	if self.dropLoopConnection or not self.isOwn then
 		return

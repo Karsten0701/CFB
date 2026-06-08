@@ -330,6 +330,11 @@ function EventVFXController:KnitStart()
 			task.wait(1)
 		end
 	end)
+
+	local AdminService = Knit.GetService("AdminService")
+	AdminService.StateChanged:Connect(function()
+		self:refresh(true)
+	end)
 end
 
 return EventVFXController

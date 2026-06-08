@@ -239,22 +239,48 @@ function Handlers.resetDeposit(_context, targetPlayer: Player)
 end
 
 function Handlers.clearLeaderboard(_context, userId: number, boardName: string)
+	local LeaderboardService = CmdrUtil.getKnitService("LeaderboardService")
+	local cleared, err = LeaderboardService:ClearUserFromLeaderboards(userId, boardName)
+	if err then
+		return err
+	end
+
+	if cleared <= 0 then
+		return `Failed to remove user {userId} from leaderboard.`
+	end
+
+	local boardLabel = if boardName == "all" then "all boards" else boardName
+	return `Removed user {userId} from {boardLabel}. Player data was not changed.`
+end
+
+function Handlers.resetData(_context, targetPlayer: Player)
+	local PlayerDataService, err = CmdrUtil.requirePlayerData(targetPlayer)
+	if err then
+		return `Failed: {err}`
+	end
+
+	PlayerDataService:ResetPlayerData(targetPlayer)
+	return `Fully reset {targetPlayer.Name}'s data. They were kicked to rejoin with a fresh save.`
+end
+
+function Handlers.resetDataUser(_context, userId: number)
 	userId = math.floor(tonumber(userId) or 0)
 	if userId <= 0 then
 		return "UserId must be greater than 0."
 	end
 
-	local LeaderboardService = CmdrUtil.getKnitService("LeaderboardService")
-	if boardName == "all" then
-		local cleared = LeaderboardService:RemoveUserFromAllBoards(userId)
-		return `Cleared leaderboard data for user {userId} on {cleared} board(s).`
+	local PlayerDataService = CmdrUtil.getKnitService("PlayerDataService")
+	local ok, resetErr = PlayerDataService:ResetPlayerDataByUserId(userId)
+	if not ok then
+		return `Failed to reset data for user {userId}: {resetErr or "unknown"}`
 	end
 
-	if not LeaderboardService:RemoveUserFromBoard(boardName, userId) then
-		return `Failed to clear {boardName} leaderboard for user {userId}.`
+	local onlinePlayer = game:GetService("Players"):GetPlayerByUserId(userId)
+	if onlinePlayer then
+		return `Fully reset user {userId} ({onlinePlayer.Name}). They were kicked to rejoin with a fresh save.`
 	end
 
-	return `Cleared {boardName} leaderboard entry for user {userId}.`
+	return `Fully reset saved data for offline user {userId}.`
 end
 
 function Handlers.resetUserLeaderboard(_context, userId: number)
@@ -264,12 +290,16 @@ function Handlers.resetUserLeaderboard(_context, userId: number)
 	end
 
 	local LeaderboardService = CmdrUtil.getKnitService("LeaderboardService")
-	local cleared, err = LeaderboardService:ResetUserLeaderboard(userId)
-	if cleared == nil then
+	local published, err = LeaderboardService:ResetUserLeaderboard(userId)
+	if published == nil then
 		return `Failed to reset leaderboard for user {userId}: {err or "unknown"}`
 	end
 
-	return `Reset leaderboard stats for user {userId} and applied rebirth-style progress reset (units/tiers, yen, mana, rate). Cleared {cleared} board(s).`
+	if err then
+		return `Reset leaderboard stats for user {userId} to 0 and republished {published} board(s), but: {err}`
+	end
+
+	return `Reset leaderboard stats for user {userId} to 0 and republished on {published} board(s). Player stays visible on leaderboards.`
 end
 
 function Handlers.setRebirthUpgrade(_context, targetPlayer: Player, upgradeKey: string, level: number)
@@ -302,6 +332,105 @@ function Handlers.setRebirthUpgrade(_context, targetPlayer: Player, upgradeKey: 
 	end
 
 	return `Set {targetPlayer.Name}'s {upgradeKey} to level {nextLevel} (max {config.MaxLevel}).`
+end
+
+local function isGlobalScope(scope: string?): boolean
+	return tostring(scope or "global") ~= "server"
+end
+
+function Handlers.startAdminEvent(_context, eventId: string, multiplier: number, durationMinutes: number, scope: string?)
+	local player = _context.Executor
+	if not player or not player:IsA("Player") then
+		return "Run this command in-game as an admin player."
+	end
+
+	local resolvedMultiplier = if multiplier > 0 then multiplier else nil
+	local AdminService = CmdrUtil.getKnitService("AdminService")
+	local ok, err = AdminService:StartAdminEvent(player, eventId, resolvedMultiplier, durationMinutes, isGlobalScope(scope))
+	if not ok then
+		return `Failed to start admin event: {err or "unknown"}`
+	end
+
+	local scopeLabel = if isGlobalScope(scope) then "all servers" else "this server"
+	local multiplierText = if resolvedMultiplier ~= nil then ` at {resolvedMultiplier}x` else ""
+	return `Started admin event "{eventId}"{multiplierText} for {durationMinutes} min on {scopeLabel}.`
+end
+
+function Handlers.stopAdminEvent(_context, scope: string?)
+	local player = _context.Executor
+	if not player or not player:IsA("Player") then
+		return "Run this command in-game as an admin player."
+	end
+
+	local AdminService = CmdrUtil.getKnitService("AdminService")
+	local ok, err = AdminService:StopAdminEvent(player, isGlobalScope(scope))
+	if not ok then
+		return `Failed to stop admin event: {err or "unknown"}`
+	end
+
+	return `Stopped admin event ({if isGlobalScope(scope) then "global" else "server"}).`
+end
+
+function Handlers.startAdminBoost(_context, boostType: string, multiplier: number, durationMinutes: number, scope: string?)
+	local player = _context.Executor
+	if not player or not player:IsA("Player") then
+		return "Run this command in-game as an admin player."
+	end
+
+	local resolvedMultiplier = if multiplier > 0 then multiplier else nil
+	local AdminService = CmdrUtil.getKnitService("AdminService")
+	local ok, err = AdminService:StartAdminBoost(player, boostType, resolvedMultiplier, durationMinutes, isGlobalScope(scope))
+	if not ok then
+		return `Failed to start admin boost: {err or "unknown"}`
+	end
+
+	local multiplierText = if resolvedMultiplier ~= nil then tostring(resolvedMultiplier) else "default"
+	return `Started {boostType} boost ({multiplierText}x) for {durationMinutes} min.`
+end
+
+function Handlers.stopAdminBoosts(_context, scope: string?)
+	local player = _context.Executor
+	if not player or not player:IsA("Player") then
+		return "Run this command in-game as an admin player."
+	end
+
+	local AdminService = CmdrUtil.getKnitService("AdminService")
+	local ok, err = AdminService:StopAdminBoosts(player, isGlobalScope(scope))
+	if not ok then
+		return `Failed to stop admin boosts: {err or "unknown"}`
+	end
+
+	return "Stopped all admin boosts."
+end
+
+function Handlers.spawnMutationBalls(_context, count: number, scope: string?)
+	local player = _context.Executor
+	if not player or not player:IsA("Player") then
+		return "Run this command in-game as an admin player."
+	end
+
+	local AdminService = CmdrUtil.getKnitService("AdminService")
+	local ok, err = AdminService:SpawnMutationBalls(player, count, isGlobalScope(scope))
+	if not ok then
+		return `Failed to spawn mutation balls: {err or "unknown"}`
+	end
+
+	return `Spawned {math.floor(count)} mutation ball(s) ({if isGlobalScope(scope) then "global" else "server"}).`
+end
+
+function Handlers.addLeaderboard(_context, userId: number)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return "UserId must be greater than 0."
+	end
+
+	local LeaderboardService = CmdrUtil.getKnitService("LeaderboardService")
+	local ok, err = LeaderboardService:RestoreUserToLeaderboards(userId)
+	if not ok then
+		return `Failed to restore user {userId} to leaderboards: {err or "unknown"}`
+	end
+
+	return `User {userId} can show on leaderboards again. They will republish when online or on next update.`
 end
 
 function Handlers.viewData(_context, targetPlayer: Player)

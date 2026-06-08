@@ -60,6 +60,12 @@ Monetization.DeveloperProducts = {
 		},
 		Yen = 100_000,
 	},
+	Offline5xReward = {
+		ProductId = 3603441135,
+		Price = 39,
+		Kind = "Offline5xReward",
+		Multiplier = 5,
+	},
 }
 
 Monetization.GamePasses = {

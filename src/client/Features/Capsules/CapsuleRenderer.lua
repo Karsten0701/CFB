@@ -15,6 +15,8 @@ local CAPSULE_COLLISION_GROUP = "CapsuleDrops"
 local DROP_COLLISION_GROUP = "ManaDrops"
 local DROP_WALL_COLLISION_GROUP = "DropWalls"
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
+local CAPSULE_HIGHLIGHT_NAME = "CapsuleHighlight"
+
 local CAPSULE_BOTTOM_COLORS = {
 	Color3.fromRGB(235, 64, 52),
 	Color3.fromRGB(52, 205, 82),
@@ -547,6 +549,37 @@ local function getColorIndexFromId(capsuleId: string): number
 	end
 
 	return (hash % #CAPSULE_BOTTOM_COLORS) + 1
+end
+
+local function ensureCapsuleHighlight(capsule: Instance)
+	local config = getCapsuleConfig()
+	local highlightConfig = if type(config.Highlight) == "table" then config.Highlight else {}
+
+	if highlightConfig.Enabled == false then
+		local existing = capsule:FindFirstChild(CAPSULE_HIGHLIGHT_NAME)
+		if existing then
+			existing:Destroy()
+		end
+		return
+	end
+
+	local highlight = capsule:FindFirstChild(CAPSULE_HIGHLIGHT_NAME)
+	if not highlight or not highlight:IsA("Highlight") then
+		if highlight then
+			highlight:Destroy()
+		end
+		highlight = Instance.new("Highlight")
+		highlight.Name = CAPSULE_HIGHLIGHT_NAME
+		highlight.Parent = capsule
+	end
+
+	highlight.Enabled = true
+	highlight.Adornee = capsule
+	highlight.FillColor = highlightConfig.FillColor or Color3.new(0, 0, 0)
+	highlight.FillTransparency = tonumber(highlightConfig.FillTransparency) or 1
+	highlight.OutlineColor = highlightConfig.OutlineColor or Color3.new(0, 0, 0)
+	highlight.OutlineTransparency = tonumber(highlightConfig.OutlineTransparency) or 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 end
 
 local function applyCapsuleBottomColor(capsule: Instance, capsuleId: string)
@@ -1418,6 +1451,7 @@ function CapsuleRenderer:spawnCapsule(
 	instance:SetAttribute("IsPossibleDrop", true)
 	instance:SetAttribute("DropValue", nil)
 	instance:SetAttribute("Value", nil)
+	ensureCapsuleHighlight(instance)
 
 	clearTemplateWelds(instance)
 

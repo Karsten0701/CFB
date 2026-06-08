@@ -45,7 +45,7 @@ local STEP_TEXT = {
 	DepositManaAgain = "Deposit your Mana again!",
 	BuyThirdUnit = "Buy one more anime unit!",
 	MergeUnits = "Merge your units!",
-	VisitGroupReward = "Go to the Group Reward button and press it!",
+	VisitGroupReward = "Join the group and like the game at the Group Reward button!",
 	WaitForRebirthReady = "Tutorial resumes when you can rebirth.",
 	Rebirth = "Rebirth your tycoon!",
 	OpenUpgrades = "Open the upgrades menu!",
@@ -71,6 +71,10 @@ local secondDepositBaselineYen: number? = nil
 local tutorialFingerTweens: { [GuiObject]: { Tween: Tween, OriginalPosition: UDim2 } } = {}
 local tutorialFingerConnections: { RBXScriptConnection } = {}
 local dismissedRebirthButtonFingerStep: string? = nil
+local tutorialRewardPresentationActive = false
+
+local CANCELLED_REWARD_THANKS_MESSAGE = "No worries heres a smaller boost."
+local COMPLETED_REWARD_THANKS_MESSAGE = "Thanks for completing the tutorial!"
 
 local function getTutorialConfig(): { [string]: any }
 	return TycoonConfig.Tutorial or {}
@@ -680,16 +684,28 @@ local function getDescriptionStepText(frame: Instance?, playerGui: Instance): Te
 	})
 end
 
-local function setTutorialRewardText(text: string)
-	local playerGui = localPlayer:FindFirstChild("PlayerGui")
-	local frame = getTutorialRewardFrame()
-	if not playerGui or not frame then
-		return
+local function getThanksMessageLabel(frame: Instance?): TextLabel?
+	if not frame then
+		return nil
 	end
 
-	local descriptionLabel = getDescriptionStepText(frame, playerGui)
-	if descriptionLabel then
-		descriptionLabel.Text = text
+	local label = frame:FindFirstChild("ThanksMessage", true)
+	return if label and label:IsA("TextLabel") then label else nil
+end
+
+local function setThanksMessage(text: string)
+	local frame = getTutorialRewardFrame()
+	local label = getThanksMessageLabel(frame)
+	if label then
+		label.Text = text
+	end
+end
+
+local function dismissTutorialRewardPresentation()
+	tutorialRewardPresentationActive = false
+	local frame = getTutorialRewardFrame()
+	if frame then
+		frame.Visible = false
 	end
 end
 
@@ -840,13 +856,39 @@ function TutorialController:canClaimTutorialReward(): boolean
 		and tutorial.RewardClaimed ~= true
 end
 
+function TutorialController:presentTutorialReward(cancelled: boolean)
+	local frame = getTutorialRewardFrame()
+	if not frame then
+		return
+	end
+
+	tutorialRewardPresentationActive = true
+	setThanksMessage(if cancelled then CANCELLED_REWARD_THANKS_MESSAGE else COMPLETED_REWARD_THANKS_MESSAGE)
+	updateTutorialRewardAmountText(cancelled)
+	frame.Visible = true
+end
+
+function TutorialController:claimAndPresentTutorialReward(cancelled: boolean)
+	local TycoonService = Knit.GetService("TycoonService")
+	TycoonService:ClaimTutorialReward()
+		:andThen(function(success)
+			if success then
+				self:presentTutorialReward(cancelled)
+			end
+		end)
+		:catch(function(err)
+			warn("[TutorialController] ClaimTutorialReward failed:", err)
+		end)
+end
+
 function TutorialController:updateTutorialRewardUi()
+	if tutorialRewardPresentationActive then
+		return
+	end
+
 	local frame = getTutorialRewardFrame()
 	if frame then
-		frame.Visible = self:canClaimTutorialReward()
-		if frame.Visible then
-			updateTutorialRewardAmountText()
-		end
+		frame.Visible = false
 	end
 end
 
@@ -885,9 +927,15 @@ function TutorialController:persistStep(step: string)
 
 	local TycoonService = Knit.GetService("TycoonService")
 	if step == "Completed" then
-		TycoonService:CompleteTutorial():catch(function(err)
-			warn("[TutorialController] CompleteTutorial failed:", err)
-		end)
+		TycoonService:CompleteTutorial()
+			:andThen(function(success)
+				if success then
+					self:claimAndPresentTutorialReward(false)
+				end
+			end)
+			:catch(function(err)
+				warn("[TutorialController] CompleteTutorial failed:", err)
+			end)
 	else
 		TycoonService:UpdateTutorialStep(step):catch(function(err)
 			warn("[TutorialController] UpdateTutorialStep failed:", err)
@@ -1048,9 +1096,8 @@ function TutorialController:connectPrompt()
 				TycoonService:CancelTutorial():andThen(function(success)
 					if success then
 						setPromptVisible(false)
-						setTutorialRewardText("No worries, here's a smaller boost!")
-						updateTutorialRewardAmountText(true)
 						self:setStep("Cancelled")
+						self:claimAndPresentTutorialReward(true)
 					end
 				end)
 			end)
@@ -1070,21 +1117,12 @@ function TutorialController:connectReward()
 	table.clear(rewardConnections)
 
 	local acceptButton = getGuiButton(frame, "Accept")
-	local TycoonService = Knit.GetService("TycoonService")
 	if acceptButton then
 		table.insert(
 			rewardConnections,
 			acceptButton.Activated:Connect(function()
-				TycoonService:ClaimTutorialReward()
-					:andThen(function(success)
-						if success then
-							frame.Visible = false
-							self:updateTutorialRewardUi()
-						end
-					end)
-					:catch(function(err)
-						warn("[TutorialController] ClaimTutorialReward failed:", err)
-					end)
+				dismissTutorialRewardPresentation()
+				self:updateTutorialRewardUi()
 			end)
 		)
 	end
@@ -1127,6 +1165,11 @@ function TutorialController:KnitStart()
 	PlayerDataController:Observe("Tutorial", function()
 		self:updateTutorialRewardUi()
 	end)
+
+	if self:canClaimTutorialReward() then
+		local cancelled = type(tutorial) == "table" and tutorial.Cancelled == true
+		self:claimAndPresentTutorialReward(cancelled)
+	end
 
 	if shouldTrack then
 		self:startProgressTracking()
