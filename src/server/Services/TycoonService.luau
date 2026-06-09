@@ -1707,11 +1707,10 @@ function TycoonService:KnitStart()
 		self:AssignTycoon(player)
 	end)
 
-	local shuttingDown = false
+	local GameShutdown = require(script.Parent.Parent.Modules.GameShutdown)
 	local processConnection: RBXScriptConnection?
 
-	game:BindToClose(function()
-		shuttingDown = true
+	GameShutdown.onRequested(function()
 		if processConnection then
 			processConnection:Disconnect()
 			processConnection = nil
@@ -1719,7 +1718,7 @@ function TycoonService:KnitStart()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		if shuttingDown then
+		if GameShutdown.isShuttingDown() then
 			return
 		end
 
@@ -1730,7 +1729,7 @@ function TycoonService:KnitStart()
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 
 	processConnection = RunService.Heartbeat:Connect(function(dt)
-		if shuttingDown then
+		if GameShutdown.isShuttingDown() then
 			return
 		end
 

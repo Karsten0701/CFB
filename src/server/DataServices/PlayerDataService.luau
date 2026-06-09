@@ -7,6 +7,7 @@ local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local DataService = require(ReplicatedStorage.Packages.dataservice).server
+local GameShutdown = require(script.Parent.Parent.Modules.GameShutdown)
 local Knit = require(ReplicatedStorage.Packages.knit)
 local DataTemplate = require(script.Parent.DataTemplate)
 local TierUnlockAnalytics = require(script.Parent.Parent.Features.Analytics.TierUnlockAnalytics)
@@ -560,24 +561,22 @@ function PlayerDataService:KnitInit()
 end
 
 function PlayerDataService:KnitStart()
-	local shuttingDown = false
-	game:BindToClose(function()
-		shuttingDown = true
-	end)
-
 	game:GetService("Players").PlayerRemoving:Connect(function(player)
-		pcall(function()
-			PlayerDataService:PersistPlaytime(player)
-			PlayerDataService:Set(player, "LastLogoutAt", os.time())
-		end)
+		if not GameShutdown.isShuttingDown() then
+			pcall(function()
+				PlayerDataService:PersistPlaytime(player)
+				PlayerDataService:Set(player, "LastLogoutAt", os.time())
+			end)
+		end
+
 		playtimeSessionStartedAt[player] = nil
 		leaderstatValues[player] = nil
 	end)
 
 	task.spawn(function()
-		while not shuttingDown do
+		while not GameShutdown.isShuttingDown() do
 			task.wait(PLAYTIME_PERSIST_INTERVAL)
-			if shuttingDown then
+			if GameShutdown.isShuttingDown() then
 				break
 			end
 

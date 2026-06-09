@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Knit = require(ReplicatedStorage.Packages.knit)
+local GameShutdown = require(script.Parent.Parent.Modules.GameShutdown)
 local LeaderboardConfig = require(script.Parent.Parent.Features.Leaderboards.LeaderboardConfig)
 local TopTierRig = require(script.Parent.Parent.Features.Leaderboards.TopTierRig)
 local WorldLeaderboardRenderer = require(script.Parent.Parent.Features.Leaderboards.WorldLeaderboardRenderer)
@@ -26,11 +27,13 @@ local publishQueue: { [Player]: boolean } = {}
 local lastPublishAttemptAt: { [Player]: number } = {}
 local publishWorkerRunning = false
 local excludedFromBoards: { [number]: { [string]: boolean } } = {}
-local isShuttingDown = false
+
+local function isShuttingDown(): boolean
+	return GameShutdown.isShuttingDown()
+end
 
 type PublishOptions = {
 	fast: boolean?,
-	allowOnShutdown: boolean?,
 }
 
 local function resolvePublishOptions(options: PublishOptions?): PublishOptions
@@ -111,6 +114,12 @@ local function decodeLegacyLinearSortValue(sortValue: number): number
 	local legacyPrimary = math.floor(sortValue / modulus)
 	local remainder = sortValue % modulus
 	if remainder > 0 and legacyPrimary > 0 and legacyPrimary < sortValue then
+		-- Raw linear stats (e.g. 1,500,000 units) are not tie-break encoded.
+		local legacyTieBreakMax = math.min(modulus - 1, 99_999)
+		if remainder > legacyTieBreakMax then
+			return sortValue
+		end
+
 		return legacyPrimary
 	end
 
@@ -231,8 +240,8 @@ local function waitForBudget(
 	minimumBudget: number,
 	timeoutSeconds: number?
 ): boolean
-	if isShuttingDown then
-		return getBudget(requestType) >= minimumBudget
+	if isShuttingDown() then
+		return false
 	end
 
 	local timeout = timeoutSeconds or LeaderboardConfig.WriteBudgetWaitTimeout or 25
@@ -313,6 +322,10 @@ local function getPrimarySortValue(boardConfig, value: number): number
 		return math.max(math.floor(math.log10(value) * LOG_SORT_SCALE), 1)
 	end
 
+	if value > ORDERED_SORT_MAX then
+		return math.max(math.floor(math.log10(value) * LOG_SORT_SCALE), 1)
+	end
+
 	return value
 end
 
@@ -374,12 +387,15 @@ local function resolveDisplayValue(boardConfig, sortValue: number): number
 end
 
 local function isCorruptOrderedSortValue(boardConfig, sortValue: number): boolean
-	sortValue = normalizeValue(sortValue)
-	if boardConfig.SortMode ~= "Logarithmic" and sortValue > ORDERED_SORT_MAX then
-		return true
+	return shouldResetExcessiveValue(boardConfig, resolveDisplayValue(boardConfig, sortValue))
+end
+
+local function getEntryRankValue(entry: { UserId: number, Value: number, SortValue: number? }): number
+	if type(entry.SortValue) == "number" then
+		return normalizeValue(entry.SortValue)
 	end
 
-	return shouldResetExcessiveValue(boardConfig, resolveDisplayValue(boardConfig, sortValue))
+	return normalizeValue(entry.Value)
 end
 
 local function tryGetSortedPages(
@@ -441,7 +457,7 @@ local function correctExcessiveDatastoreEntry(
 	PlayerDataService
 )
 	task.spawn(function()
-		if isShuttingDown then
+		if isShuttingDown() then
 			return
 		end
 
@@ -481,12 +497,12 @@ publishBoardForUserId = function(
 		FetchedAt = os.clock(),
 	}
 
-	if boardConfig.SortMode == "Logarithmic" and not fast and not isShuttingDown then
+	if boardConfig.SortMode == "Logarithmic" and not fast and not isShuttingDown() then
 		safeDisplayValueSetAsync(boardConfig, userId, value)
 		task.wait(getWriteSpacing())
 	end
 
-	local budgetOk = if fast or isShuttingDown
+	local budgetOk = if fast or isShuttingDown()
 		then hasWriteBudget(Enum.DataStoreRequestType.OrderedWrite, 1)
 		else waitForBudget(Enum.DataStoreRequestType.OrderedWrite, 1)
 	if not budgetOk then
@@ -568,7 +584,7 @@ end
 local function finalizeEntriesForRender(
 	boardName: string,
 	boardConfig,
-	entries: { { UserId: number, Value: number } }
+	entries: { { UserId: number, Value: number, SortValue: number? } }
 )
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local validEntries = {}
@@ -586,15 +602,18 @@ local function finalizeEntriesForRender(
 		table.insert(validEntries, {
 			UserId = entry.UserId,
 			Value = value,
+			SortValue = entry.SortValue,
 		})
 	end
 
 	table.sort(validEntries, function(left, right)
-		if left.Value == right.Value then
+		local leftRank = getEntryRankValue(left)
+		local rightRank = getEntryRankValue(right)
+		if leftRank == rightRank then
 			return left.UserId < right.UserId
 		end
 
-		return left.Value > right.Value
+		return leftRank > rightRank
 	end)
 
 	local maxEntries = LeaderboardConfig.MaxEntries or 100
@@ -641,7 +660,7 @@ end
 
 function LeaderboardService:publishPlayer(player: Player, force: boolean?, options: PublishOptions?): boolean
 	local publishOptions = resolvePublishOptions(options)
-	if isShuttingDown and not publishOptions.allowOnShutdown then
+	if isShuttingDown() then
 		return false
 	end
 
@@ -661,10 +680,6 @@ function LeaderboardService:publishPlayer(player: Player, force: boolean?, optio
 	local fast = publishOptions.fast == true
 
 	for boardName, boardConfig in LeaderboardConfig.Boards do
-		if isShuttingDown and not publishOptions.allowOnShutdown then
-			break
-		end
-
 		if isUserExcludedFromBoard(player.UserId, boardName) then
 			continue
 		end
@@ -687,7 +702,7 @@ function LeaderboardService:publishPlayer(player: Player, force: boolean?, optio
 			continue
 		end
 
-		if not fast and not isShuttingDown then
+		if not fast and not isShuttingDown() then
 			task.wait(getWriteSpacing())
 		end
 	end
@@ -743,8 +758,15 @@ local function enrichEntriesFromDisplayStore(
 	end
 
 	local spacing = math.max(tonumber(LeaderboardConfig.DisplayReadSpacing) or getWriteSpacing(), 0.25)
+	local enrichLimit = math.max(math.floor(tonumber(LeaderboardConfig.DisplayEnrichMaxEntries) or 25), 0)
+	local enrichedCount = 0
+
 	for _, entry in entries do
-		if isShuttingDown then
+		if isShuttingDown() then
+			break
+		end
+
+		if enrichLimit > 0 and enrichedCount >= enrichLimit then
 			break
 		end
 
@@ -761,6 +783,7 @@ local function enrichEntriesFromDisplayStore(
 			end
 		end
 
+		enrichedCount += 1
 		task.wait(spacing)
 	end
 end
@@ -793,7 +816,7 @@ function LeaderboardService:markPlayerDirty(player: Player, immediate: boolean?)
 end
 
 function LeaderboardService:schedulePlayerPublish(player: Player, force: boolean?)
-	if isShuttingDown then
+	if isShuttingDown() then
 		return
 	end
 
@@ -807,14 +830,14 @@ function LeaderboardService:schedulePlayerPublish(player: Player, force: boolean
 end
 
 function LeaderboardService:startPublishWorker()
-	if publishWorkerRunning or isShuttingDown then
+	if publishWorkerRunning or isShuttingDown() then
 		return
 	end
 
 	publishWorkerRunning = true
 	task.spawn(function()
 		while next(publishQueue) ~= nil do
-			if isShuttingDown then
+			if isShuttingDown() then
 				for queuedPlayer in publishQueue do
 					publishQueue[queuedPlayer] = nil
 				end
@@ -873,7 +896,7 @@ function LeaderboardService:buildBoardEntriesFromPages(
 	boardName: string,
 	boardConfig,
 	pages: any
-): { { UserId: number, Value: number } }
+): { { UserId: number, Value: number, SortValue: number? } }
 	local entries = {}
 	for _, item in pages:GetCurrentPage() do
 		local userId = tonumber(item.key)
@@ -884,6 +907,7 @@ function LeaderboardService:buildBoardEntriesFromPages(
 		local sortValue = normalizeValue(item.value)
 		table.insert(entries, {
 			UserId = userId,
+			SortValue = sortValue,
 			Value = self:getDisplayValue(boardName, boardConfig, userId, sortValue),
 		})
 	end
@@ -891,7 +915,10 @@ function LeaderboardService:buildBoardEntriesFromPages(
 	return entries
 end
 
-function LeaderboardService:buildFallbackBoardEntries(boardName: string, boardConfig): { { UserId: number, Value: number } }
+function LeaderboardService:buildFallbackBoardEntries(
+	boardName: string,
+	boardConfig
+): { { UserId: number, Value: number, SortValue: number? } }
 	local store = getStore(boardConfig)
 	local storeName = LeaderboardConfig.DataStorePrefix .. boardConfig.DataStoreName
 	local entriesByUser: { [number]: { UserId: number, Value: number } } = {}
@@ -903,6 +930,7 @@ function LeaderboardService:buildFallbackBoardEntries(boardName: string, boardCo
 
 		entriesByUser[userId] = {
 			UserId = userId,
+			SortValue = sortValue,
 			Value = self:getDisplayValue(boardName, boardConfig, userId, sortValue),
 		}
 	end
@@ -945,7 +973,7 @@ function LeaderboardService:buildFallbackBoardEntries(boardName: string, boardCo
 end
 
 function LeaderboardService:renderBoard(boardName: string, boardConfig)
-	if isShuttingDown then
+	if isShuttingDown() then
 		return
 	end
 
@@ -990,18 +1018,23 @@ function LeaderboardService:renderBoard(boardName: string, boardConfig)
 	entries = finalizeEntriesForRender(boardName, boardConfig, entries)
 	WorldLeaderboardRenderer.render(boardName, entries, boardConfig.AmountSuffix)
 
-	if boardConfig.SortMode == "Logarithmic" and #entries > 0 and not isShuttingDown then
+	if boardConfig.SortMode == "Logarithmic" and #entries > 0 and not isShuttingDown() then
 		task.spawn(function()
+			if isShuttingDown() then
+				return
+			end
+
 			local enrichedEntries = table.create(#entries)
 			for index, entry in entries do
 				enrichedEntries[index] = {
 					UserId = entry.UserId,
+					SortValue = entry.SortValue,
 					Value = entry.Value,
 				}
 			end
 
 			enrichEntriesFromDisplayStore(boardName, boardConfig, enrichedEntries, PlayerDataService)
-			if isShuttingDown then
+			if isShuttingDown() then
 				return
 			end
 
@@ -1010,7 +1043,7 @@ function LeaderboardService:renderBoard(boardName: string, boardConfig)
 		end)
 	end
 
-	if not isShuttingDown then
+	if not isShuttingDown() then
 		task.wait(getWriteSpacing())
 	end
 end
@@ -1241,44 +1274,11 @@ function LeaderboardService:KnitStart()
 
 	Players.PlayerRemoving:Connect(function(player)
 		self:clearPlayerPublishing(player)
-
-		if isShuttingDown then
-			return
-		end
-
-		task.spawn(function()
-			pcall(function()
-				self:publishPlayer(player, true, { fast = true })
-			end)
-		end)
-
-		task.defer(function()
-			if isShuttingDown then
-				return
-			end
-
-			pcall(function()
-				TopTierRig.refresh(PlayerDataService)
-			end)
-		end)
 	end)
 
-	game:BindToClose(function()
-		isShuttingDown = true
-
-		local startedAt = os.clock()
-		local shutdownBudget = math.min(tonumber(LeaderboardConfig.ShutdownPublishBudgetSeconds) or 8, 20)
-		for _, player in Players:GetPlayers() do
-			if os.clock() - startedAt >= shutdownBudget then
-				break
-			end
-
-			pcall(function()
-				self:publishPlayer(player, true, {
-					fast = true,
-					allowOnShutdown = true,
-				})
-			end)
+	GameShutdown.onRequested(function()
+		for queuedPlayer in publishQueue do
+			publishQueue[queuedPlayer] = nil
 		end
 	end)
 
@@ -1290,13 +1290,16 @@ function LeaderboardService:KnitStart()
 		end
 
 		task.wait(math.min(LeaderboardConfig.InitialUpdateDelay or 60, 20))
-		if not isShuttingDown then
+		if not isShuttingDown() then
 			self:renderBoards()
 		end
 
-		while not isShuttingDown do
+		while not isShuttingDown() do
 			for _, player in Players:GetPlayers() do
 				self:schedulePlayerPublish(player, false)
+			end
+			if isShuttingDown() then
+				break
 			end
 			self:renderBoards()
 			task.wait(LeaderboardConfig.UpdateInterval)
@@ -1305,7 +1308,7 @@ function LeaderboardService:KnitStart()
 
 	task.spawn(function()
 		task.wait(5)
-		while not isShuttingDown do
+		while not isShuttingDown() do
 			pcall(function()
 				TopTierRig.refresh(PlayerDataService)
 			end)
