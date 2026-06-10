@@ -9,6 +9,7 @@ local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Grid = require(ReplicatedStorage.Shared.Features.Tycoon.Grid)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
+local YenUpgrades = require(ReplicatedStorage.Shared.Data.YenUpgrades)
 
 local TycoonRenderer = {}
 TycoonRenderer.__index = TycoonRenderer
@@ -116,6 +117,117 @@ local function getSpotPart(floorModel: Model, spotIndex: number): BasePart?
 
 	local spot = spotsFolder:FindFirstChild(tostring(spotIndex))
 	return if spot and spot:IsA("BasePart") then spot else nil
+end
+
+local function getDisplayRootForTycoon(tycoon: Instance): Instance?
+	local display = tycoon:FindFirstChild("Display")
+	if display then
+		return display
+	end
+
+	local unitSpot = tycoon:FindFirstChild("UnitSpot", true)
+	return if unitSpot then unitSpot.Parent else nil
+end
+
+local function getDisplayUnitSpotForTycoon(tycoon: Instance): Instance?
+	local display = getDisplayRootForTycoon(tycoon)
+	if not display then
+		return nil
+	end
+
+	return display:FindFirstChild("UnitSpot", true)
+end
+
+local function clearHighestDisplayForTycoon(tycoon: Instance)
+	local unitSpot = getDisplayUnitSpotForTycoon(tycoon)
+	if unitSpot then
+		for _, child in unitSpot:GetChildren() do
+			if
+				child:IsA("Model")
+				and (child.Name == "HighestTierDisplayUnit" or child:GetAttribute("HighestTierDisplay") == true)
+			then
+				child:Destroy()
+			end
+		end
+	end
+
+	local display = getDisplayRootForTycoon(tycoon)
+	if display then
+		for _, descendant in display:GetDescendants() do
+			if
+				descendant:IsA("Model")
+				and (
+					descendant.Name == "HighestTierDisplayUnit"
+					or descendant:GetAttribute("HighestTierDisplay") == true
+				)
+			then
+				descendant:Destroy()
+			end
+		end
+	end
+end
+
+local function clearTowerUnitsForTycoon(tycoon: Instance)
+	local dropperHolder = tycoon:FindFirstChild("DropperHolder")
+	if not dropperHolder then
+		return
+	end
+
+	local unitsFolder = dropperHolder:FindFirstChild("Units")
+	if not unitsFolder then
+		return
+	end
+
+	for _, child in unitsFolder:GetChildren() do
+		if child:IsA("Model") then
+			child:Destroy()
+		end
+	end
+end
+
+local function removeExtraFloorsForTycoon(tycoon: Instance)
+	local dropperHolder = tycoon:FindFirstChild("DropperHolder")
+	if not dropperHolder then
+		return
+	end
+
+	for _, child in dropperHolder:GetChildren() do
+		if child.Name == "FirstLayerStuff" or child.Name == "AutoCollect" then
+			continue
+		end
+
+		local floorIndex = string.match(child.Name, "^FloorLayer_(%d+)$")
+		if floorIndex and tonumber(floorIndex) > 1 then
+			child:Destroy()
+		end
+	end
+end
+
+local function clearTowerDropsForTycoon(tycoon: Instance)
+	local dropperHolder = tycoon:FindFirstChild("DropperHolder")
+	if not dropperHolder then
+		return
+	end
+
+	for _, folderName in { "ManaDrops", "ManaPowerDrops", "MagicPowerDrops" } do
+		local folder = dropperHolder:FindFirstChild(folderName)
+		if folder then
+			for _, child in folder:GetChildren() do
+				child:Destroy()
+			end
+		end
+	end
+end
+
+local function cleanupUnclaimedTycoonVisuals(tycoon: Instance)
+	clearHighestDisplayForTycoon(tycoon)
+	clearTowerUnitsForTycoon(tycoon)
+	removeExtraFloorsForTycoon(tycoon)
+	clearTowerDropsForTycoon(tycoon)
+end
+
+function TycoonRenderer.cleanupUnclaimedTycoon(tycoon: Instance)
+	cleanupUnclaimedTycoonVisuals(tycoon)
 end
 
 local function getUnitModel(tier: number): Model?
@@ -406,7 +518,7 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 		end))
 		janitor:Add(tycoon:GetAttributeChangedSignal("Claimed"):Connect(function()
 			if tycoon:GetAttribute("Claimed") ~= true then
-				self:clearHighestDisplayUnit()
+				self:resetTowerToEmpty()
 			end
 		end))
 		janitor:Add(RunService.Heartbeat:Connect(function()
@@ -824,6 +936,16 @@ function TycoonRenderer:ensureFloors(unitCount: number)
 	if changedFloors then
 		table.clear(self.spotCache)
 	end
+end
+
+function TycoonRenderer:resetTowerToEmpty()
+	self.rebuildToken += 1
+	self:clearRenderedUnits()
+	self:ensureFloors(0)
+	self:clearDrops()
+	cleanupUnclaimedTycoonVisuals(self.tycoon)
+	self.lastUnits = {}
+	table.clear(self.spotCache)
 end
 
 function TycoonRenderer:clearRenderedUnits()
@@ -1265,6 +1387,8 @@ function TycoonRenderer:clearDrops()
 		end
 	end
 	table.clear(self.pickupAnimations)
+
+	clearTowerDropsForTycoon(self.tycoon)
 end
 
 local function findNamedBasePart(root: Instance, targetName: string): BasePart?
@@ -1301,10 +1425,9 @@ function TycoonRenderer:getMutationInterval(): number
 end
 
 function TycoonRenderer:getGoldMultipliers(): { number }
-	local mutationConfig = TycoonConfig.Mutations or {}
-	local goldConfig = mutationConfig.Gold or {}
-	local multipliers = goldConfig.Multipliers
-	if type(multipliers) ~= "table" or #multipliers <= 0 then
+	local level = math.max(math.floor(tonumber(self.entitlements.GoldenDropsLevel) or 0), 0)
+	local multipliers = YenUpgrades.getUnlockedGoldMultipliers(level)
+	if #multipliers <= 0 then
 		return DEFAULT_GOLD_MULTIPLIERS
 	end
 
@@ -1678,7 +1801,8 @@ function TycoonRenderer:ensurePickupLoop()
 
 			self:limitDropFallSpeed(orb, entry)
 
-			local pickedByPlayer = root ~= nil and (root.Position - orb.Position).Magnitude <= 3
+			local pickupRangeMultiplier = math.max(tonumber(self.entitlements.PickupRangeMultiplier) or 1, 1)
+			local pickedByPlayer = root ~= nil and (root.Position - orb.Position).Magnitude <= 3 * pickupRangeMultiplier
 			local pickedByAutoCollect = autoCollect ~= nil and self:isPointInsidePart(autoCollect, orb.Position)
 			if pickedByPlayer or pickedByAutoCollect or not self:isInsideDropBounds(orb.Position) then
 				self:pickupOrb(orb)
@@ -2141,8 +2265,7 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 end
 
 function TycoonRenderer:destroy()
-	self:clearRenderedUnits()
-	self:clearDrops()
+	self:resetTowerToEmpty()
 
 	if self.pickupConnection then
 		self.pickupConnection:Disconnect()

@@ -209,30 +209,7 @@ function Rebirth.Install(MainGuiController)
 			return "MAX"
 		end
 
-		local config = RebirthUpgrades[upgradeKey]
-		if type(config) == "table" and config.kind == "Yen" then
-			return "¥" .. FormatUtil.formatNumber(price)
-		end
-
 		return self:formatTokenPrice(price)
-	end
-
-	function MainGuiController:formatMaxButtonCount(count: number): string
-		count = math.max(math.floor(tonumber(count) or 0), 0)
-		if count <= 0 then
-			return "Locked"
-		end
-
-		return FormatUtil.formatNumber(count)
-	end
-
-	function MainGuiController:formatMaxButtonCountLabel(count: number): string
-		count = math.max(math.floor(tonumber(count) or 0), 0)
-		if count <= 0 then
-			return "Locked"
-		end
-
-		return FormatUtil.formatNumber(count) .. "x"
 	end
 
 	function MainGuiController:updateUnitSpawnTierUpgrade(row: GuiObject)
@@ -301,34 +278,6 @@ function Rebirth.Install(MainGuiController)
 		end
 	end
 
-	function MainGuiController:updateBetterMaxButtonUpgrade(row: GuiObject)
-		local level = self:getUpgradeLevel("BetterMaxButton")
-		local currentCount = RebirthUpgrades.getMaxButtonCount(level)
-		local nextCount = RebirthUpgrades.getNextMaxButtonCount(level)
-		local isMaxed = RebirthUpgrades.isMaxed("BetterMaxButton", level)
-		local cost = RebirthUpgrades.getCost("BetterMaxButton", level)
-
-		self:setNamedText(row, "CurrentUnit", "Max button: " .. self:formatMaxButtonCount(currentCount))
-		self:setNamedText(row, "TokenPrice", self:formatUpgradePrice("BetterMaxButton", cost))
-		self:setNamedText(
-			row,
-			"BuyButton",
-			if isMaxed then "MAX" else "Buy " .. self:formatMaxButtonCountLabel(nextCount)
-		)
-
-		local currentTier = row:FindFirstChild("CurrentTier", true)
-		local currentText = currentTier and currentTier:FindFirstChild("Multi", true)
-		if currentText and currentText:IsA("TextLabel") then
-			currentText.Text = self:formatMaxButtonCountLabel(currentCount)
-		end
-
-		local nextTier = row:FindFirstChild("nextTier", true)
-		local nextText = nextTier and nextTier:FindFirstChild("Multi", true)
-		if nextText and nextText:IsA("TextLabel") then
-			nextText.Text = if isMaxed then "MAX" else self:formatMaxButtonCountLabel(nextCount)
-		end
-	end
-
 	function MainGuiController:updateUpgradesFrame()
 		local frame = self:getUpgradesFrame()
 		if not frame then
@@ -343,11 +292,6 @@ function Rebirth.Install(MainGuiController)
 		local moreMana = frame:FindFirstChild("MoreMana", true)
 		if moreMana and moreMana:IsA("GuiObject") then
 			self:updateMoreManaUpgrade(moreMana)
-		end
-
-		local betterMaxButton = frame:FindFirstChild("BetterMaxButton", true)
-		if betterMaxButton and betterMaxButton:IsA("GuiObject") then
-			self:updateBetterMaxButtonUpgrade(betterMaxButton)
 		end
 	end
 
@@ -367,8 +311,6 @@ function Rebirth.Install(MainGuiController)
 					self:updateUpgradesFrame()
 				elseif err == "Not enough tokens" then
 					self:ShowNotEnoughRebirthTokensMessage()
-				elseif err == "Not enough yen" then
-					self:ShowNotEnoughYenMessage()
 				elseif err == "Maxed" then
 					self:ShowRebirthUpgradeMaxedMessage()
 					self:updateUpgradesFrame()
@@ -493,14 +435,6 @@ function Rebirth.Install(MainGuiController)
 		if moreManaBuyButton and moreManaBuyButton:IsA("GuiObject") then
 			self:connectRebirthGuiActivated(moreManaBuyButton, function()
 				self:buyRebirthUpgrade("MoreMana", "More Mana")
-			end)
-		end
-
-		local betterMaxButton = frame:FindFirstChild("BetterMaxButton", true)
-		local betterMaxBuyButton = betterMaxButton and betterMaxButton:FindFirstChild("BuyButton", true)
-		if betterMaxBuyButton and betterMaxBuyButton:IsA("GuiObject") then
-			self:connectRebirthGuiActivated(betterMaxBuyButton, function()
-				self:buyRebirthUpgrade("BetterMaxButton", "Better Max Button")
 			end)
 		end
 	end

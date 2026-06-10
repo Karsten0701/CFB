@@ -2,7 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local TypeUtil = require(ReplicatedStorage.Shared.Features.Cmdr.TypeUtil)
 
-local UPGRADE_KEYS = { "BetterMaxButton", "MoreMana", "UnitSpawnTier" }
+local UPGRADE_KEYS = { "MoreMana", "UnitSpawnTier" }
 
 return function(registry)
 	registry:RegisterType("rebirthUpgradeKey", {

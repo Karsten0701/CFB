@@ -16,6 +16,8 @@ local Knit = require(ReplicatedStorage.Packages.knit)
 local IndexFeature = require(script.Index)
 local OfflineFeature = require(script.Offline)
 local RebirthFeature = require(script.Rebirth)
+local YenUpgradesFeature = require(script.YenUpgrades)
+local QuestFeature = require(script.Quest)
 local SettingsFeature = require(script.Settings)
 local ShopFeature = require(script.Shop)
 local CapsuleFeature = require(script.Capsule)
@@ -218,6 +220,8 @@ end
 IndexFeature.Install(MainGuiController)
 OfflineFeature.Install(MainGuiController)
 RebirthFeature.Install(MainGuiController)
+YenUpgradesFeature.Install(MainGuiController)
+QuestFeature.Install(MainGuiController)
 SettingsFeature.Install(MainGuiController)
 ShopFeature.Install(MainGuiController)
 CapsuleFeature.Install(MainGuiController)
@@ -946,6 +950,17 @@ function MainGuiController:ShowRebirthUpgradeMaxedMessage()
 	self:showMessage("UpgradeMaxed", "This upgrade is already MAX!")
 end
 
+function MainGuiController:ShowQuestRewardMessage(rewardText: string)
+	if type(rewardText) ~= "string" or rewardText == "" then
+		return
+	end
+
+	self:showMessage(
+		"QuestReward:" .. rewardText,
+		'Quest claimed! You received <font color="#FFD54F">' .. rewardText .. "</font>"
+	)
+end
+
 function MainGuiController:ShowMaxButtonLockedMessage()
 	self:showMessage("MaxButtonLocked", "Unlock this button in the Rebirth Upgrades.")
 end
@@ -1158,6 +1173,8 @@ function MainGuiController:updateAll(instant: boolean?)
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()
+	self:setupYenUpgradesFrame()
+	self:setupQuestsFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
 	self:setupEventFrame()
@@ -1191,6 +1208,8 @@ function MainGuiController:KnitStart()
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()
+	self:setupYenUpgradesFrame()
+	self:setupQuestsFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
 	self:setupOpenCapsuleFrame()
@@ -1205,8 +1224,8 @@ function MainGuiController:KnitStart()
 		self:onShopProductPromptFinished(firstArg, productId, wasPurchased)
 	end)
 
-	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, _gamePassId, wasPurchased)
-		self:onShopGamePassPromptFinished(player, wasPurchased)
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gamePassId, wasPurchased)
+		self:onShopGamePassPromptFinished(player, gamePassId, wasPurchased)
 	end)
 
 	task.spawn(function()
@@ -1220,10 +1239,13 @@ function MainGuiController:KnitStart()
 
 		PlayerDataController:Observe("ManaInBag", function()
 			self:updateManaBag()
+			self:updateQuestsFrame()
 		end)
 
 		PlayerDataController:Observe("Yen", function()
 			self:updateYenShow()
+			self:updateYenUpgradesFrame()
+			self:updateQuestsFrame()
 		end)
 
 		PlayerDataController:Observe({ "PurchasedProducts", "DoubleYen" }, function()
@@ -1238,6 +1260,40 @@ function MainGuiController:KnitStart()
 
 		PlayerDataController:Observe({ "PurchasedProducts", "StarterPack" }, function()
 			self:refreshShopFeature()
+		end)
+
+		PlayerDataController:Observe({ "PurchasedProducts", "GamepassBundle" }, function()
+			self:refreshShopFeature()
+		end)
+
+		PlayerDataController:Observe("Potions", function()
+			self:refreshShopFeature()
+		end)
+
+		PlayerDataController:Observe("ActivePotionBoosts", function()
+			self:refreshShopFeature()
+			self:refreshEventFeature()
+		end)
+
+		PlayerDataController:ObserveIndex("ActivePotionBoosts", function()
+			self:refreshShopFeature()
+			self:refreshEventFeature()
+		end)
+
+		for _, potionType in { "Yen", "Mana", "Deposit" } do
+			PlayerDataController:Observe({ "ActivePotionBoosts", potionType }, function()
+				self:refreshEventFeature()
+			end)
+		end
+
+		PlayerDataController:Observe("GrantedGamePasses", function()
+			self:refreshShopPrices()
+			self:refreshGamePassSettings()
+		end)
+
+		PlayerDataController:ObserveIndex("GrantedGamePasses", function()
+			self:refreshShopPrices()
+			self:refreshGamePassSettings()
 		end)
 
 		PlayerDataController:Observe("Rebirths", function()
@@ -1264,8 +1320,44 @@ function MainGuiController:KnitStart()
 			self:updateUpgradesFrame()
 		end)
 
-		PlayerDataController:Observe({ "RebirthUpgrades", "BetterMaxButton" }, function()
-			self:updateUpgradesFrame()
+		PlayerDataController:Observe("YenUpgrades", function()
+			self:updateYenUpgradesFrame()
+		end)
+
+		PlayerDataController:Observe({ "YenUpgrades", "BetterMaxButton" }, function()
+			self:updateYenUpgradesFrame()
+		end)
+
+		PlayerDataController:Observe({ "YenUpgrades", "BetterGoldenDrops" }, function()
+			self:updateYenUpgradesFrame()
+		end)
+
+		PlayerDataController:Observe({ "YenUpgrades", "Pickuprange" }, function()
+			self:updateYenUpgradesFrame()
+		end)
+
+		PlayerDataController:Observe("Quests", function()
+			self:updateQuestsFrame()
+		end)
+
+		PlayerDataController:Observe({ "Quests", "TotalManaCollected" }, function()
+			self:updateQuestsFrame()
+		end)
+
+		PlayerDataController:Observe("PlaytimeSeconds", function()
+			self:updateQuestsFrame()
+		end)
+
+		PlayerDataController:Observe("LifetimeYen", function()
+			self:updateQuestsFrame()
+		end)
+
+		PlayerDataController:Observe("TotalUnitsPurchased", function()
+			self:updateQuestsFrame()
+		end)
+
+		PlayerDataController:Observe("Units", function()
+			self:updateQuestsFrame()
 		end)
 
 		PlayerDataController:Observe("UnlockedAnimeDroppers", function()
@@ -1293,6 +1385,8 @@ function MainGuiController:KnitStart()
 				self:setupShopFeature()
 				self:setupRebirthFrame()
 				self:setupUpgradesFrame()
+				self:setupYenUpgradesFrame()
+				self:setupQuestsFrame()
 				self:setupOfflineEarningFrame()
 				self:setupIndexFrame()
 				self:setupOpenCapsuleFrame()

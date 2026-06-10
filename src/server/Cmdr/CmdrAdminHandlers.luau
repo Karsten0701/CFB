@@ -441,6 +441,7 @@ function Handlers.viewData(_context, targetPlayer: Player)
 
 	local units = PlayerDataService:GetUnits(targetPlayer)
 	local rebirthUpgrades = PlayerDataService:Get(targetPlayer, "RebirthUpgrades") or {}
+	local yenUpgrades = PlayerDataService:Get(targetPlayer, "YenUpgrades") or {}
 	return table.concat({
 		`Player: {targetPlayer.Name} ({targetPlayer.UserId})`,
 		`Yen: {PlayerDataService:Get(targetPlayer, "Yen")}`,
@@ -449,7 +450,9 @@ function Handlers.viewData(_context, targetPlayer: Player)
 		`RebirthTokens: {PlayerDataService:Get(targetPlayer, "RebirthTokens")}`,
 		`UnitSpawnTier: {math.floor(tonumber(rebirthUpgrades.UnitSpawnTier) or 0)}`,
 		`MoreMana: {math.floor(tonumber(rebirthUpgrades.MoreMana) or 0)}`,
-		`BetterMaxButton: {math.floor(tonumber(rebirthUpgrades.BetterMaxButton) or 0)}`,
+		`BetterMaxButton: {math.floor(tonumber(yenUpgrades.BetterMaxButton) or 0)}`,
+		`BetterGoldenDrops: {math.floor(tonumber(yenUpgrades.BetterGoldenDrops) or 0)}`,
+		`Pickuprange: {math.floor(tonumber(yenUpgrades.Pickuprange) or 0)}`,
 		`Units: {#units}`,
 		`TotalUnitsPurchased: {PlayerDataService:Get(targetPlayer, "TotalUnitsPurchased")}`,
 		`TotalUnitsBought: {PlayerDataService:Get(targetPlayer, "TotalUnitsBought")}`,

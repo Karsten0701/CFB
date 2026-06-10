@@ -5,6 +5,8 @@ local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
+local YenUpgrades = require(ReplicatedStorage.Shared.Data.YenUpgrades)
+local QuestConfig = require(ReplicatedStorage.Shared.Data.QuestConfig)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local DataService = require(ReplicatedStorage.Packages.dataservice).server
 local GameShutdown = require(script.Parent.Parent.Modules.GameShutdown)
@@ -269,6 +271,73 @@ local function repairRebirthTokenEntitlement(data: { [string]: any })
 	data.RebirthTokenEntitlementMigrated = true
 end
 
+local function repairQuestSlot(slot: any)
+	if type(slot) ~= "table" then
+		return {
+			QuestId = "",
+			Type = "",
+			Target = 1,
+			Reward = { Kind = "Yen", Amount = 0 },
+			Progress = 0,
+			Claimed = false,
+		}
+	end
+
+	slot.QuestId = if type(slot.QuestId) == "string" then slot.QuestId else ""
+	slot.Type = if type(slot.Type) == "string" then slot.Type else ""
+	slot.Target = math.max(math.floor(tonumber(slot.Target) or 1), 1)
+	slot.Progress = math.max(math.floor(tonumber(slot.Progress) or 0), 0)
+	slot.Claimed = slot.Claimed == true
+	if type(slot.Reward) ~= "table" then
+		slot.Reward = { Kind = "Yen", Amount = 0 }
+	end
+
+	return slot
+end
+
+local function repairQuestCategory(categoryData: any)
+	if type(categoryData) ~= "table" then
+		categoryData = {}
+	end
+
+	categoryData.PeriodId = if type(categoryData.PeriodId) == "string" then categoryData.PeriodId else ""
+	categoryData.PeriodEnd = math.max(math.floor(tonumber(categoryData.PeriodEnd) or 0), 0)
+
+	if type(categoryData.Baselines) ~= "table" then
+		categoryData.Baselines = {}
+	end
+
+	if type(categoryData.Stats) ~= "table" then
+		categoryData.Stats = {}
+	end
+	categoryData.Stats.YenEarned = math.max(math.floor(tonumber(categoryData.Stats.YenEarned) or 0), 0)
+	categoryData.Stats.UnitsBought = math.max(math.floor(tonumber(categoryData.Stats.UnitsBought) or 0), 0)
+	categoryData.Stats.ManaCollected = math.max(math.floor(tonumber(categoryData.Stats.ManaCollected) or 0), 0)
+
+	if type(categoryData.Slots) ~= "table" then
+		categoryData.Slots = {}
+	end
+
+	local slots = {}
+	for slotIndex = 1, QuestConfig.QuestCount do
+		slots[slotIndex] = repairQuestSlot(categoryData.Slots[slotIndex])
+	end
+	categoryData.Slots = slots
+
+	return categoryData
+end
+
+local function repairQuestData(data: { [string]: any })
+	if type(data.Quests) ~= "table" then
+		data.Quests = {}
+	end
+
+	data.Quests.TotalManaCollected = math.max(math.floor(tonumber(data.Quests.TotalManaCollected) or 0), 0)
+	data.Quests.Hourly = repairQuestCategory(data.Quests.Hourly)
+	data.Quests.Daily = repairQuestCategory(data.Quests.Daily)
+	data.Quests.Weekly = repairQuestCategory(data.Quests.Weekly)
+end
+
 local function ensureManaData(data: { [string]: any })
 	migrateNumberFieldInData(data, "Money", "Yen", TycoonConfig.StarterYen or 0)
 	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
@@ -369,6 +438,35 @@ local function ensureManaData(data: { [string]: any })
 		data.GrantedGamePasses = {}
 	end
 
+	if type(data.Potions) ~= "table" then
+		data.Potions = {}
+	end
+	for _, potionType in { "Yen", "Mana", "Deposit" } do
+		local amount = tonumber(data.Potions[potionType]) or 0
+		data.Potions[potionType] = math.max(math.floor(amount), 0)
+	end
+
+	if type(data.ActivePotionBoosts) ~= "table" then
+		data.ActivePotionBoosts = {}
+	end
+	for potionType, boost in data.ActivePotionBoosts do
+		if type(boost) ~= "table" then
+			data.ActivePotionBoosts[potionType] = nil
+			continue
+		end
+
+		local remaining = math.max(math.floor(tonumber(boost.RemainingSeconds) or 0), 0)
+		local multiplier = tonumber(boost.Multiplier) or 2
+		if remaining <= 0 then
+			data.ActivePotionBoosts[potionType] = nil
+		else
+			data.ActivePotionBoosts[potionType] = {
+				RemainingSeconds = remaining,
+				Multiplier = math.max(multiplier, 1),
+			}
+		end
+	end
+
 	if type(data.Analytics) ~= "table" then
 		data.Analytics = {}
 	end
@@ -383,7 +481,34 @@ local function ensureManaData(data: { [string]: any })
 	end
 	data.RebirthUpgrades.UnitSpawnTier = math.max(math.floor(tonumber(data.RebirthUpgrades.UnitSpawnTier) or 0), 0)
 	data.RebirthUpgrades.MoreMana = math.max(math.floor(tonumber(data.RebirthUpgrades.MoreMana) or 0), 0)
-	data.RebirthUpgrades.BetterMaxButton = math.max(math.floor(tonumber(data.RebirthUpgrades.BetterMaxButton) or 0), 0)
+
+	local legacyBetterMax = 0
+	if data.RebirthUpgrades.BetterMaxButton ~= nil then
+		legacyBetterMax = math.max(math.floor(tonumber(data.RebirthUpgrades.BetterMaxButton) or 0), 0)
+	end
+
+	if type(data.YenUpgrades) ~= "table" then
+		data.YenUpgrades = {}
+	end
+
+	local betterMaxConfig = YenUpgrades.BetterMaxButton
+	local betterMaxMaxLevel = if type(betterMaxConfig) == "table" then betterMaxConfig.MaxLevel or 0 else 0
+	data.YenUpgrades.BetterMaxButton = math.clamp(
+		math.max(
+			math.max(math.floor(tonumber(data.YenUpgrades.BetterMaxButton) or 0), 0),
+			legacyBetterMax
+		),
+		0,
+		betterMaxMaxLevel
+	)
+
+	if legacyBetterMax > 0 or data.RebirthUpgrades.BetterMaxButton ~= nil then
+		data.RebirthUpgrades.BetterMaxButton = nil
+	end
+
+	data.YenUpgrades.BetterGoldenDrops = math.max(math.floor(tonumber(data.YenUpgrades.BetterGoldenDrops) or 0), 0)
+	data.YenUpgrades.Pickuprange = math.max(math.floor(tonumber(data.YenUpgrades.Pickuprange) or 0), 0)
+	repairQuestData(data)
 	repairRebirthTokenEntitlement(data)
 
 	if type(data.Tutorial) ~= "table" then
@@ -537,6 +662,14 @@ function PlayerDataService:KnitInit()
 		ensureManaData(data)
 		playtimeSessionStartedAt[player] = os.time()
 		setupLeaderstats(player)
+		task.defer(function()
+			local ok, QuestService = pcall(function()
+				return Knit.GetService("QuestService")
+			end)
+			if ok and QuestService then
+				QuestService:EnsureQuestsFresh(player)
+			end
+		end)
 		if data.Analytics.FirstJoinFunnelLogged ~= true and TierUnlockAnalytics.logFirstJoin(player) then
 			data.Analytics.FirstJoinFunnelLogged = true
 		end
@@ -672,6 +805,11 @@ function PlayerDataService:AddYen(player: Player, amount: number)
 	if amount > 0 then
 		self:Update(player, "LifetimeYen", function(currentLifetimeYen: number)
 			return math.max(math.floor(tonumber(currentLifetimeYen) or 0), 0) + amount
+		end)
+
+		pcall(function()
+			local QuestService = Knit.GetService("QuestService")
+			QuestService:TrackYenEarned(player, amount)
 		end)
 	end
 

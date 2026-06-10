@@ -7,7 +7,11 @@ return {
 	RebirthUpgrades = {
 		UnitSpawnTier = 0,
 		MoreMana = 0,
+	},
+	YenUpgrades = {
 		BetterMaxButton = 0,
+		BetterGoldenDrops = 0,
+		Pickuprange = 0,
 	},
 	Tutorial = {
 		Prompted = false,
@@ -46,6 +50,48 @@ return {
 	ProcessedReceipts = {},
 	PurchasedProducts = {},
 	GrantedGamePasses = {},
+	Potions = {
+		Yen = 0,
+		Mana = 0,
+		Deposit = 0,
+	},
+	ActivePotionBoosts = {},
+	Quests = {
+		TotalManaCollected = 0,
+		Hourly = {
+			PeriodId = "",
+			PeriodEnd = 0,
+			Baselines = {},
+			Stats = {
+				YenEarned = 0,
+				UnitsBought = 0,
+				ManaCollected = 0,
+			},
+			Slots = {},
+		},
+		Daily = {
+			PeriodId = "",
+			PeriodEnd = 0,
+			Baselines = {},
+			Stats = {
+				YenEarned = 0,
+				UnitsBought = 0,
+				ManaCollected = 0,
+			},
+			Slots = {},
+		},
+		Weekly = {
+			PeriodId = "",
+			PeriodEnd = 0,
+			Baselines = {},
+			Stats = {
+				YenEarned = 0,
+				UnitsBought = 0,
+				ManaCollected = 0,
+			},
+			Slots = {},
+		},
+	},
 	Analytics = {
 		FirstJoinFunnelLogged = false,
 		TutorialCompleteFunnelLogged = false,

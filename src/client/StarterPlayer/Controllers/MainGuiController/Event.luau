@@ -5,6 +5,7 @@ local UserInputService = game:GetService("UserInputService")
 local AdminRuntime = require(ReplicatedStorage.Shared.Features.Admin.AdminRuntime)
 local EventConfig = require(ReplicatedStorage.Shared.Data.Events)
 local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
+local PotionConfig = require(ReplicatedStorage.Shared.Data.PotionConfig)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
@@ -155,6 +156,41 @@ local function makeIconInteractive(icon: GuiObject)
 end
 
 
+local function getPotionDisplayEntries(now: number): { EventDisplayEntry }
+	local entries: { EventDisplayEntry } = {}
+	local ok, activeBoosts = pcall(function()
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		return PlayerDataController:Get("ActivePotionBoosts")
+	end)
+
+	if not ok or type(activeBoosts) ~= "table" then
+		return entries
+	end
+
+	for potionType, typeConfig in PotionConfig.Types do
+		local boost = activeBoosts[potionType]
+		if type(boost) ~= "table" then
+			continue
+		end
+
+		local remaining = math.max(math.floor(tonumber(boost.RemainingSeconds) or 0), 0)
+		if remaining <= 0 then
+			continue
+		end
+
+		local multiplier = math.max(tonumber(boost.Multiplier) or typeConfig.Multiplier or 2, 1)
+		table.insert(entries, {
+			Key = "potion:" .. potionType,
+			Icon = typeConfig.Icon,
+			Name = typeConfig.Name,
+			Description = `{multiplier}x {typeConfig.Name:gsub("^%d+x%s*", "")} for {AdminRuntime.formatDuration(remaining)}.`,
+			EndsAt = now + remaining,
+		})
+	end
+
+	return entries
+end
+
 local function getTutorialBoost(): { EndsAt: number, Name: string, Description: string, Icon: string? }?
 	local ok, boostEndsAt = pcall(function()
 		local PlayerDataController = Knit.GetController("PlayerDataController")
@@ -246,6 +282,10 @@ local function collectDisplayEntries(now: number): { EventDisplayEntry }
 			Description = tutorialBoost.Description,
 			EndsAt = tutorialBoost.EndsAt,
 		})
+	end
+
+	for _, potionEntry in getPotionDisplayEntries(now) do
+		table.insert(entries, potionEntry)
 	end
 
 	return entries
@@ -384,6 +424,11 @@ function EventFeature.Install(MainGuiController)
 				icon.Name = cloneName
 			end
 			icon:SetAttribute("EventEntryKey", entry.Key)
+			local isBoostEntry = string.sub(entry.Key, 1, 7) == "potion:"
+				or string.sub(entry.Key, 1, 6) == "boost:"
+				or entry.Key == "tutorial_boost"
+			icon:SetAttribute("EntryKind", if isBoostEntry then "Boost" else "Event")
+			icon:SetAttribute("IsBoost", isBoostEntry)
 			icon.Visible = true
 			icon.LayoutOrder = index
 			setIconImage(icon, entry.Icon)
@@ -457,6 +502,10 @@ function EventFeature.Install(MainGuiController)
 			end
 		end)
 
+		self:updateEventDisplay()
+	end
+
+	function MainGuiController:refreshEventFeature()
 		self:updateEventDisplay()
 	end
 

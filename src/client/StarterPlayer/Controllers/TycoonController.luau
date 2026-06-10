@@ -13,6 +13,7 @@ local Loading = require(ReplicatedStorage.Shared.Performance.Loading)
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local RebirthUpgrades = require(ReplicatedStorage.Shared.Data.RebirthUpgrades)
+local YenUpgrades = require(ReplicatedStorage.Shared.Data.YenUpgrades)
 local ShowOther = require(ReplicatedStorage.Shared.Performance.ShowOther)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
@@ -53,6 +54,8 @@ local lastGroupRewardDisplayAt = 0
 local groupJoinPromptOpen = false
 local otherTycoonRefreshToken = 0
 local otherTycoonRefreshRunning = false
+local tycoonUnclaimedBound: { [Instance]: any } = {}
+local tycoonsFolderChildAddedConnection: RBXScriptConnection? = nil
 local lastGameplayEffectsSignature: string? = nil
 local groupRewardWasOnCooldown = false
 local groupRewardReadyNotified = false
@@ -597,6 +600,26 @@ local function mergeEntitlementsWithSettings(
 	merged.ManaMultiplier *= math.max(EventUtil.getEffectMultiplier("ManaMultiplier", 1), 0)
 	merged.DropSpeedMultiplier = math.max(EventUtil.getEffectMultiplier("DropSpeedMultiplier", 1), 0.1)
 
+	local yenUpgrades = PlayerDataController:Get("YenUpgrades")
+	local goldenDropsLevel = if type(yenUpgrades) == "table" then yenUpgrades.BetterGoldenDrops else 0
+	local pickupRangeLevel = if type(yenUpgrades) == "table" then yenUpgrades.Pickuprange else 0
+	merged.GoldenDropsLevel = math.max(math.floor(tonumber(goldenDropsLevel) or 0), 0)
+	merged.PickupRangeMultiplier = YenUpgrades.getPickupRangeMultiplier(pickupRangeLevel)
+
+	local activePotionBoosts = PlayerDataController:Get("ActivePotionBoosts")
+	if type(activePotionBoosts) == "table" then
+		local manaBoost = activePotionBoosts.Mana
+		if type(manaBoost) == "table" and (tonumber(manaBoost.RemainingSeconds) or 0) > 0 then
+			merged.ManaMultiplier *= math.max(tonumber(manaBoost.Multiplier) or 2, 1)
+		end
+
+		local depositBoost = activePotionBoosts.Deposit
+		if type(depositBoost) == "table" and (tonumber(depositBoost.RemainingSeconds) or 0) > 0 then
+			merged.ProcessSpeedMultiplier = math.max(tonumber(merged.ProcessSpeedMultiplier) or 1, 0.1)
+				* math.max(tonumber(depositBoost.Multiplier) or 2, 1)
+		end
+	end
+
 	return merged
 end
 
@@ -608,14 +631,31 @@ local function getCurrentUnitSpawnTier(PlayerDataController): number
 end
 
 local function getCurrentMaxButtonCount(PlayerDataController): number
-	local upgrades = PlayerDataController:Get("RebirthUpgrades")
+	local upgrades = PlayerDataController:Get("YenUpgrades")
 	local level = if type(upgrades) == "table" then upgrades.BetterMaxButton else 0
-	return RebirthUpgrades.getMaxButtonCount(level)
+	return YenUpgrades.getMaxButtonCount(level)
+end
+
+local function getPotionProcessSpeedMultiplier(): number
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local activePotionBoosts = PlayerDataController:Get("ActivePotionBoosts")
+	if type(activePotionBoosts) ~= "table" then
+		return 1
+	end
+
+	local depositBoost = activePotionBoosts.Deposit
+	if type(depositBoost) ~= "table" or (tonumber(depositBoost.RemainingSeconds) or 0) <= 0 then
+		return 1
+	end
+
+	return math.max(tonumber(depositBoost.Multiplier) or 2, 1)
 end
 
 local function getDepositProcessInterval(): number
 	local interval = if monetizationEntitlements.DoubleDeposit then 0.5 else 1
-	return interval / math.max(EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1), 0.1)
+	return interval
+		/ math.max(EventUtil.getEffectMultiplier("ProcessSpeedMultiplier", 1), 0.1)
+		/ getPotionProcessSpeedMultiplier()
 end
 
 function TycoonController:updateProcesserDisplay(tycoon: Instance, depositOverride: number?, rateOverride: number?)
@@ -673,6 +713,70 @@ function TycoonController:setDefaultProcesserDisplay(tycoon: Instance)
 
 	if rateLabel then
 		rateLabel.Text = "Rate: 1/s"
+	end
+end
+
+function TycoonController:cleanupReleasedTycoon(tycoon: Instance)
+	local entry = renderers[tycoon]
+	if entry then
+		if entry.isOwn then
+			entry.renderer:resetTowerToEmpty()
+		else
+			entry.renderer:destroy()
+			entry.janitor:Destroy()
+			renderers[tycoon] = nil
+			buttonBillboardCacheByTycoon[tycoon] = nil
+			buttonBillboardsEnabledByTycoon[tycoon] = nil
+			buttonPriceUpdateScheduled[tycoon] = nil
+		end
+	else
+		TycoonRenderer.cleanupUnclaimedTycoon(tycoon)
+	end
+
+	self:setDefaultProcesserDisplay(tycoon)
+end
+
+function TycoonController:bindReleasedTycoonCleanup(tycoon: Instance)
+	if tycoonUnclaimedBound[tycoon] then
+		return
+	end
+
+	local janitor = Janitor.new()
+	tycoonUnclaimedBound[tycoon] = janitor
+
+	janitor:Add(tycoon:GetAttributeChangedSignal("Claimed"):Connect(function()
+		if tycoon:GetAttribute("Claimed") ~= true then
+			self:cleanupReleasedTycoon(tycoon)
+		end
+	end))
+
+	janitor:Add(tycoon.Destroying:Connect(function()
+		local bound = tycoonUnclaimedBound[tycoon]
+		if bound then
+			bound:Destroy()
+			tycoonUnclaimedBound[tycoon] = nil
+		end
+	end))
+
+	if tycoon:GetAttribute("Claimed") ~= true then
+		self:cleanupReleasedTycoon(tycoon)
+	end
+end
+
+function TycoonController:bindAllReleasedTycoonCleanup()
+	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
+	if not tycoonsFolder then
+		return
+	end
+
+	for _, tycoon in tycoonsFolder:GetChildren() do
+		self:bindReleasedTycoonCleanup(tycoon)
+	end
+
+	if not tycoonsFolderChildAddedConnection then
+		tycoonsFolderChildAddedConnection = tycoonsFolder.ChildAdded:Connect(function(tycoon)
+			self:bindReleasedTycoonCleanup(tycoon)
+		end)
 	end
 end
 
@@ -1420,7 +1524,20 @@ function TycoonController:setupOwnTycoon(): boolean
 		self:applyEntitlementsToOwnTycoon()
 	end, janitor)
 
-	PlayerDataController:Observe({ "RebirthUpgrades", "BetterMaxButton" }, function()
+	PlayerDataController:Observe({ "YenUpgrades", "BetterMaxButton" }, function()
+		self:scheduleButtonPriceUpdate(tycoon)
+	end, janitor)
+
+	PlayerDataController:Observe({ "YenUpgrades", "BetterGoldenDrops" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe({ "YenUpgrades", "Pickuprange" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe("YenUpgrades", function()
+		self:applyEntitlementsToOwnTycoon()
 		self:scheduleButtonPriceUpdate(tycoon)
 	end, janitor)
 
@@ -1491,6 +1608,7 @@ function TycoonController:setupOtherTycoons()
 	end
 
 	local PlayerDataController = Knit.GetController("PlayerDataController")
+	self:bindAllReleasedTycoonCleanup()
 	self:updateAllDefaultProcesserDisplays()
 
 	otherTycoonStreamingConnection = RunService.Heartbeat:Connect(function()
@@ -1573,13 +1691,7 @@ function TycoonController:refreshOtherTycoons(forceRestart: boolean?)
 			local shouldUnload = entry and not entry.isOwn and (not shouldShowOthers or not isClaimed)
 
 			if shouldUnload then
-				entry.renderer:destroy()
-				entry.janitor:Destroy()
-				renderers[tycoon] = nil
-				buttonBillboardCacheByTycoon[tycoon] = nil
-				buttonBillboardsEnabledByTycoon[tycoon] = nil
-				buttonPriceUpdateScheduled[tycoon] = nil
-				self:setDefaultProcesserDisplay(tycoon)
+				self:cleanupReleasedTycoon(tycoon)
 				stepBatch()
 			elseif shouldLoad then
 				if self:setupTycoon(tycoon, false) then
@@ -1724,6 +1836,8 @@ function TycoonController:KnitStart()
 	end)
 
 	local function init()
+		self:bindAllReleasedTycoonCleanup()
+
 		if initialized then
 			return
 		end

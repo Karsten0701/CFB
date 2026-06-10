@@ -1,7 +1,9 @@
 local MarketplaceService = game:GetService("MarketplaceService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Monetization = require(ReplicatedStorage.Shared.Data.Monetization)
+local PotionConfig = require(ReplicatedStorage.Shared.Data.PotionConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
 
 local MonetizationService = Knit.CreateService({
@@ -10,9 +12,20 @@ local MonetizationService = Knit.CreateService({
 })
 
 local gamePassCache: { [Player]: { [string]: boolean } } = {}
+local pendingGifts: { [Player]: { RecipientUserId: number, GiftProductKey: string }? } = {}
+
 local GAMEPASS_BACKED_SETTINGS = {
 	AutoCollect = true,
 	AutoDeposit = true,
+}
+
+local GIFT_KIND_TO_GAMEPASS = {
+	GiftAutoCollect = "AutoCollect",
+	GiftAutoDeposit = "AutoDeposit",
+	GiftDoubleYen = "DoubleYen",
+	GiftDoubleDropSpeed = "DoubleDropSpeed",
+	GiftDoubleMana = "DoubleMana",
+	GiftDoubleDeposit = "DoubleDeposit",
 }
 
 local function setCachedProductEntitlement(player: Player, entitlementKey: string)
@@ -51,6 +64,206 @@ local function enableOwnedGamePassSettingIfAllowed(player: Player, gamePassKey: 
 	if PlayerDataService:Get(player, { "Settings", gamePassKey }) ~= true then
 		PlayerDataService:Set(player, { "Settings", gamePassKey }, true)
 	end
+end
+
+local function grantStarterPackToPlayer(service: any, player: Player, product): boolean
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
+		return true
+	end
+
+	local currentUnits = PlayerDataService:GetUnits(player)
+	local nextUnits = table.clone(currentUnits)
+	if type(product.Units) == "table" then
+		for _, unit in product.Units do
+			if type(unit) ~= "table" then
+				continue
+			end
+
+			table.insert(nextUnits, {
+				Tier = unit.Tier or 1,
+			})
+		end
+	end
+
+	if #nextUnits ~= #currentUnits then
+		PlayerDataService:SetUnits(player, nextUnits)
+	end
+
+	if type(product.Yen) == "number" and product.Yen > 0 then
+		PlayerDataService:AddYen(player, product.Yen)
+	end
+
+	if type(product.Gamepasses) == "table" then
+		for _, gamePassKey in product.Gamepasses do
+			if type(gamePassKey) == "string" then
+				service:AdminGrantGamePass(player, gamePassKey)
+			end
+		end
+	end
+
+	PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+	return true
+end
+
+local function grantAllGamePasses(service: any, player: Player): boolean
+	for gamePassKey in Monetization.GamePasses do
+		service:AdminGrantGamePass(player, gamePassKey)
+	end
+	return true
+end
+
+local function grantPotionProduct(player: Player, product): boolean
+	local PotionService = Knit.GetService("PotionService")
+
+	if product.Kind == "PotionBundle" then
+		return PotionService:AddPotionsFromBundle(player, product.Amount or 10)
+	end
+
+	local potionType = product.PotionType or PotionConfig.getTypeFromProductKind(product.Kind)
+	if not potionType then
+		return false
+	end
+
+	return PotionService:AddPotions(player, potionType, product.Amount or 1)
+end
+
+local function grantGiftProduct(service: any, buyer: Player, product): boolean
+	local pending = pendingGifts[buyer]
+	if not pending then
+		return false
+	end
+
+	if pending.GiftProductKey ~= product.Key then
+		return false
+	end
+
+	local recipient = Players:GetPlayerByUserId(pending.RecipientUserId)
+	if not recipient then
+		return false
+	end
+
+	local success = false
+	local gamePassKey = GIFT_KIND_TO_GAMEPASS[product.Kind]
+	if gamePassKey then
+		success = service:AdminGrantGamePass(recipient, gamePassKey)
+	elseif product.Kind == "GiftStarterPack" then
+		local starterPack = Monetization.DeveloperProducts.StarterPack
+		success = starterPack ~= nil and grantStarterPackToPlayer(service, recipient, starterPack)
+	elseif product.Kind == "GiftPotionBundle" then
+		local PotionService = Knit.GetService("PotionService")
+		success = PotionService:AddPotionsFromBundle(recipient, product.Amount or 10)
+	elseif product.Kind == "GiftGamepassBundle" then
+		success = grantAllGamePasses(service, recipient)
+	end
+
+	if success then
+		pendingGifts[buyer] = nil
+		service:InvalidateEntitlementCache(recipient)
+	end
+
+	return success
+end
+
+local function playerOwnsGiftTarget(service: any, player: Player, giftProductKey: string): boolean
+	local target = Monetization.GiftTargets[giftProductKey]
+	if not target then
+		return true
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	if target.Type == "GamePass" and type(target.Key) == "string" then
+		return service:OwnsGamePass(player, target.Key)
+	end
+
+	if target.Type == "Product" and type(target.Key) == "string" then
+		return PlayerDataService:Get(player, { "PurchasedProducts", target.Key }) == true
+	end
+
+	if target.Type == "GamepassBundle" then
+		if PlayerDataService:Get(player, { "PurchasedProducts", "GamepassBundle" }) == true then
+			return true
+		end
+
+		for gamePassKey in Monetization.GamePasses do
+			if not service:OwnsGamePass(player, gamePassKey) then
+				return false
+			end
+		end
+
+		return true
+	end
+
+	if target.Type == "PotionBundle" then
+		return false
+	end
+
+	return false
+end
+
+local function processStandardProduct(service: any, player: Player, product): boolean
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local TycoonService = Knit.GetService("TycoonService")
+
+	if product.Kind == "Units" then
+		return TycoonService:GrantUnits(player, product.Amount)
+	end
+
+	if product.Kind == "SellAll" then
+		TycoonService:SellAllProcessor(player)
+		return true
+	end
+
+	if product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
+		PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
+		setCachedProductEntitlement(player, product.EntitlementKey)
+		return true
+	end
+
+	if product.Kind == "OpenCapsule" then
+		return TycoonService:OpenPendingCapsulePurchase(player)
+	end
+
+	if product.Kind == "Offline5xReward" then
+		local granted, reward = TycoonService:ClaimOffline5xReward(player)
+		return granted and (reward or 0) > 0
+	end
+
+	if product.Kind == "StarterPack" then
+		return grantStarterPackToPlayer(service, player, product)
+	end
+
+	if product.Kind == "GamepassBundle" then
+		if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
+			return true
+		end
+
+		if not grantAllGamePasses(service, player) then
+			return false
+		end
+
+		PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+		return true
+	end
+
+	if
+		product.Kind == "PotionYen"
+		or product.Kind == "PotionMana"
+		or product.Kind == "PotionDeposit"
+		or product.Kind == "PotionBundle"
+	then
+		return grantPotionProduct(player, product)
+	end
+
+	if string.sub(product.Kind, 1, 4) == "Gift" then
+		return grantGiftProduct(service, player, product)
+	end
+
+	return false
 end
 
 function MonetizationService:GetEntitlements(player: Player): { [string]: boolean }
@@ -120,6 +333,71 @@ function MonetizationService:InvalidateEntitlementCache(player: Player)
 	gamePassCache[player] = nil
 end
 
+function MonetizationService:PrepareGift(
+	buyer: Player,
+	recipientUserId: number,
+	giftProductKey: string
+): (boolean, string?)
+	recipientUserId = math.floor(tonumber(recipientUserId) or 0)
+	if recipientUserId <= 0 or recipientUserId == buyer.UserId then
+		return false, "invalid_recipient"
+	end
+
+	local giftProduct = Monetization.DeveloperProducts[giftProductKey]
+	if not giftProduct or string.sub(giftProductKey, 1, 4) ~= "Gift" then
+		return false, "invalid_gift_product"
+	end
+
+	local recipient = Players:GetPlayerByUserId(recipientUserId)
+	if not recipient then
+		return false, "recipient_not_in_server"
+	end
+
+	if playerOwnsGiftTarget(self, recipient, giftProductKey) then
+		return false, "recipient_already_owns"
+	end
+
+	pendingGifts[buyer] = {
+		RecipientUserId = recipientUserId,
+		GiftProductKey = giftProductKey,
+	}
+	return true, nil
+end
+
+function MonetizationService:CancelGift(buyer: Player)
+	pendingGifts[buyer] = nil
+end
+
+function MonetizationService:GetGiftEligiblePlayers(buyer: Player, giftProductKey: string): { { UserId: number, Name: string, DisplayName: string } }
+	local results = {}
+	local giftProduct = Monetization.DeveloperProducts[giftProductKey]
+	if not giftProduct then
+		return results
+	end
+
+	for _, player in Players:GetPlayers() do
+		if player == buyer then
+			continue
+		end
+
+		if playerOwnsGiftTarget(self, player, giftProductKey) then
+			continue
+		end
+
+		table.insert(results, {
+			UserId = player.UserId,
+			Name = player.Name,
+			DisplayName = player.DisplayName,
+		})
+	end
+
+	table.sort(results, function(a, b)
+		return a.DisplayName < b.DisplayName
+	end)
+
+	return results
+end
+
 function MonetizationService:AdminGrantGamePass(player: Player, gamePassKey: string): boolean
 	if not Monetization.GamePasses[gamePassKey] then
 		return false
@@ -164,66 +442,22 @@ function MonetizationService:AdminGrantProduct(player: Player, productKey: strin
 		return true, nil
 	end
 
-	if product.Kind == "StarterPack" then
-		if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
-			return true, nil
-		end
-	end
-
-	local TycoonService = Knit.GetService("TycoonService")
-	if product.Kind == "Units" then
-		if not TycoonService:GrantUnits(player, product.Amount) then
-			return false, "grant_units_failed"
-		end
-	elseif product.Kind == "SellAll" then
-		TycoonService:SellAllProcessor(player)
-	elseif product.Kind == "OpenCapsule" then
-		if not TycoonService:OpenPendingCapsulePurchase(player) then
-			return false, "open_capsule_failed"
-		end
-	elseif product.Kind == "Offline5xReward" then
-		local granted, reward = TycoonService:ClaimOffline5xReward(player)
-		if not granted or (reward or 0) <= 0 then
-			return false, "offline_5x_failed"
-		end
-	elseif product.Kind == "StarterPack" then
-		local currentUnits = PlayerDataService:GetUnits(player)
-		local nextUnits = table.clone(currentUnits)
-		if type(product.Units) == "table" then
-			for _, unit in product.Units do
-				if type(unit) ~= "table" then
-					continue
-				end
-
-				table.insert(nextUnits, {
-					Tier = unit.Tier or 1,
-				})
-			end
-		end
-
-		if #nextUnits ~= #currentUnits then
-			PlayerDataService:SetUnits(player, nextUnits)
-		end
-
-		if type(product.Yen) == "number" and product.Yen > 0 then
-			PlayerDataService:AddYen(player, product.Yen)
-		end
-
-		if type(product.Gamepasses) == "table" then
-			for _, gamePassKey in product.Gamepasses do
-				if type(gamePassKey) == "string" then
-					self:AdminGrantGamePass(player, gamePassKey)
-				end
-			end
-		end
-
-		PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
-	else
+	local success = processStandardProduct(self, player, product)
+	if not success then
 		return false, "unsupported_product_kind"
 	end
 
 	if product.Kind ~= "OneTimeEntitlement" and product.Key then
-		PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+		if
+			product.Kind ~= "StarterPack"
+			and product.Kind ~= "PotionYen"
+			and product.Kind ~= "PotionMana"
+			and product.Kind ~= "PotionDeposit"
+			and product.Kind ~= "PotionBundle"
+			and product.Kind ~= "GamepassBundle"
+		then
+			PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+		end
 	end
 
 	self:InvalidateEntitlementCache(player)
@@ -245,12 +479,13 @@ function MonetizationService:KnitStart()
 		end
 	end)
 
-	game:GetService("Players").PlayerRemoving:Connect(function(player)
+	Players.PlayerRemoving:Connect(function(player)
 		gamePassCache[player] = nil
+		pendingGifts[player] = nil
 	end)
 
 	MarketplaceService.ProcessReceipt = function(receiptInfo)
-		local player = game:GetService("Players"):GetPlayerByUserId(receiptInfo.PlayerId)
+		local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
 		if not player then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
@@ -269,68 +504,23 @@ function MonetizationService:KnitStart()
 			return Enum.ProductPurchaseDecision.PurchaseGranted
 		end
 
-		local TycoonService = Knit.GetService("TycoonService")
-		local success = false
-
-		if product.Kind == "Units" then
-			success = TycoonService:GrantUnits(player, product.Amount)
-		elseif product.Kind == "SellAll" then
-			TycoonService:SellAllProcessor(player)
-			success = true
-		elseif product.Kind == "OneTimeEntitlement" and product.EntitlementKey then
-			PlayerDataService:Set(player, { "PurchasedProducts", product.EntitlementKey }, true)
-			setCachedProductEntitlement(player, product.EntitlementKey)
-			success = true
-		elseif product.Kind == "OpenCapsule" then
-			success = TycoonService:OpenPendingCapsulePurchase(player)
-		elseif product.Kind == "Offline5xReward" then
-			local granted, reward = TycoonService:ClaimOffline5xReward(player)
-			success = granted and (reward or 0) > 0
-		elseif product.Kind == "StarterPack" then
-			if PlayerDataService:Get(player, { "PurchasedProducts", product.Key }) == true then
-				success = true
-			else
-				local currentUnits = PlayerDataService:GetUnits(player)
-				local nextUnits = table.clone(currentUnits)
-				if type(product.Units) == "table" then
-					for _, unit in product.Units do
-						if type(unit) ~= "table" then
-							continue
-						end
-
-						table.insert(nextUnits, {
-							Tier = unit.Tier or 1,
-						})
-					end
-				end
-
-				if #nextUnits ~= #currentUnits then
-					PlayerDataService:SetUnits(player, nextUnits)
-				end
-
-				if type(product.Yen) == "number" and product.Yen > 0 then
-					PlayerDataService:AddYen(player, product.Yen)
-				end
-
-				if type(product.Gamepasses) == "table" then
-					for _, gamePassKey in product.Gamepasses do
-						if type(gamePassKey) ~= "string" then
-							continue
-						end
-
-						PlayerDataService:Set(player, { "GrantedGamePasses", gamePassKey }, true)
-						setCachedGamePassEntitlement(player, gamePassKey)
-						enablePurchasedGamePassSetting(player, gamePassKey)
-					end
-				end
-
-				PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
-				success = true
-			end
-		end
-
+		local success = processStandardProduct(self, player, product)
 		if not success then
 			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
+		if product.Kind ~= "OneTimeEntitlement" and product.Key then
+			if
+				product.Kind ~= "StarterPack"
+				and product.Kind ~= "PotionYen"
+				and product.Kind ~= "PotionMana"
+				and product.Kind ~= "PotionDeposit"
+				and product.Kind ~= "PotionBundle"
+				and product.Kind ~= "GamepassBundle"
+				and string.sub(product.Kind, 1, 4) ~= "Gift"
+			then
+				PlayerDataService:Set(player, { "PurchasedProducts", product.Key }, true)
+			end
 		end
 
 		PlayerDataService:Set(player, receiptPath, true)
@@ -340,6 +530,18 @@ end
 
 function MonetizationService.Client:GetEntitlements(player: Player)
 	return self.Server:GetEntitlements(player)
+end
+
+function MonetizationService.Client:PrepareGift(player: Player, recipientUserId: number, giftProductKey: string)
+	return self.Server:PrepareGift(player, recipientUserId, giftProductKey)
+end
+
+function MonetizationService.Client:CancelGift(player: Player)
+	self.Server:CancelGift(player)
+end
+
+function MonetizationService.Client:GetGiftEligiblePlayers(player: Player, giftProductKey: string)
+	return self.Server:GetGiftEligiblePlayers(player, giftProductKey)
 end
 
 return MonetizationService

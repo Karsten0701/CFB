@@ -46,6 +46,15 @@ function Settings.Install(MainGuiController)
 		settingsEntitlementsLoaded = true
 	end
 
+	function MainGuiController:mergeSettingsEntitlements(entitlements: { [string]: boolean })
+		for key, value in entitlements do
+			if value == true then
+				settingsEntitlements[key] = true
+			end
+		end
+		settingsEntitlementsLoaded = true
+	end
+
 	function MainGuiController:setupSettingsIcon()
 		if not settingsIcon then
 			settingsIcon = Icon.new()
@@ -168,11 +177,11 @@ function Settings.Install(MainGuiController)
 		local MonetizationService = Knit.GetService("MonetizationService")
 		MonetizationService:GetEntitlements()
 			:andThen(function(entitlements)
-				settingsEntitlements = entitlements or {}
-				settingsEntitlementsLoaded = true
+				self:setSettingsEntitlements(entitlements or {})
 				self:refreshGamePassSettings()
 				self:updateUpgradesFrame()
 				self:updateDoubleYenOffer()
+				self:refreshShopPrices()
 			end)
 			:catch(function(err)
 				warn("[MainGuiController] Failed to refresh settings gamepasses:", err)
