@@ -66,6 +66,10 @@ function CapsuleFeature.Install(MainGuiController)
 
 		local robuxButton = frame:FindFirstChild("OpenRobux", true)
 		if robuxButton then
+			if robuxButton:IsA("GuiObject") then
+				robuxButton.Visible = Monetization.isEnabled()
+			end
+
 			local priceLabel = robuxButton:FindFirstChild("Price", true)
 			if priceLabel and priceLabel:IsA("TextLabel") then
 				priceLabel.Text = `{OPEN_CAPSULE_PRODUCT.Price or 19} Robux`

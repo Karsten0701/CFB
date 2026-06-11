@@ -425,6 +425,10 @@ function CapsuleController:onRobuxCapsuleOpened(capsuleId: string, rewardTier: n
 end
 
 function CapsuleController:openWithRobux(capsuleId: string)
+	if not Monetization.isEnabled() then
+		return
+	end
+
 	if robuxPromptOpen or openingCapsule then
 		return
 	end
@@ -577,6 +581,13 @@ function CapsuleController:KnitStart()
 	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(playerOrUserId, productId, wasPurchased)
+		if not Monetization.isEnabled() then
+			robuxPromptOpen = false
+			pendingRobuxCapsuleId = nil
+			openingCapsule = false
+			return
+		end
+
 		if not isLocalProductPromptFinished(playerOrUserId) or productId ~= OPEN_CAPSULE_PRODUCT.ProductId then
 			return
 		end

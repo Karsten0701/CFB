@@ -1,5 +1,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ButtonNoti = require(script.Parent.ButtonNoti)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
@@ -10,6 +11,12 @@ local YenUpgrades = {}
 
 local yenUpgradeConnections: { RBXScriptConnection } = {}
 local yenUpgradeRequestOpen = false
+local upgradesNotiDismissed = false
+
+local UPGRADES_NOTI_KEY = "Upgrades"
+local UPGRADES_BUTTON_NAME = "UpgradesButton"
+
+local YEN_UPGRADE_KEYS = { "BetterMaxButton", "BetterGoldenDrops", "Pickuprange" }
 
 local UPGRADE_ROW_NAMES = {
 	BetterMaxButton = "BetterMaxButton",
@@ -191,6 +198,38 @@ function YenUpgrades.Install(MainGuiController)
 		end
 	end
 
+	function MainGuiController:canAffordAnyYenUpgrade(): boolean
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		local yen = math.max(math.floor(tonumber(PlayerDataController:Get("Yen")) or 0), 0)
+
+		for _, upgradeKey in YEN_UPGRADE_KEYS do
+			local level = self:getYenUpgradeLevel(upgradeKey)
+			if YenUpgradesConfig.isMaxed(upgradeKey, level) then
+				continue
+			end
+
+			local cost = YenUpgradesConfig.getCost(upgradeKey, level)
+			if type(cost) == "number" and yen >= cost then
+				return true
+			end
+		end
+
+		return false
+	end
+
+	function MainGuiController:shouldShowUpgradesButtonNoti(): boolean
+		if not self:canAffordAnyYenUpgrade() then
+			upgradesNotiDismissed = false
+			return false
+		end
+
+		return not upgradesNotiDismissed
+	end
+
+	function MainGuiController:updateUpgradesButtonNoti()
+		ButtonNoti.update(self, UPGRADES_NOTI_KEY, UPGRADES_BUTTON_NAME, self:shouldShowUpgradesButtonNoti())
+	end
+
 	function MainGuiController:updateYenUpgradesFrame()
 		local frame = self:getYenUpgradesFrame()
 		if not frame then
@@ -211,6 +250,8 @@ function YenUpgrades.Install(MainGuiController)
 		if pickupRange then
 			self:updatePickupRangeUpgrade(pickupRange)
 		end
+
+		self:updateUpgradesButtonNoti()
 	end
 
 	function MainGuiController:buyYenUpgrade(upgradeKey: string, displayName: string)
@@ -279,13 +320,19 @@ function YenUpgrades.Install(MainGuiController)
 			end
 		end
 
-		local upgradesButton = self:getRightSideButton("UpgradesButton")
+		ButtonNoti.hideInitially(self, UPGRADES_BUTTON_NAME)
+
+		local upgradesButton = self:getRightSideButton(UPGRADES_BUTTON_NAME)
 		if upgradesButton then
 			self:connectYenUpgradeGuiActivated(upgradesButton, function()
+				upgradesNotiDismissed = true
 				self:updateYenUpgradesFrame()
+				self:updateUpgradesButtonNoti()
 				OpenFrame.Toggle(frame)
 			end)
 		end
+
+		self:updateUpgradesButtonNoti()
 	end
 end
 

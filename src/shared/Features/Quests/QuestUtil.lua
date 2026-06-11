@@ -1,8 +1,11 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
-local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local QuestConfig = require(ReplicatedStorage.Shared.Data.QuestConfig)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
+local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
+local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
+local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 
 local QuestUtil = {}
 
@@ -35,7 +38,8 @@ end
 
 local function getLastSundayDay(year: number, month: number): number
 	local daysInMonth = getDaysInMonth(year, month)
-	local weekday = os.date("!*t", os.time({ year = year, month = month, day = daysInMonth, hour = 12, min = 0, sec = 0 })).wday
+	local weekday =
+		os.date("!*t", os.time({ year = year, month = month, day = daysInMonth, hour = 12, min = 0, sec = 0 })).wday
 	local daysBack = (weekday - 1) % 7
 	return daysInMonth - daysBack
 end
@@ -57,15 +61,12 @@ function QuestUtil.getNetherlandsOffsetSeconds(now: number?): number
 	return 3600
 end
 
-
 function QuestUtil.getPeriodEnd(category: string, now: number?): number
 	now = math.floor(tonumber(now) or os.time())
 	local offset = QuestUtil.getNetherlandsOffsetSeconds(now)
 	local localNow = now + offset
 	local components = os.date("!*t", localNow)
-	local secondsIntoDay = components.hour * SECONDS_PER_HOUR
-		+ components.min * SECONDS_PER_MINUTE
-		+ components.sec
+	local secondsIntoDay = components.hour * SECONDS_PER_HOUR + components.min * SECONDS_PER_MINUTE + components.sec
 	local midnightLocal = localNow - secondsIntoDay
 	local resetHour = QuestConfig.Reset.DailyHour or 5
 
@@ -114,7 +115,7 @@ function QuestUtil.getPeriodStart(category: string, now: number?): number
 		return periodEnd - 7 * SECONDS_PER_DAY
 	end
 
-	return now
+	return now or 0
 end
 
 function QuestUtil.getPeriodId(category: string, now: number?): string
@@ -140,7 +141,7 @@ end
 
 function QuestUtil.getTimeUntilReset(category: string, now: number?): number
 	now = math.floor(tonumber(now) or os.time())
-	return math.max(QuestUtil.getPeriodEnd(category, now) - now, 0)
+	return math.max(QuestUtil.getPeriodEnd(category, now or 0) - (now or 0), 0)
 end
 
 function QuestUtil.formatTimeUntilReset(category: string, now: number?): string
@@ -203,90 +204,192 @@ local function rollFromWeightedPool(entries: { any }, seed: string, usedIds: { [
 	return candidates[#candidates].Entry
 end
 
-function QuestUtil.getTierEconomyScale(tier: number): number
-	tier = math.clamp(math.floor(tonumber(tier) or 1), 1, AnimeDroppers.MaxTier)
-	local tierData = AnimeDroppers.Tiers[tier]
-	if not tierData then
-		return 100
-	end
-
-	local dropValue = math.max(tonumber(tierData.DropValue) or 1, 1)
-	local estimatedCost = math.max(tonumber(tierData.EstimatedTier1Cost) or 1, 1)
-	return math.max(dropValue * estimatedCost, 100)
+local function getDropIntervalSeconds(scaling: { [string]: any }): number
+	return math.max(math.floor(tonumber(scaling.DropIntervalSeconds) or 60), 1)
 end
 
-local function getQuestProgressionMultipliers(
+function QuestUtil.getManaPerSecond(units: { { Tier: number } }?, dropIntervalSeconds: number?): number
+	if type(units) ~= "table" then
+		return 0
+	end
+
+	local scaling = QuestConfig.Scaling or {}
+	local dropInterval = math.max(math.floor(tonumber(dropIntervalSeconds) or getDropIntervalSeconds(scaling)), 1)
+	local total = 0
+
+	for _, unit in units do
+		if type(unit) ~= "table" then
+			continue
+		end
+
+		local tierData = AnimeDroppers.Tiers[unit.Tier or 1]
+		if tierData then
+			total += math.max(tonumber(tierData.DropValue) or 1, 1) / dropInterval
+		end
+	end
+
+	return math.max(total, 0)
+end
+
+function QuestUtil.getGroupRewardAmount(units: { { Tier: number } }?): number
+	local groupRewardConfig = TycoonConfig.GroupReward or {}
+	local baseYen = tonumber(groupRewardConfig.BaseYen) or 500
+	local yenPerBaseUnit = tonumber(groupRewardConfig.YenPerBaseUnit) or 50
+	local baseUnitCount = Pricing.getBaseUnitCount(units or {})
+	local growthMultiplier = tonumber(groupRewardConfig.GrowthMultiplier) or 1
+	local growthUnitsPerStep = math.max(tonumber(groupRewardConfig.GrowthUnitsPerStep) or 1, 1)
+	local maxGrowthMultiplier = math.max(tonumber(groupRewardConfig.MaxGrowthMultiplier) or math.huge, 1)
+	local reward = baseYen + baseUnitCount * yenPerBaseUnit
+	local growth = math.min(growthMultiplier ^ (baseUnitCount / growthUnitsPerStep), maxGrowthMultiplier)
+	return math.max(math.floor(reward * growth), 0)
+end
+
+function QuestUtil.getIncomeProfile(units: { { Tier: number } }?, yenMultiplier: number?)
+	units = if type(units) == "table" then units else {}
+	yenMultiplier = math.max(tonumber(yenMultiplier) or 1, 1)
+	local manaPerSecond = QuestUtil.getManaPerSecond(units)
+
+	return {
+		manaPerSecond = manaPerSecond,
+		yenPerSecond = manaPerSecond * yenMultiplier,
+		yenMultiplier = yenMultiplier,
+		baseUnitCount = Pricing.getBaseUnitCount(units or {}),
+		unitCount = #(units or {}),
+	}
+end
+
+function QuestUtil.getRewardIncomeProfile(units: { { Tier: number } }?, yenMultiplier: number?)
+	units = if type(units) == "table" then units else {}
+	yenMultiplier = math.max(tonumber(yenMultiplier) or 1, 1)
+	local scaling = QuestConfig.Scaling or {}
+	local rewardConfig = scaling.YenReward or {}
+	local dropInterval = math.max(math.floor(tonumber(rewardConfig.DropIntervalSeconds) or 6), 1)
+	local manaPerSecond = QuestUtil.getManaPerSecond(units, dropInterval)
+
+	return {
+		manaPerSecond = manaPerSecond,
+		yenPerSecond = manaPerSecond * yenMultiplier,
+		yenMultiplier = yenMultiplier,
+		baseUnitCount = Pricing.getBaseUnitCount(units or {}),
+		unitCount = #(units or {}),
+	}
+end
+
+local function getIncomeSeconds(category: string, seed: string?): number
+	local scaling = QuestConfig.Scaling or {}
+	local incomeSeconds = scaling.IncomeSeconds or {}
+
+	if category == "Hourly" then
+		local hourly = incomeSeconds.Hourly or { Min = 600, Max = 900 }
+		local minSec = math.max(math.floor(tonumber(hourly.Min) or 600), 60)
+		local maxSec = math.max(math.floor(tonumber(hourly.Max) or 900), minSec)
+		if type(seed) == "string" then
+			local roll = getStableHash(seed .. ":income")
+			return minSec + (roll % (maxSec - minSec + 1))
+		end
+
+		return minSec
+	end
+
+	return math.max(math.floor(tonumber(incomeSeconds[category]) or 600), 60)
+end
+
+local function getIncomeEfficiency(category: string): number
+	local scaling = QuestConfig.Scaling or {}
+	local efficiency = (scaling.IncomeEfficiency or {})[category]
+	return math.clamp(tonumber(efficiency) or 0.4, 0.05, 1)
+end
+
+function QuestUtil.getCategoryDifficulty(category: string): number
+	local scaling = QuestConfig.Scaling or {}
+	return math.max(tonumber((scaling.CategoryDifficulty or {})[category]) or 1, 1)
+end
+
+function QuestUtil.getRewardDifficulty(category: string): number
+	local scaling = QuestConfig.Scaling or {}
+	return math.max(tonumber((scaling.RewardDifficulty or {})[category]) or 1, 1)
+end
+
+local function scaleRequirement(category: string, amount: number): number
+	return math.max(math.floor(amount * QuestUtil.getCategoryDifficulty(category)), 1)
+end
+
+local function scaleReward(category: string, amount: number): number
+	return math.max(math.floor(amount * QuestUtil.getRewardDifficulty(category)), 1)
+end
+
+local function getBuyUnitsProgressionMultiplier(
 	scaling: { [string]: any },
 	highestTier: number,
-	unitCount: number,
-	requiredTier1: number
-): (number, number)
-	local tierStep = math.max(tonumber(scaling.TierMultiplierPerStep) or 0.12, 0)
-	local unitStrength = math.max(tonumber(scaling.UnitScaleStrength) or 0.22, 0)
+	baseUnitCount: number
+): number
+	local tierStep = math.max(tonumber(scaling.BuyUnitsTierStep) or 0.04, 0)
+	local unitStrength = math.max(tonumber(scaling.BuyUnitsUnitStrength) or 0.06, 0)
 	local tierMult = 1 + math.max(highestTier - 1, 0) * tierStep
-	local unitRatio = math.max(unitCount, 1) / math.max(requiredTier1, 1)
-	local unitMult = 1 + math.log10(unitRatio + 1) * unitStrength
-
-	return tierMult, unitMult
+	local unitMult = 1 + math.log10(math.max(baseUnitCount, 1) + 1) * unitStrength
+	return tierMult * unitMult
 end
 
 function QuestUtil.computeQuestTarget(
 	questType: string,
 	category: string,
+	income: { [string]: any },
 	highestTier: number,
-	unitCount: number?,
 	seed: string?
 ): number
 	highestTier = math.clamp(math.floor(tonumber(highestTier) or 1), 1, AnimeDroppers.MaxTier)
-	unitCount = math.max(math.floor(tonumber(unitCount) or 0), 0)
+	income = income or QuestUtil.getIncomeProfile(nil, 1)
 	local scaling = QuestConfig.Scaling or {}
-	local tierData = AnimeDroppers.Tiers[highestTier]
-	local requiredTier1 = math.max(tonumber(tierData and tierData.RequiredTier1) or 1, 1)
-	local tierMult, unitMult = getQuestProgressionMultipliers(scaling, highestTier, unitCount, requiredTier1)
-	local progressionMult = tierMult * unitMult
+	local manaPerSecond = math.max(tonumber(income.manaPerSecond) or 0, 0)
+	local yenPerSecond = math.max(tonumber(income.yenPerSecond) or 0, 0)
+	local baseUnitCount = math.max(math.floor(tonumber(income.baseUnitCount) or 0), 0)
 
 	if questType == "EarnYen" then
-		local tierScale = QuestUtil.getTierEconomyScale(highestTier)
-		local percent = (scaling.EarnYenTierPercent or {})[category] or 0.1
+		local seconds = getIncomeSeconds(category, seed)
+		local efficiency = getIncomeEfficiency(category)
 		local minimums = scaling.EarnYenMinimum or {}
-		local minimum = math.max(math.floor(tonumber(minimums[category]) or 100), 100)
-		return math.max(math.floor(tierScale * percent * progressionMult), minimum)
+		local minimum = math.max(math.floor(tonumber(minimums[category]) or 100), 1)
+		local target = math.max(math.floor(yenPerSecond * seconds * efficiency), minimum)
+		return scaleRequirement(category, target)
 	end
 
 	if questType == "CollectMana" then
-		local percent = (scaling.CollectManaTierPercent or {})[category] or 0.1
+		local seconds = getIncomeSeconds(category, seed)
+		local efficiency = getIncomeEfficiency(category)
 		local minimums = scaling.CollectManaMinimum or {}
-		local minimum = math.max(math.floor(tonumber(minimums[category]) or 50), 50)
-		local dropValue = math.max(tonumber(tierData and tierData.DropValue) or 1, 1)
-		return math.max(math.floor(dropValue * requiredTier1 * percent * 10 * progressionMult), minimum)
+		local minimum = math.max(math.floor(tonumber(minimums[category]) or 100), 1)
+		local target = math.max(math.floor(manaPerSecond * seconds * efficiency), minimum)
+		return scaleRequirement(category, target)
 	end
 
 	if questType == "BuyUnits" then
 		local minimums = scaling.BuyUnitsMinimum or {}
 		local minimum = math.max(math.floor(tonumber(minimums[category]) or 1), 1)
-		return math.max(math.floor(minimum * progressionMult), 1)
+		local progressionMult = getBuyUnitsProgressionMultiplier(scaling, highestTier, baseUnitCount)
+		local target = math.max(math.floor(minimum * progressionMult), 1)
+		return scaleRequirement(category, target)
 	end
 
 	if questType == "Playtime" then
 		local playtime = scaling.PlaytimeSeconds or {}
+		local seconds = 60
+
 		if category == "Hourly" then
 			local minSec = math.max(math.floor(tonumber(playtime.HourlyMin) or 600), 60)
 			local maxSec = math.max(math.floor(tonumber(playtime.HourlyMax) or 900), minSec)
 			if type(seed) == "string" then
 				local roll = getStableHash(seed .. ":playtime")
-				return minSec + (roll % (maxSec - minSec + 1))
+				seconds = minSec + (roll % (maxSec - minSec + 1))
+			else
+				seconds = minSec
 			end
-
-			return minSec
+		elseif category == "Daily" then
+			seconds = math.max(math.floor(tonumber(playtime.Daily) or 10800), 60)
+		elseif category == "Weekly" then
+			seconds = math.max(math.floor(tonumber(playtime.Weekly) or 43200), 60)
 		end
 
-		if category == "Daily" then
-			return math.max(math.floor(tonumber(playtime.Daily) or 10800), 60)
-		end
-
-		if category == "Weekly" then
-			return math.max(math.floor(tonumber(playtime.Weekly) or 43200), 60)
-		end
+		return scaleRequirement(category, seconds)
 	end
 
 	if questType == "ReachTier" then
@@ -297,16 +400,67 @@ function QuestUtil.computeQuestTarget(
 	return 1
 end
 
-function QuestUtil.computeYenRewardAmount(highestTier: number, category: string): number
-	highestTier = math.clamp(math.floor(tonumber(highestTier) or 1), 1, AnimeDroppers.MaxTier)
-	local scaling = QuestConfig.Scaling or {}
-	local percent = (scaling.EarnYenReward or {})[category] or 0.1
-	local tierScale = QuestUtil.getTierEconomyScale(highestTier)
-	local amount = math.max(math.floor(tierScale * percent), 100)
-	if category == "Hourly" then
-		amount = math.max(math.floor(amount / 5), 100)
+function QuestUtil.estimateYenMultiplier(rebirths: number?): number
+	rebirths = math.max(math.floor(tonumber(rebirths) or 0), 0)
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	return math.max((rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0), 1)
+end
+
+function QuestUtil.getRewardContext(
+	units: { { Tier: number } }?,
+	yenMultiplier: number?
+): {
+	units: { { Tier: number } },
+	yenMultiplier: number,
+	highestTier: number,
+	income: { [string]: any },
+}
+	units = if type(units) == "table" then units else {}
+	yenMultiplier = math.max(tonumber(yenMultiplier) or 1, 1)
+	local income = QuestUtil.getIncomeProfile(units, yenMultiplier)
+
+	return {
+		units = units,
+		yenMultiplier = yenMultiplier,
+		highestTier = CapsuleUtil.getHighestUnitTier(units),
+		income = income,
+	}
+end
+
+function QuestUtil.computeYenRewardAmount(
+	income: { [string]: any },
+	category: string,
+	units: { { Tier: number } }?
+): number
+	local yenMultiplier = 1
+	if type(income) == "table" then
+		yenMultiplier = math.max(tonumber(income.yenMultiplier) or 1, 1)
+		if yenMultiplier <= 1 then
+			local manaPerSecond = math.max(tonumber(income.manaPerSecond) or 0, 0)
+			local yenPerSecond = math.max(tonumber(income.yenPerSecond) or 0, 0)
+			if manaPerSecond > 0 then
+				yenMultiplier = yenPerSecond / manaPerSecond
+			end
+		end
 	end
-	return amount
+
+	local rewardIncome = QuestUtil.getRewardIncomeProfile(units, yenMultiplier)
+	local scaling = QuestConfig.Scaling or {}
+	local rewardConfig = scaling.YenReward or {}
+	local seconds = math.max(math.floor(tonumber((rewardConfig.Seconds or {})[category]) or 180), 1)
+	local multiplier = math.clamp(tonumber(rewardConfig.Multiplier) or 0.16, 0.01, 1)
+	local minimum = math.max(math.floor(tonumber((rewardConfig.Minimum or {})[category]) or 100), 1)
+	local groupCapRatio = math.clamp(tonumber(rewardConfig.GroupRewardCap) or 0.5, 0.1, 1)
+	local yenPerSecond = math.max(tonumber(rewardIncome.yenPerSecond) or 0, 0)
+	local offlineStyle = math.floor(yenPerSecond * seconds * multiplier)
+	local groupReward = QuestUtil.getGroupRewardAmount(units)
+	local groupCap = math.max(math.floor(groupReward * groupCapRatio), minimum)
+	local amount = math.max(math.min(offlineStyle, groupCap), minimum)
+	return scaleReward(category, amount)
+end
+
+local function getPotionRewardAmount(_reward: { [string]: any }, category: string): number
+	return math.max(math.floor(tonumber((QuestConfig.PotionAmounts or {})[category]) or 1), 1)
 end
 
 local function formatPotionRewardText(amount: number, potionType: string): string
@@ -315,11 +469,50 @@ local function formatPotionRewardText(amount: number, potionType: string): strin
 	return tostring(amount) .. "x " .. potionType .. " Potion"
 end
 
-local function rollRewardKind(rewardWeights: { [string]: number }, seed: string): string
+local function mergeCategoryRewardWeights(
+	entryWeights: { [string]: number },
+	category: string
+): { [string]: number }
+	local categoryWeights = (QuestConfig.CategoryRewardWeights or {})[category] or {}
+	local merged = {}
+
+	for kind, weight in entryWeights do
+		local entryWeight = math.max(math.floor(tonumber(weight) or 0), 0)
+		if entryWeight <= 0 then
+			continue
+		end
+
+		local categoryWeight = math.max(tonumber(categoryWeights[kind]) or 1, 0)
+		if categoryWeight <= 0 then
+			continue
+		end
+
+		merged[kind] = entryWeight * categoryWeight
+	end
+
+	if next(merged) == nil then
+		return { Yen = 1 }
+	end
+
+	return merged
+end
+
+local function rollRewardKind(
+	rewardWeights: { [string]: number },
+	seed: string,
+	potionRewardsRolled: number?
+): string
+	local maxPotions = math.max(math.floor(tonumber(QuestConfig.MaxPotionRewardsPerPeriod) or 1), 0)
+	potionRewardsRolled = math.max(math.floor(tonumber(potionRewardsRolled) or 0), 0)
+
 	local candidates = {}
 	local totalWeight = 0
 
 	for kind, weight in rewardWeights do
+		if kind == "Potion" and potionRewardsRolled >= maxPotions then
+			continue
+		end
+
 		local normalizedWeight = math.max(math.floor(tonumber(weight) or 0), 0)
 		if normalizedWeight > 0 then
 			totalWeight += normalizedWeight
@@ -343,13 +536,20 @@ local function rollRewardKind(rewardWeights: { [string]: number }, seed: string)
 	return candidates[#candidates].Kind
 end
 
-function QuestUtil.buildReward(kind: string, category: string, highestTier: number, seed: string)
+function QuestUtil.buildReward(
+	kind: string,
+	category: string,
+	income: { [string]: any },
+	highestTier: number,
+	seed: string,
+	units: { { Tier: number } }?
+)
 	highestTier = math.clamp(math.floor(tonumber(highestTier) or 1), 1, AnimeDroppers.MaxTier)
 
 	if kind == "Yen" then
 		return {
 			Kind = "Yen",
-			Amount = QuestUtil.computeYenRewardAmount(highestTier, category),
+			Amount = QuestUtil.computeYenRewardAmount(income, category, units),
 			RewardTier = highestTier,
 		}
 	end
@@ -376,19 +576,38 @@ function QuestUtil.buildReward(kind: string, category: string, highestTier: numb
 
 	return {
 		Kind = "Yen",
-		Amount = QuestUtil.computeYenRewardAmount(highestTier, category),
+		Amount = QuestUtil.computeYenRewardAmount(income, category, units),
 		RewardTier = highestTier,
 	}
 end
 
-local function rollReward(rewardWeights: { [string]: number }, category: string, highestTier: number, seed: string)
-	local kind = rollRewardKind(rewardWeights or { Yen = 1 }, seed)
-	return QuestUtil.buildReward(kind, category, highestTier, seed)
+local function rollReward(
+	rewardWeights: { [string]: number },
+	category: string,
+	income: { [string]: any },
+	highestTier: number,
+	seed: string,
+	units: { { Tier: number } }?,
+	potionRewardsRolled: number?
+)
+	local mergedWeights = mergeCategoryRewardWeights(rewardWeights or { Yen = 1 }, category)
+	local kind = rollRewardKind(mergedWeights, seed, potionRewardsRolled)
+	return QuestUtil.buildReward(kind, category, income, highestTier, seed, units)
 end
 
-function QuestUtil.rollQuestSlots(userId: number, category: string, periodId: string, highestTier: number, unitCount: number?)
+function QuestUtil.rollQuestSlots(
+	userId: number,
+	category: string,
+	periodId: string,
+	units: { { Tier: number } }?,
+	yenMultiplier: number?
+)
 	local usedIds = {}
+	local potionRewardsRolled = 0
 	local slots = {}
+	units = if type(units) == "table" then units else {}
+	local income = QuestUtil.getIncomeProfile(units, yenMultiplier)
+	local highestTier = CapsuleUtil.getHighestUnitTier(units)
 
 	for slotIndex = 1, QuestConfig.QuestCount do
 		local seed = tostring(userId) .. ":" .. periodId .. ":" .. category .. ":" .. tostring(slotIndex)
@@ -401,8 +620,20 @@ function QuestUtil.rollQuestSlots(userId: number, category: string, periodId: st
 			usedIds[questEntry.id] = true
 		end
 
-		local target = QuestUtil.computeQuestTarget(questEntry.type, category, highestTier, unitCount, seed)
-		local reward = rollReward(questEntry.rewardWeights or { Yen = 1 }, category, highestTier, seed)
+		local target = QuestUtil.computeQuestTarget(questEntry.type, category, income, highestTier, seed)
+		local reward = rollReward(
+			questEntry.rewardWeights or { Yen = 1 },
+			category,
+			income,
+			highestTier,
+			seed,
+			units,
+			potionRewardsRolled
+		)
+
+		if type(reward) == "table" and reward.Kind == "Potion" then
+			potionRewardsRolled += 1
+		end
 
 		table.insert(slots, {
 			QuestId = questEntry.id,
@@ -431,7 +662,12 @@ function QuestUtil.createPeriodStats()
 	}
 end
 
-function QuestUtil.computeProgress(questType: string, target: number, stats: { [string]: any }, baselines: { [string]: any }): number
+function QuestUtil.computeProgress(
+	questType: string,
+	target: number,
+	stats: { [string]: any },
+	baselines: { [string]: any }
+): number
 	target = math.max(math.floor(tonumber(target) or 1), 1)
 	baselines = baselines or {}
 	stats = stats or {}
@@ -523,15 +759,45 @@ function QuestUtil.resolveUnitRewardTier(highestTier: number, reward: { [string]
 	return math.clamp(math.max(minTier, highestTier + offset), 1, AnimeDroppers.MaxTier)
 end
 
-function QuestUtil.resolveRewardAmount(reward: { [string]: any }, highestTier: number, category: string): { [string]: any }
+function QuestUtil.syncSlotReward(
+	slot: { [string]: any },
+	context: { [string]: any },
+	category: string
+): { [string]: any }
+	if type(slot) ~= "table" or type(slot.Reward) ~= "table" then
+		return slot
+	end
+
+	local resolved = QuestUtil.resolveRewardAmount(slot.Reward, context, category)
+	local nextSlot = table.clone(slot)
+	local nextReward = table.clone(slot.Reward)
+
+	if resolved.Kind == "Yen" then
+		nextReward.Amount = resolved.Amount
+	elseif resolved.Kind == "UnitTier" then
+		nextReward.RewardTier = resolved.Tier
+	end
+
+	nextSlot.Reward = nextReward
+	return nextSlot
+end
+
+function QuestUtil.resolveRewardAmount(
+	reward: { [string]: any },
+	context: { [string]: any },
+	category: string
+): { [string]: any }
 	if type(reward) ~= "table" then
 		return { Kind = "Yen", Amount = 0 }
 	end
 
+	context = QuestUtil.getRewardContext(context.units, context.yenMultiplier)
+
 	if reward.Kind == "Yen" then
+		local rewardIncome = QuestUtil.getRewardIncomeProfile(context.units, context.yenMultiplier)
 		return {
 			Kind = "Yen",
-			Amount = QuestUtil.computeYenRewardAmount(highestTier, category),
+			Amount = QuestUtil.computeYenRewardAmount(rewardIncome, category, context.units),
 		}
 	end
 
@@ -539,42 +805,46 @@ function QuestUtil.resolveRewardAmount(reward: { [string]: any }, highestTier: n
 		return {
 			Kind = "Potion",
 			PotionType = reward.PotionType,
-			Amount = math.max(math.floor(tonumber(reward.Amount) or 1), 1),
+			Amount = getPotionRewardAmount(reward, category),
 		}
 	end
 
 	if reward.Kind == "UnitTier" then
 		return {
 			Kind = "UnitTier",
-			Tier = QuestUtil.resolveUnitRewardTier(highestTier, reward),
-			Amount = math.max(math.floor(tonumber(reward.Amount) or 1), 1),
+			Tier = QuestUtil.resolveUnitRewardTier(context.highestTier, reward),
+			Amount = 1,
 		}
 	end
 
 	return reward
 end
 
-function QuestUtil.formatRewardText(reward: { [string]: any }, highestTier: number, category: string): string
+function QuestUtil.formatRewardText(reward: { [string]: any }, context: { [string]: any }, category: string): string
 	if type(reward) ~= "table" then
 		return "Reward: ?"
 	end
 
-	highestTier = math.clamp(math.floor(tonumber(highestTier) or 1), 1, AnimeDroppers.MaxTier)
-
-	if reward.Kind == "Yen" then
-		local amount = QuestUtil.computeYenRewardAmount(highestTier, category)
-		return "¥" .. FormatUtil.formatNumber(amount)
-	end
+	context = QuestUtil.getRewardContext(context.units, context.yenMultiplier)
 
 	if reward.Kind == "Potion" then
-		return formatPotionRewardText(reward.Amount, reward.PotionType)
+		return formatPotionRewardText(getPotionRewardAmount(reward, category), reward.PotionType)
 	end
 
-	if reward.Kind == "UnitTier" then
-		local tier = QuestUtil.resolveUnitRewardTier(highestTier, reward)
+	local resolved = QuestUtil.resolveRewardAmount(reward, context, category)
+
+	if resolved.Kind == "Yen" then
+		return "¥" .. FormatUtil.formatNumber(resolved.Amount)
+	end
+
+	if resolved.Kind == "UnitTier" then
+		local tier = math.max(math.floor(tonumber(resolved.Tier) or 1), 1)
+		local amount = 1
 		local tierData = AnimeDroppers.Tiers[tier]
-		local displayName = if tierData and tierData.DisplayName then tierData.DisplayName else "Tier " .. tostring(tier)
-		return "1x " .. displayName .. " (T" .. tostring(tier) .. ")"
+		local displayName = if tierData and tierData.DisplayName
+			then tierData.DisplayName
+			else "Tier " .. tostring(tier)
+		return tostring(amount) .. "x " .. displayName .. " (T" .. tostring(tier) .. ")"
 	end
 
 	return "Reward"
@@ -597,7 +867,9 @@ function QuestUtil.formatGrantedRewardText(resolved: { [string]: any }): string
 	if resolved.Kind == "UnitTier" then
 		local tier = math.max(math.floor(tonumber(resolved.Tier) or 1), 1)
 		local tierData = AnimeDroppers.Tiers[tier]
-		local displayName = if tierData and tierData.DisplayName then tierData.DisplayName else "Tier " .. tostring(tier)
+		local displayName = if tierData and tierData.DisplayName
+			then tierData.DisplayName
+			else "Tier " .. tostring(tier)
 		return "1x " .. displayName .. " (T" .. tostring(tier) .. ")"
 	end
 

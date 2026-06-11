@@ -112,6 +112,15 @@ local function updateRobuxPriceLabel(label: TextLabel, text: string)
 	label.Text = text
 end
 
+local function setMonetizationDisabledState(itemRoot: GuiObject)
+	local priceLabel = findRobuxPriceLabel(itemRoot)
+	if priceLabel then
+		updateRobuxPriceLabel(priceLabel, "Disabled")
+	end
+
+	setBuyButtonOwnedState(findBuyButton(itemRoot), true)
+end
+
 function Shop.Install(MainGuiController)
 	GiftFeature.Install(MainGuiController)
 
@@ -147,6 +156,11 @@ function Shop.Install(MainGuiController)
 	end
 
 	local function refreshGamePassPrice(controller, itemRoot: GuiObject, gamePassKey: string)
+		if not Monetization.isEnabled() then
+			setMonetizationDisabledState(itemRoot)
+			return
+		end
+
 		local gamePass = Monetization.GamePasses[gamePassKey]
 		if not gamePass then
 			return
@@ -182,6 +196,11 @@ function Shop.Install(MainGuiController)
 	end
 
 	local function refreshDevProductPrice(itemRoot: GuiObject, productKey: string, showOwned: boolean)
+		if not Monetization.isEnabled() then
+			setMonetizationDisabledState(itemRoot)
+			return
+		end
+
 		local product = Monetization.DeveloperProducts[productKey]
 		if not product then
 			return
@@ -325,6 +344,11 @@ function Shop.Install(MainGuiController)
 	end
 
 	function MainGuiController:connectShopButton(buttonRoot: GuiObject, gamePassKey: string)
+		if not Monetization.isEnabled() then
+			setMonetizationDisabledState(buttonRoot)
+			return
+		end
+
 		local gamePass = Monetization.GamePasses[gamePassKey]
 		if not gamePass or type(gamePass.PassId) ~= "number" or gamePass.PassId <= 0 then
 			return
@@ -387,6 +411,11 @@ function Shop.Install(MainGuiController)
 	end
 
 	function MainGuiController:connectDevProductButton(buttonRoot: GuiObject, productKey: string, showOwned: boolean)
+		if not Monetization.isEnabled() then
+			setMonetizationDisabledState(buttonRoot)
+			return
+		end
+
 		local product = Monetization.DeveloperProducts[productKey]
 		if not product or type(product.ProductId) ~= "number" then
 			return
@@ -576,6 +605,15 @@ function Shop.Install(MainGuiController)
 	function MainGuiController:updateDoubleYenOffer()
 		local offer = self:getDoubleYenOffer()
 		if not offer then
+			return
+		end
+
+		if not Monetization.isEnabled() then
+			offer.Visible = false
+			if doubleYenClickConnection then
+				doubleYenClickConnection:Disconnect()
+				doubleYenClickConnection = nil
+			end
 			return
 		end
 

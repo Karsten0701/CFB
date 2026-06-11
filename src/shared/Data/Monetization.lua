@@ -1,4 +1,10 @@
+local TycoonConfig = require(script.Parent.TycoonConfig)
+
 local Monetization = {}
+
+function Monetization.isEnabled(): boolean
+	return TycoonConfig.GamepassesEnabled ~= false
+end
 
 Monetization.DeveloperProducts = {
 	Unit25 = {

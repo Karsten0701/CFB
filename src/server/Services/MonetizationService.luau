@@ -34,6 +34,10 @@ local function setCachedProductEntitlement(player: Player, entitlementKey: strin
 	gamePassCache[player][entitlementKey .. "Product"] = true
 end
 
+local function isMonetizationEnabled(): boolean
+	return Monetization.isEnabled()
+end
+
 local function setCachedGamePassEntitlement(player: Player, gamePassKey: string)
 	gamePassCache[player] = gamePassCache[player] or {}
 	gamePassCache[player][gamePassKey] = true
@@ -267,6 +271,10 @@ local function processStandardProduct(service: any, player: Player, product): bo
 end
 
 function MonetizationService:GetEntitlements(player: Player): { [string]: boolean }
+	if not isMonetizationEnabled() then
+		return {}
+	end
+
 	local cached = gamePassCache[player]
 	if cached then
 		for gamePassKey in GAMEPASS_BACKED_SETTINGS do
@@ -315,16 +323,28 @@ function MonetizationService:GetEntitlements(player: Player): { [string]: boolea
 end
 
 function MonetizationService:OwnsGamePass(player: Player, gamePassKey: string): boolean
+	if not isMonetizationEnabled() then
+		return false
+	end
+
 	local entitlements = self:GetEntitlements(player)
 	return entitlements[gamePassKey] == true
 end
 
 function MonetizationService:OwnsGamePassOnly(player: Player, gamePassKey: string): boolean
+	if not isMonetizationEnabled() then
+		return false
+	end
+
 	local entitlements = self:GetEntitlements(player)
 	return entitlements[gamePassKey .. "GamePass"] == true
 end
 
 function MonetizationService:OwnsProductEntitlement(player: Player, entitlementKey: string): boolean
+	if not isMonetizationEnabled() then
+		return false
+	end
+
 	local entitlements = self:GetEntitlements(player)
 	return entitlements[entitlementKey .. "Product"] == true
 end
@@ -338,6 +358,10 @@ function MonetizationService:PrepareGift(
 	recipientUserId: number,
 	giftProductKey: string
 ): (boolean, string?)
+	if not isMonetizationEnabled() then
+		return false, "monetization_disabled"
+	end
+
 	recipientUserId = math.floor(tonumber(recipientUserId) or 0)
 	if recipientUserId <= 0 or recipientUserId == buyer.UserId then
 		return false, "invalid_recipient"
@@ -370,6 +394,10 @@ end
 
 function MonetizationService:GetGiftEligiblePlayers(buyer: Player, giftProductKey: string): { { UserId: number, Name: string, DisplayName: string } }
 	local results = {}
+	if not isMonetizationEnabled() then
+		return results
+	end
+
 	local giftProduct = Monetization.DeveloperProducts[giftProductKey]
 	if not giftProduct then
 		return results
@@ -399,6 +427,10 @@ function MonetizationService:GetGiftEligiblePlayers(buyer: Player, giftProductKe
 end
 
 function MonetizationService:AdminGrantGamePass(player: Player, gamePassKey: string): boolean
+	if not isMonetizationEnabled() then
+		return false
+	end
+
 	if not Monetization.GamePasses[gamePassKey] then
 		return false
 	end
@@ -424,6 +456,10 @@ function MonetizationService:AdminRevokeGamePass(player: Player, gamePassKey: st
 end
 
 function MonetizationService:AdminGrantProduct(player: Player, productKey: string): (boolean, string?)
+	if not isMonetizationEnabled() then
+		return false, "monetization_disabled"
+	end
+
 	local product = Monetization.DeveloperProducts[productKey]
 	if not product then
 		return false, "unknown_product"
@@ -466,6 +502,10 @@ end
 
 function MonetizationService:KnitStart()
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, passId, wasPurchased)
+		if not isMonetizationEnabled() then
+			return
+		end
+
 		if not wasPurchased then
 			return
 		end
@@ -485,6 +525,11 @@ function MonetizationService:KnitStart()
 	end)
 
 	MarketplaceService.ProcessReceipt = function(receiptInfo)
+		if not isMonetizationEnabled() then
+			warn("[MonetizationService] Product receipt ignored because monetization is disabled:", receiptInfo.ProductId)
+			return Enum.ProductPurchaseDecision.NotProcessedYet
+		end
+
 		local player = Players:GetPlayerByUserId(receiptInfo.PlayerId)
 		if not player then
 			return Enum.ProductPurchaseDecision.NotProcessedYet

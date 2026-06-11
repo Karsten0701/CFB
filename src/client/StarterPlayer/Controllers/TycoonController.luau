@@ -91,6 +91,10 @@ local function resetProductPromptState()
 end
 
 local function promptDevProduct(head: BasePart, productId: number)
+	if not Monetization.isEnabled() then
+		return
+	end
+
 	if productPromptOpen then
 		return
 	end
@@ -925,7 +929,11 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			local displayAmount = math.max(math.floor(tonumber(product and product.Amount) or robuxBuyAmount), 1)
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				display.Price.Text = if product then formatRobuxPrice(product.Price) else ""
+				display.Price.Text = if not Monetization.isEnabled()
+					then "Disabled"
+					elseif product
+					then formatRobuxPrice(product.Price)
+					else ""
 			end
 
 			if display.Amount and display.Amount.Parent then
@@ -1808,6 +1816,11 @@ function TycoonController:KnitStart()
 	local initialized = false
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, _productId, wasPurchased)
+		if not Monetization.isEnabled() then
+			resetProductPromptState()
+			return
+		end
+
 		if isLocalProductPromptFinished(firstArg) then
 			if wasPurchased == true and productPromptOpen then
 				SoundUtil.Robux()
@@ -1823,6 +1836,10 @@ function TycoonController:KnitStart()
 	end)
 
 	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gamePassId, wasPurchased)
+		if not Monetization.isEnabled() then
+			return
+		end
+
 		if player ~= localPlayer or wasPurchased ~= true then
 			return
 		end

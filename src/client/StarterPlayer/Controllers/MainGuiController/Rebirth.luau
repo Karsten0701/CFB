@@ -1,5 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ButtonNoti = require(script.Parent.ButtonNoti)
+
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
@@ -14,6 +16,10 @@ local rebirthConnections: { RBXScriptConnection } = {}
 local rebirthRequestOpen = false
 local rebirthUpgradeRequestOpen = false
 local lastRebirthReadyRequirement: number? = nil
+local rebirthNotiDismissed = false
+
+local REBIRTH_NOTI_KEY = "Rebirth"
+local REBIRTH_BUTTON_NAME = "RebirthButton"
 
 function Rebirth.Install(MainGuiController)
 	function MainGuiController:connectRebirthGuiActivated(guiObject: GuiObject, callback: () -> ())
@@ -74,17 +80,52 @@ function Rebirth.Install(MainGuiController)
 	end
 
 	function MainGuiController:formatRebirthMultiplier(multiplier: number): string
-		if multiplier % 1 == 0 then
-			return tostring(math.floor(multiplier))
-		end
-
 		return string.format("%.1f", multiplier)
 	end
 
 	function MainGuiController:formatRebirthYenBoostGain(currentMultiplier: number, nextMultiplier: number): string
-		local boostGain = math.max(nextMultiplier - currentMultiplier, 0)
-		local boostPercent = math.floor(boostGain * 100 + 0.5)
-		return "+" .. tostring(boostPercent) .. "% Yen Boost"
+		return self:formatRebirthMultiplier(currentMultiplier) .. "x -> " .. self:formatRebirthMultiplier(nextMultiplier) .. "x Yen"
+	end
+
+	function MainGuiController:getRebirthTokenReward(rebirthNumber: number): number
+		rebirthNumber = math.max(math.floor(tonumber(rebirthNumber) or 1), 1)
+		local rebirthConfig = TycoonConfig.Rebirth or {}
+		local tokensPerRebirth = rebirthConfig.TokensPerRebirth
+		if type(tokensPerRebirth) == "table" then
+			local configuredReward = tokensPerRebirth[rebirthNumber]
+			if configuredReward == nil then
+				local fallbackRebirth = 0
+				for configuredRebirth in tokensPerRebirth do
+					local numericRebirth = math.floor(tonumber(configuredRebirth) or 0)
+					if numericRebirth > fallbackRebirth and numericRebirth <= rebirthNumber then
+						fallbackRebirth = numericRebirth
+						configuredReward = tokensPerRebirth[configuredRebirth]
+					end
+				end
+			end
+
+			if configuredReward ~= nil then
+				return math.max(math.floor(tonumber(configuredReward) or 0), 0)
+			end
+		elseif tonumber(tokensPerRebirth) then
+			return math.max(math.floor(tonumber(tokensPerRebirth) or 0), 0)
+		end
+
+		local previousReward = 1
+		local reward = 1
+		for _ = 2, rebirthNumber do
+			local nextReward = previousReward + reward
+			previousReward = reward
+			reward = nextReward
+		end
+
+		return reward
+	end
+
+	function MainGuiController:formatRebirthTokenReward(rebirthNumber: number): string
+		local reward = self:getRebirthTokenReward(rebirthNumber)
+		local suffix = if reward == 1 then " Token" else " Tokens"
+		return "Get " .. FormatUtil.formatNumber(reward) .. suffix
 	end
 
 	function MainGuiController:getHighestUnitTier(units: any): number
@@ -114,6 +155,20 @@ function Rebirth.Install(MainGuiController)
 		return self:getHighestUnitTier(PlayerDataController:Get("Units")) >= requiredTier, requiredTier
 	end
 
+	function MainGuiController:shouldShowRebirthButtonNoti(): boolean
+		local ready = self:isRebirthReady()
+		if not ready then
+			rebirthNotiDismissed = false
+			return false
+		end
+
+		return not rebirthNotiDismissed
+	end
+
+	function MainGuiController:updateRebirthButtonNoti()
+		ButtonNoti.update(self, REBIRTH_NOTI_KEY, REBIRTH_BUTTON_NAME, self:shouldShowRebirthButtonNoti())
+	end
+
 	function MainGuiController:syncRebirthReadyState(allowMessage: boolean?)
 		local ready, requiredTier = self:isRebirthReady()
 		if ready then
@@ -126,6 +181,8 @@ function Rebirth.Install(MainGuiController)
 		else
 			lastRebirthReadyRequirement = nil
 		end
+
+		self:updateRebirthButtonNoti()
 	end
 
 	function MainGuiController:getOwnedManaMultiplierBoost(): number
@@ -183,6 +240,7 @@ function Rebirth.Install(MainGuiController)
 
 		self:setNamedText(frame, "TierReq", "Reach Tier " .. requiredTier)
 		self:setNamedText(frame, "Boost", self:formatRebirthYenBoostGain(currentMultiplier, nextMultiplier))
+		self:setNamedText(frame, "TokenReward", self:formatRebirthTokenReward(nextRebirths))
 	end
 
 	function MainGuiController:getUpgradeLevel(upgradeKey: string): number
@@ -389,13 +447,19 @@ function Rebirth.Install(MainGuiController)
 			end)
 		end
 
-		local rebirthButton = self:getRightSideButton("RebirthButton")
+		ButtonNoti.hideInitially(self, REBIRTH_BUTTON_NAME)
+
+		local rebirthButton = self:getRightSideButton(REBIRTH_BUTTON_NAME)
 		if rebirthButton then
 			self:connectRebirthGuiActivated(rebirthButton, function()
+				rebirthNotiDismissed = true
+				self:updateRebirthButtonNoti()
 				self:updateRebirthFrame()
 				OpenFrame.Toggle(frame)
 			end)
 		end
+
+		self:updateRebirthButtonNoti()
 	end
 
 	function MainGuiController:setupUpgradesFrame()

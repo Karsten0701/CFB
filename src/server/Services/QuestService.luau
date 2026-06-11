@@ -1,14 +1,21 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
+local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
 local QuestConfig = require(ReplicatedStorage.Shared.Data.QuestConfig)
 local QuestUtil = require(ReplicatedStorage.Shared.Features.Quests.QuestUtil)
+local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local Knit = require(ReplicatedStorage.Packages.knit)
+local TierUnlockAnalytics = require(script.Parent.Parent.Features.Analytics.TierUnlockAnalytics)
 
 local QuestService = Knit.CreateService({
 	Name = "QuestService",
 	Client = {},
 })
+
+local function areQuestsUnlocked(PlayerDataService, player: Player): boolean
+	return math.max(math.floor(tonumber(PlayerDataService:Get(player, "Rebirths")) or 0), 0) >= 1
+end
 
 local function getCategoryStats(categoryData: any): { [string]: any }
 	if type(categoryData) ~= "table" or type(categoryData.Stats) ~= "table" then
@@ -20,6 +27,39 @@ local function getCategoryStats(categoryData: any): { [string]: any }
 		UnitsBought = math.max(math.floor(tonumber(categoryData.Stats.UnitsBought) or 0), 0),
 		ManaCollected = math.max(math.floor(tonumber(categoryData.Stats.ManaCollected) or 0), 0),
 	}
+end
+
+local function getQuestYenMultiplier(player: Player): number
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local multiplier = 1
+
+	pcall(function()
+		local MonetizationService = Knit.GetService("MonetizationService")
+		if MonetizationService:OwnsGamePassOnly(player, "DoubleYen") then
+			multiplier *= 2
+		end
+		if MonetizationService:OwnsProductEntitlement(player, "DoubleYen") then
+			multiplier *= 2
+		end
+	end)
+
+	local rebirths = math.max(math.floor(PlayerDataService:Get(player, "Rebirths") or 0), 0)
+	local rebirthConfig = TycoonConfig.Rebirth or {}
+	multiplier *= (rebirthConfig.BaseYenMultiplier or 1) + rebirths * (rebirthConfig.YenMultiplierPerRebirth or 0)
+	multiplier *= EventUtil.getEffectMultiplier("YenMultiplier", 1)
+
+	local tutorialBoostEndsAt = math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
+	if tutorialBoostEndsAt > os.time() then
+		local tutorialConfig = TycoonConfig.Tutorial or {}
+		multiplier *= math.max(tonumber(tutorialConfig.RewardMultiplier) or 2, 1)
+	end
+
+	pcall(function()
+		local PotionService = Knit.GetService("PotionService")
+		multiplier *= PotionService:GetPotionMultiplier(player, "YenMultiplier")
+	end)
+
+	return math.max(multiplier, 1)
 end
 
 local function getLiveStats(PlayerDataService, player: Player, playtimeSeconds: number?)
@@ -105,6 +145,11 @@ local function refreshCategoryProgress(PlayerDataService, player: Player, catego
 
 	local stats = getProgressStats(PlayerDataService, player, category, playtimeSeconds)
 	local baselines = categoryData.Baselines or {}
+	local units = PlayerDataService:GetUnits(player)
+	local rewardContext = {
+		units = units,
+		yenMultiplier = getQuestYenMultiplier(player),
+	}
 	local nextSlots = {}
 	local changed = false
 
@@ -114,10 +159,17 @@ local function refreshCategoryProgress(PlayerDataService, player: Player, catego
 		end
 
 		local progress = QuestUtil.computeProgress(slot.Type, slot.Target, stats, baselines)
-		local nextSlot = table.clone(slot)
+		local nextSlot = QuestUtil.syncSlotReward(table.clone(slot), rewardContext, category)
 		nextSlot.Progress = progress
 		nextSlots[slotIndex] = nextSlot
+
 		if slot.Progress ~= progress then
+			changed = true
+		end
+
+		local oldReward = if type(slot.Reward) == "table" then slot.Reward else {}
+		local newReward = if type(nextSlot.Reward) == "table" then nextSlot.Reward else {}
+		if oldReward.Amount ~= newReward.Amount or oldReward.RewardTier ~= newReward.RewardTier then
 			changed = true
 		end
 	end
@@ -134,6 +186,9 @@ local function incrementCategoryStat(player: Player, statKey: string, amount: nu
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return
+	end
 
 	for _, category in QuestConfig.Categories do
 		PlayerDataService:Update(player, { "Quests", category, "Stats", statKey }, function(current: number)
@@ -162,10 +217,9 @@ local function rollCategoryQuests(PlayerDataService, player: Player, category: s
 	local periodId = QuestUtil.getPeriodId(category, now)
 	local periodEnd = QuestUtil.getPeriodEnd(category, now)
 	local liveStats = getLiveStats(PlayerDataService, player, PlayerDataService:GetPlaytimeSeconds(player))
-	local highestTier = liveStats.HighestTier
 	local units = PlayerDataService:GetUnits(player)
-	local unitCount = if type(units) == "table" then #units else 0
-	local slots = QuestUtil.rollQuestSlots(player.UserId, category, periodId, highestTier, unitCount)
+	local yenMultiplier = getQuestYenMultiplier(player)
+	local slots = QuestUtil.rollQuestSlots(player.UserId, category, periodId, units, yenMultiplier)
 	local periodStats = QuestUtil.createPeriodStats()
 	local baselines = QuestUtil.createBaselines(liveStats)
 
@@ -185,6 +239,9 @@ end
 function QuestService:EnsureQuestsFresh(player: Player)
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	PlayerDataService:WaitForData(player)
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return
+	end
 
 	local now = os.time()
 	local quests = PlayerDataService:Get(player, "Quests")
@@ -225,9 +282,12 @@ function QuestService:EnsureQuestsFresh(player: Player)
 end
 
 function QuestService:GetProgress(player: Player, category: string, slotIndex: number): number
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return 0
+	end
 	self:EnsureQuestsFresh(player)
 
-	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local slot = PlayerDataService:Get(player, { "Quests", category, "Slots", slotIndex })
 	if type(slot) ~= "table" then
 		return 0
@@ -237,10 +297,13 @@ function QuestService:GetProgress(player: Player, category: string, slotIndex: n
 end
 
 function QuestService:IsComplete(player: Player, category: string, slotIndex: number): boolean
-	self:EnsureQuestsFresh(player)
-	refreshCategoryProgress(Knit.GetService("PlayerDataService"), player, category)
-
 	local PlayerDataService = Knit.GetService("PlayerDataService")
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return false
+	end
+	self:EnsureQuestsFresh(player)
+	refreshCategoryProgress(PlayerDataService, player, category)
+
 	local slot = PlayerDataService:Get(player, { "Quests", category, "Slots", slotIndex })
 	if type(slot) ~= "table" then
 		return false
@@ -257,8 +320,10 @@ local function grantReward(player: Player, reward: { [string]: any }, category: 
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local units = PlayerDataService:GetUnits(player)
-	local highestTier = CapsuleUtil.getHighestUnitTier(units)
-	local resolved = QuestUtil.resolveRewardAmount(reward, highestTier, category)
+	local resolved = QuestUtil.resolveRewardAmount(reward, {
+		units = units,
+		yenMultiplier = getQuestYenMultiplier(player),
+	}, category)
 	local kind = resolved.Kind
 
 	if kind == "Yen" then
@@ -313,6 +378,9 @@ function QuestService.Client:ClaimQuest(player: Player, category: string, slotIn
 
 	local QuestServiceServer = Knit.GetService("QuestService")
 	local PlayerDataService = Knit.GetService("PlayerDataService")
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return false, "Locked", nil
+	end
 	QuestServiceServer:EnsureQuestsFresh(player)
 	refreshCategoryProgress(PlayerDataService, player, category)
 
@@ -339,7 +407,30 @@ function QuestService.Client:ClaimQuest(player: Player, category: string, slotIn
 
 	PlayerDataService:Set(player, { "Quests", category, "Slots", slotIndex, "Claimed" }, true)
 	PlayerDataService:Set(player, { "Quests", category, "Slots", slotIndex, "Progress" }, progress)
+	if PlayerDataService:Get(player, { "Analytics", "QuestClaimedFunnelLogged" }) ~= true then
+		if TierUnlockAnalytics.logQuestClaimed(player) then
+			PlayerDataService:Set(player, { "Analytics", "QuestClaimedFunnelLogged" }, true)
+		end
+	end
 	return true, nil, QuestUtil.formatGrantedRewardText(resolvedReward)
+end
+
+function QuestService.Client:LogQuestOpened(player: Player): boolean
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return false
+	end
+	if PlayerDataService:Get(player, { "Analytics", "QuestOpenedFunnelLogged" }) == true then
+		return true
+	end
+
+	if TierUnlockAnalytics.logQuestOpened(player) then
+		PlayerDataService:Set(player, { "Analytics", "QuestOpenedFunnelLogged" }, true)
+		return true
+	end
+
+	return false
 end
 
 function QuestService:KnitStart()
@@ -351,11 +442,21 @@ function QuestService:KnitStart()
 			PlayerDataService:WaitForData(player)
 
 			PlayerDataService:Observe(player, "PlaytimeSeconds", function()
-				self:EnsureQuestsFresh(player)
+				if areQuestsUnlocked(PlayerDataService, player) then
+					self:EnsureQuestsFresh(player)
+				end
 			end)
 
 			PlayerDataService:Observe(player, "Units", function()
-				self:EnsureQuestsFresh(player)
+				if areQuestsUnlocked(PlayerDataService, player) then
+					self:EnsureQuestsFresh(player)
+				end
+			end)
+
+			PlayerDataService:Observe(player, "Rebirths", function()
+				if areQuestsUnlocked(PlayerDataService, player) then
+					self:EnsureQuestsFresh(player)
+				end
 			end)
 		end)
 	end
@@ -371,7 +472,9 @@ function QuestService:KnitStart()
 			task.wait(30)
 			for _, player in Players:GetPlayers() do
 				pcall(function()
-					self:EnsureQuestsFresh(player)
+					if areQuestsUnlocked(PlayerDataService, player) then
+						self:EnsureQuestsFresh(player)
+					end
 				end)
 			end
 		end

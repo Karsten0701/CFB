@@ -25,10 +25,20 @@ QuestConfig.PotionAmounts = {
 	Weekly = 4,
 }
 
+-- Max potion quest rewards per reset period (rest rolls yen/unit).
+QuestConfig.MaxPotionRewardsPerPeriod = 1
+
+-- Biases reward rolls per category (multiplied with each quest entry's rewardWeights).
+QuestConfig.CategoryRewardWeights = {
+	Hourly = { Yen = 14, Potion = 2, UnitTier = 5 },
+	Daily = { Yen = 10, Potion = 3, UnitTier = 4 },
+	Weekly = { Yen = 9, Potion = 3, UnitTier = 5 },
+}
+
 QuestConfig.UnitTierOffsets = {
 	Hourly = -2,
 	Daily = -1,
-	Weekly = 1,
+	Weekly = 0,
 }
 
 QuestConfig.UnitMinTier = {
@@ -38,15 +48,39 @@ QuestConfig.UnitMinTier = {
 }
 
 QuestConfig.Scaling = {
-	-- Progression multipliers applied on top of category bases (tier + owned units).
-	TierMultiplierPerStep = 0.12,
-	UnitScaleStrength = 0.22,
+	-- Requirement difficulty (locked at quest roll / reset).
+	CategoryDifficulty = {
+		Hourly = 3,
+		Daily = 5,
+		Weekly = 20,
+	},
+	-- Reward difficulty (recomputed live with current units).
+	RewardDifficulty = {
+		Hourly = 3,
+		Daily = 5,
+		Weekly = 20,
+	},
+
+	-- Matches server drop cadence (TycoonService DROP_INTERVAL).
+	DropIntervalSeconds = 60,
+
+	-- Active farming time used for mana/yen quest targets (offline-style income estimate).
+	IncomeSeconds = {
+		Hourly = { Min = 600, Max = 900 },
+		Daily = 10800,
+		Weekly = 43200,
+	},
+	IncomeEfficiency = {
+		Hourly = 0.5,
+		Daily = 0.4,
+		Weekly = 0.35,
+	},
 
 	PlaytimeSeconds = {
-		HourlyMin = 600, -- 10 min
-		HourlyMax = 900, -- 15 min
-		Daily = 10800, -- 3h
-		Weekly = 43200, -- 12h
+		HourlyMin = 600,
+		HourlyMax = 900,
+		Daily = 10800,
+		Weekly = 43200,
 	},
 
 	BuyUnitsMinimum = {
@@ -54,33 +88,35 @@ QuestConfig.Scaling = {
 		Daily = 25000,
 		Weekly = 175000,
 	},
+	BuyUnitsTierStep = 0.04,
+	BuyUnitsUnitStrength = 0.06,
 
-	EarnYenTierPercent = {
-		Hourly = 0.06,
-		Daily = 0.28,
-		Weekly = 1.10,
-	},
 	EarnYenMinimum = {
-		Hourly = 500,
-		Daily = 50000,
-		Weekly = 500000,
-	},
-
-	CollectManaTierPercent = {
-		Hourly = 0.04,
-		Daily = 0.18,
-		Weekly = 0.85,
+		Hourly = 100,
+		Daily = 5000,
+		Weekly = 50000,
 	},
 	CollectManaMinimum = {
-		Hourly = 500,
-		Daily = 100000,
-		Weekly = 800000,
+		Hourly = 100,
+		Daily = 5000,
+		Weekly = 50000,
 	},
 
-	EarnYenReward = {
-		Hourly = 0.10,
-		Daily = 0.38,
-		Weekly = 1.40,
+	-- Yen rewards: live income at visual drop cadence (6s), offline-style seconds × multiplier.
+	YenReward = {
+		DropIntervalSeconds = 6,
+		Seconds = {
+			Hourly = 300,
+			Daily = 1200,
+			Weekly = 5400,
+		},
+		Multiplier = 0.16,
+		GroupRewardCap = 0.5,
+		Minimum = {
+			Hourly = 100,
+			Daily = 1000,
+			Weekly = 10000,
+		},
 	},
 
 	ReachTierOffset = {

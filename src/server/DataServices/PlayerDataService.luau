@@ -25,6 +25,8 @@ local leaderstatValues: {
 	[Player]: { Yen: StringValue, Units: StringValue, Rebirths: StringValue },
 } = {}
 local playtimeSessionStartedAt: { [Player]: number } = {}
+local analyticsSessionStartedAt: { [Player]: number } = {}
+local sessionTimeFunnelLogged: { [Player]: { [number]: boolean } } = {}
 local recordingLeaderboardAchievedAt = false
 
 local PLAYTIME_PERSIST_INTERVAL = 60
@@ -36,6 +38,8 @@ local LEADERBOARD_STAT_PATHS = {
 	TotalUnitsBought = true,
 	PlaytimeSeconds = true,
 }
+
+local SESSION_TIME_MILESTONES = TierUnlockAnalytics.getSessionTimeMilestones()
 
 local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
 	if type(data[newPath]) == "number" then
@@ -475,6 +479,12 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.Analytics.TierUnlockFunnelLogged) ~= "table" then
 		data.Analytics.TierUnlockFunnelLogged = {}
 	end
+	if type(data.Analytics.RebirthFunnelLogged) ~= "table" then
+		data.Analytics.RebirthFunnelLogged = {}
+	end
+	data.Analytics.QuestUnlockedFunnelLogged = data.Analytics.QuestUnlockedFunnelLogged == true
+	data.Analytics.QuestOpenedFunnelLogged = data.Analytics.QuestOpenedFunnelLogged == true
+	data.Analytics.QuestClaimedFunnelLogged = data.Analytics.QuestClaimedFunnelLogged == true
 
 	if type(data.RebirthUpgrades) ~= "table" then
 		data.RebirthUpgrades = {}
@@ -494,10 +504,7 @@ local function ensureManaData(data: { [string]: any })
 	local betterMaxConfig = YenUpgrades.BetterMaxButton
 	local betterMaxMaxLevel = if type(betterMaxConfig) == "table" then betterMaxConfig.MaxLevel or 0 else 0
 	data.YenUpgrades.BetterMaxButton = math.clamp(
-		math.max(
-			math.max(math.floor(tonumber(data.YenUpgrades.BetterMaxButton) or 0), 0),
-			legacyBetterMax
-		),
+		math.max(math.max(math.floor(tonumber(data.YenUpgrades.BetterMaxButton) or 0), 0), legacyBetterMax),
 		0,
 		betterMaxMaxLevel
 	)
@@ -520,14 +527,21 @@ local function ensureManaData(data: { [string]: any })
 	data.Tutorial.Completed = data.Tutorial.Completed == true
 	data.Tutorial.RewardClaimed = data.Tutorial.RewardClaimed == true
 	if type(data.Tutorial.Step) ~= "string" or data.Tutorial.Step == "" then
-		data.Tutorial.Step = "Prompt"
+		data.Tutorial.Step = "PickupDrop"
 	end
 	local legacyTutorialStepMap = {
 		SaveForSecondUnit = "BuySecondUnit",
 		SaveForThirdUnit = "BuyThirdUnit",
 		WaitForTier5 = "WaitForRebirthReady",
+		Prompt = "PickupDrop",
+		Cancelled = "PickupDrop",
 	}
 	data.Tutorial.Step = legacyTutorialStepMap[data.Tutorial.Step] or data.Tutorial.Step
+	if data.Tutorial.Completed ~= true then
+		data.Tutorial.Accepted = true
+		data.Tutorial.Cancelled = false
+		data.Tutorial.Prompted = true
+	end
 	if
 		data.Tutorial.Completed == true
 		and data.Tutorial.RewardClaimed ~= true
@@ -661,6 +675,8 @@ function PlayerDataService:KnitInit()
 	function DataService:onPlayerInit(player: Player, data: any)
 		ensureManaData(data)
 		playtimeSessionStartedAt[player] = os.time()
+		analyticsSessionStartedAt[player] = os.time()
+		sessionTimeFunnelLogged[player] = {}
 		setupLeaderstats(player)
 		task.defer(function()
 			local ok, QuestService = pcall(function()
@@ -689,7 +705,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "PLAYERDATA", --PLAYERDATA gameversion
+		profileStoreIndex = "PLAYERDATA_test4", --PLAYERDATA gameversion
 	})
 end
 
@@ -698,11 +714,14 @@ function PlayerDataService:KnitStart()
 		if not GameShutdown.isShuttingDown() then
 			pcall(function()
 				PlayerDataService:PersistPlaytime(player)
+				PlayerDataService:LogSessionTimeFunnel(player)
 				PlayerDataService:Set(player, "LastLogoutAt", os.time())
 			end)
 		end
 
 		playtimeSessionStartedAt[player] = nil
+		analyticsSessionStartedAt[player] = nil
+		sessionTimeFunnelLogged[player] = nil
 		leaderstatValues[player] = nil
 	end)
 
@@ -716,6 +735,7 @@ function PlayerDataService:KnitStart()
 			for _, player in game:GetService("Players"):GetPlayers() do
 				pcall(function()
 					PlayerDataService:PersistPlaytime(player)
+					PlayerDataService:LogSessionTimeFunnel(player)
 				end)
 			end
 		end
@@ -863,7 +883,8 @@ function PlayerDataService:AddUnitsBought(player: Player, amount: number)
 end
 
 function PlayerDataService:GetPlaytimeSeconds(player: Player): number
-	local savedPlaytime = math.clamp(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
+	local savedPlaytime =
+		math.clamp(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
 	local startedAt = playtimeSessionStartedAt[player]
 	if not startedAt then
 		return savedPlaytime
@@ -889,6 +910,38 @@ function PlayerDataService:PersistPlaytime(player: Player)
 		local nextPlaytime = math.max(math.floor(tonumber(current) or 0), 0) + elapsed
 		return math.min(nextPlaytime, MAX_REASONABLE_PLAYTIME_SECONDS)
 	end)
+end
+
+function PlayerDataService:LogSessionTimeFunnel(player: Player)
+	local startedAt = analyticsSessionStartedAt[player]
+	if not startedAt then
+		return
+	end
+
+	local elapsedMinutes = math.floor(math.max(os.time() - startedAt, 0) / 60)
+	if elapsedMinutes <= 0 then
+		return
+	end
+
+	local logged = sessionTimeFunnelLogged[player]
+	if not logged then
+		logged = {}
+		sessionTimeFunnelLogged[player] = logged
+	end
+
+	for step, milestone in SESSION_TIME_MILESTONES do
+		if milestone > elapsedMinutes then
+			break
+		end
+
+		if logged[milestone] == true then
+			continue
+		end
+
+		if TierUnlockAnalytics.logSessionTimeReached(player, milestone, step) then
+			logged[milestone] = true
+		end
+	end
 end
 
 local function getUnitSpawnTierFromData(data: { [string]: any }): number

@@ -53,8 +53,7 @@ local STEP_TEXT = {
 	Completed = "Tutorial completed",
 }
 
-local currentStep = "Prompt"
-local promptConnections: { RBXScriptConnection } = {}
+local currentStep = "PickupDrop"
 local rewardConnections: { RBXScriptConnection } = {}
 local dataConnections: { RBXScriptConnection } = {}
 local guideConnection: RBXScriptConnection? = nil
@@ -73,7 +72,6 @@ local tutorialFingerConnections: { RBXScriptConnection } = {}
 local dismissedRebirthButtonFingerStep: string? = nil
 local tutorialRewardPresentationActive = false
 
-local CANCELLED_REWARD_THANKS_MESSAGE = "No worries heres a smaller boost."
 local COMPLETED_REWARD_THANKS_MESSAGE = "Thanks for completing the tutorial!"
 
 local function getTutorialConfig(): { [string]: any }
@@ -338,9 +336,6 @@ local function getStepFromData(PlayerDataController): string
 		if tutorial.Completed == true then
 			return "Completed"
 		end
-		if tutorial.Cancelled == true then
-			return "Cancelled"
-		end
 	end
 
 	local savedStep = if type(tutorial) == "table" and type(tutorial.Step) == "string"
@@ -366,95 +361,56 @@ local function getStepFromData(PlayerDataController): string
 	local collectedManaProgress = math.max(manaInBag + manaInDeposit, if yen > 0 then collectGoal else 0)
 	local currentMana = manaInBag + manaInDeposit
 
-	if index <= STEP_INDEX.PickupDrop and collectedManaProgress >= collectGoal then
+	if index == STEP_INDEX.PickupDrop and collectedManaProgress >= collectGoal then
 		index = STEP_INDEX.DepositMana
-	end
-	if index <= STEP_INDEX.DepositMana and (manaInDeposit > 0 or yen > 0) then
+	elseif index == STEP_INDEX.DepositMana and (manaInDeposit > 0 or yen > 0) then
 		index = STEP_INDEX.BuySecondUnit
-	end
-	if index <= STEP_INDEX.BuySecondUnit and totalPurchased >= 1 then
+	elseif index == STEP_INDEX.BuySecondUnit and totalPurchased >= 1 then
 		index = STEP_INDEX.PickupDropAgain
-	end
-	if index == STEP_INDEX.PickupDropAgain and secondCollectBaselineMana == nil then
-		secondCollectBaselineMana = currentMana
-		secondCollectBaselineYen = yen
-	end
-	local secondCollectProgress =
-		math.max(currentMana - (secondCollectBaselineMana or currentMana), yen - (secondCollectBaselineYen or yen), 0)
-	if index <= STEP_INDEX.PickupDropAgain and totalPurchased >= 1 and secondCollectProgress >= collectGoal2 then
-		index = STEP_INDEX.UpgradeRate
-	end
-	if index <= STEP_INDEX.UpgradeRate and rateLevel >= 1 then
+	elseif index == STEP_INDEX.PickupDropAgain then
+		if secondCollectBaselineMana == nil then
+			secondCollectBaselineMana = currentMana
+			secondCollectBaselineYen = yen
+		end
+		local secondCollectProgress =
+			math.max(currentMana - (secondCollectBaselineMana or currentMana), yen - (secondCollectBaselineYen or yen), 0)
+		if totalPurchased >= 1 and secondCollectProgress >= collectGoal2 then
+			index = STEP_INDEX.UpgradeRate
+		end
+	elseif index == STEP_INDEX.UpgradeRate and rateLevel >= 1 then
 		index = STEP_INDEX.DepositManaAgain
-	end
-	if index == STEP_INDEX.DepositManaAgain and secondDepositBaselineDeposit == nil then
-		secondDepositBaselineDeposit = manaInDeposit
-		secondDepositBaselineYen = yen
-	end
-	local secondDepositProgress = math.max(
-		manaInDeposit - (secondDepositBaselineDeposit or manaInDeposit),
-		yen - (secondDepositBaselineYen or yen),
-		0
-	)
-	if index <= STEP_INDEX.DepositManaAgain and rateLevel >= 1 and secondDepositProgress > 0 then
-		index = STEP_INDEX.BuyThirdUnit
-	end
-	if index <= STEP_INDEX.BuyThirdUnit and totalPurchased >= 2 then
+	elseif index == STEP_INDEX.DepositManaAgain then
+		if secondDepositBaselineDeposit == nil then
+			secondDepositBaselineDeposit = manaInDeposit
+			secondDepositBaselineYen = yen
+		end
+		local secondDepositProgress = math.max(
+			manaInDeposit - (secondDepositBaselineDeposit or manaInDeposit),
+			yen - (secondDepositBaselineYen or yen),
+			0
+		)
+		if rateLevel >= 1 and secondDepositProgress > 0 then
+			index = STEP_INDEX.BuyThirdUnit
+		end
+	elseif index == STEP_INDEX.BuyThirdUnit and totalPurchased >= 2 then
 		index = STEP_INDEX.MergeUnits
-	end
-	if index <= STEP_INDEX.MergeUnits and highestTier >= 2 then
+	elseif index == STEP_INDEX.MergeUnits and highestTier >= 2 then
 		index = STEP_INDEX.VisitGroupReward
-	end
-	if index == STEP_INDEX.WaitForRebirthReady and highestTier >= requiredRebirthTier then
+	elseif index == STEP_INDEX.WaitForRebirthReady and highestTier >= requiredRebirthTier then
 		index = STEP_INDEX.Rebirth
-	end
-	if index <= STEP_INDEX.Rebirth and rebirths >= 1 then
+	elseif index == STEP_INDEX.Rebirth and rebirths >= 1 then
 		index = STEP_INDEX.OpenUpgrades
-	end
-	if index <= STEP_INDEX.OpenUpgrades then
+	elseif index == STEP_INDEX.OpenUpgrades and rebirths >= 1 then
 		local mainGui = localPlayer.PlayerGui:FindFirstChild("MainGui")
 		local upgradesFrame = mainGui and mainGui:FindFirstChild("UpgradesFrame")
 		if upgradesFrame and upgradesFrame:IsA("GuiObject") and upgradesFrame.Visible then
 			index = STEP_INDEX.UpgradeUnitSpawnTier
 		end
-	end
-	if index <= STEP_INDEX.UpgradeUnitSpawnTier and unitSpawnTierLevel >= 1 then
+	elseif index == STEP_INDEX.UpgradeUnitSpawnTier and rebirths >= 1 and unitSpawnTierLevel >= 1 then
 		index = STEP_INDEX.Completed
 	end
 
 	return STEP_ORDER[index] or "PickupDrop"
-end
-
-local function getPromptGui(): (LayerCollector?, GuiObject?, GuiObject?)
-	local config = getTutorialConfig()
-	local guiName = config.PromptGuiName or "TutorialStarter"
-	local frameName = config.PromptFrameName or "TutorialFrame"
-	local playerGui = localPlayer:WaitForChild("PlayerGui")
-	local container = playerGui:FindFirstChild(guiName, true)
-	if not container then
-		return nil, nil, nil
-	end
-
-	local frame = if container:IsA("GuiObject") and container.Name == frameName
-		then container
-		else container:FindFirstChild(frameName, true)
-	local layerCollector = container:FindFirstAncestorWhichIsA("LayerCollector")
-	return layerCollector,
-		if container:IsA("GuiObject") then container else nil,
-		if frame and frame:IsA("GuiObject") then frame else nil
-end
-
-local function setPromptVisible(visible: boolean)
-	local gui, container, frame = getPromptGui()
-	if gui and gui.Name ~= "MainGui" then
-		gui.Enabled = visible
-	end
-	if container then
-		container.Visible = visible
-	end
-	if frame then
-		frame.Visible = visible
-	end
 end
 
 local function getGuiButton(root: Instance?, name: string): GuiButton?
@@ -588,7 +544,7 @@ local function updateRebirthTutorialFingers()
 		connectRebirthTutorialFingerDismiss()
 	end
 
-	local isTutorialActive = currentStep ~= "Prompt" and currentStep ~= "Completed" and currentStep ~= "Cancelled"
+	local isTutorialActive = currentStep ~= "Completed"
 	local rebirthFrame = getRebirthFrame()
 	local upgradesFrame = getUpgradesFrame()
 	local rebirthFrameVisible = rebirthFrame and rebirthFrame.Visible == true
@@ -718,19 +674,14 @@ local function formatRewardMinutes(seconds: number): string
 	return string.format("%.1f", minutes)
 end
 
-local function updateTutorialRewardAmountText(cancelledOverride: boolean?)
-	local PlayerDataController = Knit.GetController("PlayerDataController")
-	local tutorial = PlayerDataController:Get("Tutorial")
+local function updateTutorialRewardAmountText()
 	local frame = getTutorialRewardFrame()
-	if type(tutorial) ~= "table" or not frame then
+	if not frame then
 		return
 	end
 
 	local config = getTutorialConfig()
-	local isCancelled = if cancelledOverride ~= nil then cancelledOverride else tutorial.Cancelled == true
-	local rewardSeconds = if isCancelled
-		then tonumber(config.CancelledRewardSeconds) or 7.5 * 60
-		else tonumber(config.RewardSeconds) or 15 * 60
+	local rewardSeconds = math.max(math.floor(tonumber(config.RewardSeconds) or 15 * 60), 1)
 	local rewardText = formatRewardMinutes(rewardSeconds) .. " minute 2x BOOST!"
 	local amountLabel = frame:FindFirstChild("text1", true)
 	if amountLabel and amountLabel:IsA("TextLabel") then
@@ -839,41 +790,39 @@ function TutorialController:MarkGroupRewardVisited()
 end
 
 function TutorialController:isActive(): boolean
-	return currentStep ~= "Prompt"
-		and currentStep ~= "Completed"
-		and currentStep ~= "Cancelled"
+	return currentStep ~= "Completed"
 end
 
 function TutorialController:shouldTrack(): boolean
-	return currentStep ~= "Prompt" and currentStep ~= "Completed" and currentStep ~= "Cancelled"
+	return currentStep ~= "Completed"
 end
 
 function TutorialController:canClaimTutorialReward(): boolean
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local tutorial = PlayerDataController:Get("Tutorial")
 	return type(tutorial) == "table"
-		and (tutorial.Completed == true or tutorial.Cancelled == true)
+		and tutorial.Completed == true
 		and tutorial.RewardClaimed ~= true
 end
 
-function TutorialController:presentTutorialReward(cancelled: boolean)
+function TutorialController:presentTutorialReward()
 	local frame = getTutorialRewardFrame()
 	if not frame then
 		return
 	end
 
 	tutorialRewardPresentationActive = true
-	setThanksMessage(if cancelled then CANCELLED_REWARD_THANKS_MESSAGE else COMPLETED_REWARD_THANKS_MESSAGE)
-	updateTutorialRewardAmountText(cancelled)
+	setThanksMessage(COMPLETED_REWARD_THANKS_MESSAGE)
+	updateTutorialRewardAmountText()
 	frame.Visible = true
 end
 
-function TutorialController:claimAndPresentTutorialReward(cancelled: boolean)
+function TutorialController:claimAndPresentTutorialReward()
 	local TycoonService = Knit.GetService("TycoonService")
 	TycoonService:ClaimTutorialReward()
 		:andThen(function(success)
 			if success then
-				self:presentTutorialReward(cancelled)
+				self:presentTutorialReward()
 			end
 		end)
 		:catch(function(err)
@@ -920,7 +869,7 @@ function TutorialController:updateOptionalProgressUi()
 end
 
 function TutorialController:persistStep(step: string)
-	if step == lastPersistedStep or step == "Prompt" or step == "Cancelled" then
+	if step == lastPersistedStep then
 		return
 	end
 	lastPersistedStep = step
@@ -930,7 +879,7 @@ function TutorialController:persistStep(step: string)
 		TycoonService:CompleteTutorial()
 			:andThen(function(success)
 				if success then
-					self:claimAndPresentTutorialReward(false)
+					self:claimAndPresentTutorialReward()
 				end
 			end)
 			:catch(function(err)
@@ -978,7 +927,7 @@ function TutorialController:setStep(step: string)
 	updateRebirthTutorialFingers()
 	self:persistStep(step)
 
-	if step == "Completed" or step == "Cancelled" then
+	if step == "Completed" then
 		clearGuide()
 		clearTutorialFingers()
 	end
@@ -1058,53 +1007,6 @@ function TutorialController:startProgressTracking()
 	end)
 end
 
-function TutorialController:connectPrompt()
-	local _, _, frame = getPromptGui()
-	if not frame then
-		return
-	end
-
-	for _, connection in promptConnections do
-		connection:Disconnect()
-	end
-	table.clear(promptConnections)
-
-	local acceptButton = getGuiButton(frame, "Accept")
-	local cancelButton = getGuiButton(frame, "cancel") or getGuiButton(frame, "Cancel")
-	local TycoonService = Knit.GetService("TycoonService")
-
-	if acceptButton then
-		table.insert(
-			promptConnections,
-			acceptButton.Activated:Connect(function()
-				TycoonService:AcceptTutorial():andThen(function(success)
-					if success then
-						setPromptVisible(false)
-						currentStep = "PickupDrop"
-						lastPersistedStep = "PickupDrop"
-						self:startProgressTracking()
-					end
-				end)
-			end)
-		)
-	end
-
-	if cancelButton then
-		table.insert(
-			promptConnections,
-			cancelButton.Activated:Connect(function()
-				TycoonService:CancelTutorial():andThen(function(success)
-					if success then
-						setPromptVisible(false)
-						self:setStep("Cancelled")
-						self:claimAndPresentTutorialReward(true)
-					end
-				end)
-			end)
-		)
-	end
-end
-
 function TutorialController:connectReward()
 	local frame = getTutorialRewardFrame()
 	if not frame then
@@ -1135,29 +1037,22 @@ function TutorialController:KnitStart()
 	PlayerDataController:WaitForData()
 
 	local tutorial = PlayerDataController:Get("Tutorial")
-	local shouldPrompt = type(tutorial) ~= "table"
-		or (tutorial.Prompted ~= true and tutorial.Completed ~= true and tutorial.Cancelled ~= true)
-	local shouldTrack = type(tutorial) == "table"
-		and tutorial.Accepted == true
-		and tutorial.Completed ~= true
-		and tutorial.Cancelled ~= true
+	local completed = type(tutorial) == "table" and tutorial.Completed == true
+	local shouldTrack = not completed
 
 	task.spawn(function()
 		local deadline = os.clock() + 20
 		while os.clock() < deadline do
-			local _, promptContainer, promptFrame = getPromptGui()
 			local stepFrame = getTutorialStepFrame()
 			local rewardFrame = getTutorialRewardFrame()
-			if promptContainer and promptFrame and stepFrame and rewardFrame then
+			if stepFrame and rewardFrame then
 				break
 			end
 			task.wait(0.25)
 		end
 
-		self:connectPrompt()
 		self:connectReward()
 		connectRebirthTutorialFingerDismiss()
-		setPromptVisible(shouldPrompt)
 		self:updateOptionalProgressUi()
 		updateRebirthTutorialFingers()
 	end)
@@ -1167,8 +1062,7 @@ function TutorialController:KnitStart()
 	end)
 
 	if self:canClaimTutorialReward() then
-		local cancelled = type(tutorial) == "table" and tutorial.Cancelled == true
-		self:claimAndPresentTutorialReward(cancelled)
+		self:claimAndPresentTutorialReward()
 	end
 
 	if shouldTrack then
@@ -1180,7 +1074,7 @@ function TutorialController:KnitStart()
 
 	localPlayer.CharacterAdded:Connect(function()
 		clearGuide()
-		if currentStep ~= "Prompt" and currentStep ~= "Completed" and currentStep ~= "Cancelled" then
+		if currentStep ~= "Completed" then
 			self:startGuideLoop()
 		end
 	end)

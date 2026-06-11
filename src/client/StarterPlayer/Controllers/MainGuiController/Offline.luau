@@ -148,6 +148,10 @@ function MainGuiController:claimOfflineReward(frame: GuiObject?)
 end
 
 function MainGuiController:buyOffline5xReward(frame: GuiObject?)
+	if not Monetization.isEnabled() then
+		return
+	end
+
 	if offlineRewardClaimed or offlineRewardRequestOpen or offlineRobuxPromptOpen then
 		return
 	end
@@ -203,6 +207,12 @@ function MainGuiController:bindOfflineRewardListeners()
 	end)
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(playerOrUserId, productId, wasPurchased)
+		if not Monetization.isEnabled() then
+			offlineRobuxPromptOpen = false
+			offlineRewardRequestOpen = false
+			return
+		end
+
 		if productId ~= OFFLINE_5X_PRODUCT.ProductId or not isLocalProductPromptFinished(playerOrUserId) then
 			return
 		end

@@ -156,6 +156,10 @@ local function populateGiftPlayers(MainGuiController, giftProductKey: string)
 end
 
 local function openGiftFlow(MainGuiController, giftProductKey: string)
+	if not Monetization.isEnabled() then
+		return
+	end
+
 	local giftProduct = Monetization.DeveloperProducts[giftProductKey]
 	if not giftProduct or not giftFrame then
 		return
@@ -168,6 +172,10 @@ local function openGiftFlow(MainGuiController, giftProductKey: string)
 end
 
 local function confirmGiftPurchase(MainGuiController)
+	if not Monetization.isEnabled() then
+		return
+	end
+
 	if giftPromptOpen or not activeGiftProductKey or not selectedRecipientUserId then
 		return
 	end

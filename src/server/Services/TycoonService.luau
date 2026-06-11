@@ -223,10 +223,7 @@ local function grantTutorialReward(PlayerDataService, player: Player): number
 	end
 
 	local tutorialConfig = TycoonConfig.Tutorial or {}
-	local configuredRewardSeconds = if tutorial.Cancelled == true
-		then tutorialConfig.CancelledRewardSeconds
-		else tutorialConfig.RewardSeconds
-	local rewardSeconds = math.max(math.floor(tonumber(configuredRewardSeconds) or 15 * 60), 1)
+	local rewardSeconds = math.max(math.floor(tonumber(tutorialConfig.RewardSeconds) or 15 * 60), 1)
 	local now = os.time()
 	local currentEndsAt = math.max(math.floor(PlayerDataService:Get(player, "TutorialBoostEndsAt") or 0), 0)
 	local nextEndsAt = math.max(currentEndsAt, now) + rewardSeconds
@@ -1019,6 +1016,23 @@ function TycoonService.Client:UpdateTutorialStep(player: Player, step: string): 
 	if nextIndex < currentIndex then
 		return false
 	end
+	if nextIndex > currentIndex + 1 then
+		return false
+	end
+
+	local rebirths = math.max(math.floor(PlayerDataService:Get(player, "Rebirths") or 0), 0)
+	if (step == "OpenUpgrades" or step == "UpgradeUnitSpawnTier") and rebirths < 1 then
+		return false
+	end
+	if step == "Completed" then
+		local upgrades = PlayerDataService:Get(player, "RebirthUpgrades")
+		local unitSpawnTierLevel = if type(upgrades) == "table"
+			then math.max(math.floor(tonumber(upgrades.UnitSpawnTier) or 0), 0)
+			else 0
+		if rebirths < 1 or unitSpawnTierLevel < 1 then
+			return false
+		end
+	end
 
 	PlayerDataService:Set(player, { "Tutorial", "Step" }, step)
 	return true
@@ -1050,7 +1064,7 @@ function TycoonService.Client:ClaimTutorialReward(player: Player): (boolean, str
 	PlayerDataService:WaitForData(player)
 
 	local tutorial = getTutorialData(PlayerDataService, player)
-	if tutorial.Completed ~= true and tutorial.Cancelled ~= true then
+	if tutorial.Completed ~= true then
 		return false, "Tutorial not finished"
 	end
 
@@ -1259,6 +1273,16 @@ function TycoonService.Client:Rebirth(player: Player): (boolean, string?, number
 	local tokenReward = PlayerDataService:GetRebirthTokenReward(nextRebirths)
 	PlayerDataService:Set(player, "Rebirths", nextRebirths)
 	PlayerDataService:GrantRebirthTokenReward(player, nextRebirths)
+	if PlayerDataService:Get(player, { "Analytics", "RebirthFunnelLogged", tostring(nextRebirths) }) ~= true then
+		if TierUnlockAnalytics.logRebirthReached(player, nextRebirths) then
+			PlayerDataService:Set(player, { "Analytics", "RebirthFunnelLogged", tostring(nextRebirths) }, true)
+		end
+	end
+	if nextRebirths >= 1 and PlayerDataService:Get(player, { "Analytics", "QuestUnlockedFunnelLogged" }) ~= true then
+		if TierUnlockAnalytics.logQuestUnlocked(player) then
+			PlayerDataService:Set(player, { "Analytics", "QuestUnlockedFunnelLogged" }, true)
+		end
+	end
 	TycoonService:ApplyRebirthProgressReset(player)
 
 	return true, nil, nextRebirths, tokenReward

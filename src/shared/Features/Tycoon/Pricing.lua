@@ -17,7 +17,7 @@ local UNIT_INCREMENT_SCALE_INTERVAL = 1_000_000_000
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
 	[10] = 0.2,
-	[25] = 0.2,
+	[25] = 0.25,
 	[100] = 0.33,
 	["Max"] = 0,
 }
@@ -55,8 +55,21 @@ function Pricing.getUnitPriceIncrement(unitScaleCount: number, spawnTier: number
 end
 
 function Pricing.getUnitPrice(purchaseCount: number, spawnTier: number?, unitScaleCount: number?): number
+	purchaseCount = math.max(math.floor(tonumber(purchaseCount) or 0), 0)
 	local scaleCount = if unitScaleCount ~= nil then unitScaleCount else purchaseCount
-	return TycoonConfig.UnitPriceBase + purchaseCount * Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
+	local firstPrice = math.max(math.floor(tonumber(TycoonConfig.UnitPriceFirst) or 5), 1)
+	local secondPrice = math.max(math.floor(tonumber(TycoonConfig.UnitPriceSecond) or 10), firstPrice)
+	local increment = Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
+
+	if purchaseCount <= 0 then
+		return firstPrice
+	end
+
+	if purchaseCount == 1 then
+		return secondPrice
+	end
+
+	return math.max(secondPrice + (purchaseCount - 1) * increment, secondPrice)
 end
 
 local function getUnitBulkDiscount(amount: number, useMaxDiscount: boolean?): number
@@ -76,9 +89,10 @@ function Pricing.getUnitBulkPrice(
 	end
 
 	local scaleCount = if unitScaleCount ~= nil then unitScaleCount else purchaseCount
-	local increment = Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
-	local firstPrice = Pricing.getUnitPrice(purchaseCount, spawnTier, scaleCount)
-	local totalPrice = amount * firstPrice + increment * amount * (amount - 1) / 2
+	local totalPrice = 0
+	for offset = 0, amount - 1 do
+		totalPrice += Pricing.getUnitPrice(purchaseCount + offset, spawnTier, scaleCount)
+	end
 	local discount = getUnitBulkDiscount(amount, useMaxDiscount)
 	return math.max(math.floor(totalPrice * (1 - discount)), 0)
 end

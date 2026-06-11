@@ -1,7 +1,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
-local CapsuleUtil = require(ReplicatedStorage.Shared.Features.Capsules.CapsuleUtil)
+local ButtonNoti = require(script.Parent.ButtonNoti)
 local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local QuestConfig = require(ReplicatedStorage.Shared.Data.QuestConfig)
 local QuestUtil = require(ReplicatedStorage.Shared.Features.Quests.QuestUtil)
@@ -14,10 +13,106 @@ local questConnections: { RBXScriptConnection } = {}
 local questRequestOpen = false
 local activeCategory = "Hourly"
 local timerRunning = false
+local QUEST_NOTI_KEY = "Quests"
+local QUEST_BUTTON_NAME = "QuestsButton"
 
 local CATEGORY_FRAMES = { "Hourly", "Daily", "Weekly" }
 
+local acknowledgedQuestPeriods: { [string]: string } = {
+	Hourly = "",
+	Daily = "",
+	Weekly = "",
+}
+local dismissedClaimableQuestKeys: { [string]: boolean }? = nil
+
+local function getCategoryPeriodId(quests: any, category: string): string
+	if type(quests) ~= "table" then
+		return ""
+	end
+
+	local categoryData = quests[category]
+	if type(categoryData) ~= "table" then
+		return ""
+	end
+
+	return tostring(categoryData.PeriodId or "")
+end
+
+local function hasUnseenQuestPeriods(quests: any): boolean
+	for _, category in CATEGORY_FRAMES do
+		local periodId = getCategoryPeriodId(quests, category)
+		if periodId ~= "" and periodId ~= acknowledgedQuestPeriods[category] then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getClaimableQuestKeys(quests: any): { [string]: boolean }
+	local keys = {}
+	if type(quests) ~= "table" then
+		return keys
+	end
+
+	for _, category in CATEGORY_FRAMES do
+		local categoryData = quests[category]
+		if type(categoryData) ~= "table" or type(categoryData.Slots) ~= "table" then
+			continue
+		end
+
+		for slotIndex, slot in categoryData.Slots do
+			if type(slot) ~= "table" or slot.Claimed == true then
+				continue
+			end
+
+			local progress = math.max(math.floor(tonumber(slot.Progress) or 0), 0)
+			if QuestUtil.isQuestComplete(slot.Type, slot.Target, progress) then
+				keys[category .. ":" .. tostring(slotIndex)] = true
+			end
+		end
+	end
+
+	return keys
+end
+
+local function hasNewClaimableQuests(quests: any): boolean
+	local claimableKeys = getClaimableQuestKeys(quests)
+	if dismissedClaimableQuestKeys == nil then
+		return next(claimableKeys) ~= nil
+	end
+
+	for key in claimableKeys do
+		if dismissedClaimableQuestKeys[key] ~= true then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function acknowledgeQuestPeriods(quests: any)
+	for _, category in CATEGORY_FRAMES do
+		acknowledgedQuestPeriods[category] = getCategoryPeriodId(quests, category)
+	end
+	dismissedClaimableQuestKeys = getClaimableQuestKeys(quests)
+end
+
+local function shouldShowQuestNoti(quests: any): boolean
+	if hasUnseenQuestPeriods(quests) then
+		dismissedClaimableQuestKeys = nil
+		return true
+	end
+
+	return hasNewClaimableQuests(quests)
+end
+
 function Quest.Install(MainGuiController)
+	function MainGuiController:areQuestsUnlocked(): boolean
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		return math.max(math.floor(tonumber(PlayerDataController:Get("Rebirths")) or 0), 0) >= 1
+	end
+
 	function MainGuiController:connectQuestGuiActivated(guiObject: GuiObject, callback: () -> ())
 		local clickable = self:getClickableGui(guiObject)
 		if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
@@ -57,10 +152,44 @@ function Quest.Install(MainGuiController)
 		return if categoryFrame and categoryFrame:IsA("GuiObject") then categoryFrame else nil
 	end
 
-	function MainGuiController:getQuestRewardTier()
+	function MainGuiController:updateQuestsButtonNoti()
+		if not self:areQuestsUnlocked() then
+			ButtonNoti.update(self, QUEST_NOTI_KEY, QUEST_BUTTON_NAME, false)
+			return
+		end
+
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		local quests = PlayerDataController:Get("Quests")
+		ButtonNoti.update(self, QUEST_NOTI_KEY, QUEST_BUTTON_NAME, shouldShowQuestNoti(quests))
+	end
+
+	function MainGuiController:updateQuestsAccess()
+		local unlocked = self:areQuestsUnlocked()
+		local questsButton = self:getRightSideButton(QUEST_BUTTON_NAME)
+		if questsButton then
+			questsButton.Visible = true
+			local lockedFrame = questsButton:FindFirstChild("Locked", true)
+			if lockedFrame and lockedFrame:IsA("GuiObject") then
+				lockedFrame.Visible = not unlocked
+			end
+		end
+
+		local frame = self:getQuestsFrame()
+		if frame and not unlocked then
+			frame.Visible = false
+		end
+
+		if not unlocked then
+			ButtonNoti.update(self, QUEST_NOTI_KEY, QUEST_BUTTON_NAME, false)
+		end
+	end
+
+	function MainGuiController:getQuestRewardContext()
 		local PlayerDataController = Knit.GetController("PlayerDataController")
 		local units = PlayerDataController:Get("Units") or {}
-		return CapsuleUtil.getHighestUnitTier(units)
+		local rebirths = PlayerDataController:Get("Rebirths") or 0
+
+		return QuestUtil.getRewardContext(units, QuestUtil.estimateYenMultiplier(rebirths))
 	end
 
 	function MainGuiController:setQuestClaimButtonText(claimButton: Instance, text: string)
@@ -82,7 +211,7 @@ function Quest.Install(MainGuiController)
 		end
 	end
 
-	function MainGuiController:updateQuestRow(row: GuiObject, slotIndex: number, category: string, slot: any, highestTier: number)
+	function MainGuiController:updateQuestRow(row: GuiObject, slotIndex: number, category: string, slot: any, rewardContext: { [string]: any })
 		if type(slot) ~= "table" then
 			self:setNamedText(row, "Title", "Quest " .. tostring(slotIndex))
 			self:setNamedText(row, "QuestLabel", "Loading...")
@@ -101,7 +230,7 @@ function Quest.Install(MainGuiController)
 		self:setNamedText(
 			row,
 			"Reward",
-			QuestUtil.formatRewardText(slot.Reward, highestTier, category)
+			QuestUtil.formatRewardText(slot.Reward, rewardContext, category)
 		)
 		self:setQuestCompletedFrame(row, claimed)
 
@@ -153,6 +282,11 @@ function Quest.Install(MainGuiController)
 	end
 
 	function MainGuiController:updateQuestsFrame()
+		self:updateQuestsAccess()
+		if not self:areQuestsUnlocked() then
+			return
+		end
+
 		local frame = self:getQuestsFrame()
 		if not frame then
 			return
@@ -160,7 +294,7 @@ function Quest.Install(MainGuiController)
 
 		local PlayerDataController = Knit.GetController("PlayerDataController")
 		local quests = PlayerDataController:Get("Quests")
-		local highestTier = self:getQuestRewardTier()
+		local rewardContext = self:getQuestRewardContext()
 
 		for _, category in CATEGORY_FRAMES do
 			local categoryFrame = self:getQuestCategoryFrame(frame, category)
@@ -176,17 +310,18 @@ function Quest.Install(MainGuiController)
 				local row = categoryFrame:FindFirstChild("Quest" .. tostring(slotIndex), true)
 				if row and row:IsA("GuiObject") then
 					local slot = if type(slots) == "table" then slots[slotIndex] else nil
-					self:updateQuestRow(row, slotIndex, category, slot, highestTier)
+					self:updateQuestRow(row, slotIndex, category, slot, rewardContext)
 				end
 			end
 		end
 
 		self:setActiveQuestCategory(frame, activeCategory)
 		self:updateQuestCategoryTimers(frame)
+		self:updateQuestsButtonNoti()
 	end
 
 	function MainGuiController:buyQuestClaim(category: string, slotIndex: number)
-		if questRequestOpen then
+		if questRequestOpen or not self:areQuestsUnlocked() then
 			return
 		end
 
@@ -224,7 +359,7 @@ function Quest.Install(MainGuiController)
 		task.spawn(function()
 			while timerRunning do
 				local frame = self:getQuestsFrame()
-				if frame then
+				if frame and self:areQuestsUnlocked() then
 					self:updateQuestsFrame()
 				end
 				task.wait(1)
@@ -242,6 +377,8 @@ function Quest.Install(MainGuiController)
 
 		frame.Visible = false
 		OpenFrame.SetupFrame(frame)
+		self:updateQuestsAccess()
+
 		activeCategory = "Hourly"
 		self:setActiveQuestCategory(frame, activeCategory)
 		self:updateQuestsFrame()
@@ -303,13 +440,29 @@ function Quest.Install(MainGuiController)
 			end
 		end
 
-		local questsButton = self:getRightSideButton("QuestsButton")
+		ButtonNoti.hideInitially(self, QUEST_BUTTON_NAME)
+
+		local questsButton = self:getRightSideButton(QUEST_BUTTON_NAME)
 		if questsButton then
+			self:updateQuestsAccess()
 			self:connectQuestGuiActivated(questsButton, function()
+				if not self:areQuestsUnlocked() then
+					return
+				end
+
+				local PlayerDataController = Knit.GetController("PlayerDataController")
+				acknowledgeQuestPeriods(PlayerDataController:Get("Quests"))
 				self:updateQuestsFrame()
+				self:updateQuestsButtonNoti()
+				local QuestService = Knit.GetService("QuestService")
+				QuestService:LogQuestOpened():catch(function(err)
+					warn("[MainGuiController] Quest open analytics failed:", err)
+				end)
 				OpenFrame.Toggle(frame)
 			end)
 		end
+
+		self:updateQuestsButtonNoti()
 	end
 end
 

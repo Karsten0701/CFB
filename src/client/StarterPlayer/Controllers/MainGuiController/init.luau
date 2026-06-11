@@ -1360,6 +1360,10 @@ function MainGuiController:KnitStart()
 			self:updateQuestsFrame()
 		end)
 
+		PlayerDataController:Observe("Rebirths", function()
+			self:updateQuestsFrame()
+		end)
+
 		PlayerDataController:Observe("UnlockedAnimeDroppers", function()
 			self:onUnlockedAnimeDroppersChanged(PlayerDataController:Get("UnlockedAnimeDroppers"))
 		end)
