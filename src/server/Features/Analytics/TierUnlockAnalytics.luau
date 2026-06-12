@@ -1,4 +1,7 @@
 local AnalyticsService = game:GetService("AnalyticsService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 
 local TierUnlockAnalytics = {}
 
@@ -6,6 +9,7 @@ local FIRST_JOIN_FUNNEL_NAME = "FirstJoin"
 local TIER_UNLOCK_FUNNEL_NAME = "TierUnlocks"
 local TUTORIAL_COMPLETE_FUNNEL_NAME = "TutorialComplete"
 local SESSION_TIME_FUNNEL_NAME = "SessionTime"
+local PLAYTIME_FUNNEL_NAME = "Playtime"
 local REBIRTH_FUNNEL_NAME = "Rebirths"
 local QUEST_FUNNEL_NAME = "Quests"
 
@@ -27,7 +31,7 @@ end
 
 function TierUnlockAnalytics.logTierUnlocked(player: Player, tier: number): boolean
 	tier = math.floor(tonumber(tier) or 0)
-	if tier < 1 or tier > 100 then
+	if not AnimeDroppers.Tiers[tier] then
 		return false
 	end
 
@@ -40,6 +44,19 @@ function TierUnlockAnalytics.logTierUnlocked(player: Player, tier: number): bool
 	end
 
 	return ok
+end
+
+function TierUnlockAnalytics.getTierUnlockSteps(): { number }
+	local tiers = {}
+	for tier in AnimeDroppers.Tiers do
+		local normalizedTier = math.floor(tonumber(tier) or 0)
+		if normalizedTier >= 1 then
+			table.insert(tiers, normalizedTier)
+		end
+	end
+
+	table.sort(tiers)
+	return tiers
 end
 
 function TierUnlockAnalytics.logTutorialCompleted(player: Player): boolean
@@ -77,6 +94,16 @@ function TierUnlockAnalytics.getSessionTimeMilestones(): { number }
 	return milestones
 end
 
+function TierUnlockAnalytics.getPlaytimeMilestones(): { number }
+	local milestones = TierUnlockAnalytics.getSessionTimeMilestones()
+
+	for minute = 24 * 60, 7 * 24 * 60, 12 * 60 do
+		table.insert(milestones, minute)
+	end
+
+	return milestones
+end
+
 function TierUnlockAnalytics.logSessionTimeReached(player: Player, minutes: number, step: number?): boolean
 	minutes = math.floor(tonumber(minutes) or 0)
 	if minutes <= 0 then
@@ -90,6 +117,24 @@ function TierUnlockAnalytics.logSessionTimeReached(player: Player, minutes: numb
 
 	if not ok then
 		warn("[TierUnlockAnalytics] Failed to log session time funnel step:", err)
+	end
+
+	return ok
+end
+
+function TierUnlockAnalytics.logPlaytimeReached(player: Player, minutes: number, step: number?): boolean
+	minutes = math.floor(tonumber(minutes) or 0)
+	if minutes <= 0 then
+		return false
+	end
+	step = math.max(math.floor(tonumber(step) or minutes), 1)
+
+	local ok, err = pcall(function()
+		AnalyticsService:LogFunnelStepEvent(player, PLAYTIME_FUNNEL_NAME, nil, step, getMinuteLabel(minutes))
+	end)
+
+	if not ok then
+		warn("[TierUnlockAnalytics] Failed to log playtime funnel step:", err)
 	end
 
 	return ok
@@ -174,6 +219,25 @@ function TierUnlockAnalytics.getNewUnlockTiers(previousUnlocked: any, nextUnlock
 
 	table.sort(newTiers)
 	return newTiers
+end
+
+function TierUnlockAnalytics.getUnlockedTiersToLog(unlockedDroppers: any, loggedTiers: any): { number }
+	if type(unlockedDroppers) ~= "table" then
+		return {}
+	end
+
+	local tiersToLog = {}
+	for _, tier in TierUnlockAnalytics.getTierUnlockSteps() do
+		local isUnlocked = unlockedDroppers[tier] == true or unlockedDroppers[tostring(tier)] == true
+		local wasLogged = type(loggedTiers) == "table"
+			and (loggedTiers[tier] == true or loggedTiers[tostring(tier)] == true)
+
+		if isUnlocked and not wasLogged then
+			table.insert(tiersToLog, tier)
+		end
+	end
+
+	return tiersToLog
 end
 
 return TierUnlockAnalytics

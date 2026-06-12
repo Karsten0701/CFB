@@ -21,18 +21,18 @@ QuestConfig.PotionTypes = { "Yen", "Mana", "Deposit" }
 
 QuestConfig.PotionAmounts = {
 	Hourly = 1,
-	Daily = 2,
-	Weekly = 4,
+	Daily = 5,
+	Weekly = 10,
 }
 
--- Max potion quest rewards per reset period (rest rolls yen/unit).
-QuestConfig.MaxPotionRewardsPerPeriod = 1
+-- One quest reward per category is guaranteed to be a potion; remaining rewards roll normally.
+QuestConfig.GuaranteedPotionRewardsPerPeriod = 1
 
 -- Biases reward rolls per category (multiplied with each quest entry's rewardWeights).
 QuestConfig.CategoryRewardWeights = {
-	Hourly = { Yen = 14, Potion = 2, UnitTier = 5 },
-	Daily = { Yen = 10, Potion = 3, UnitTier = 4 },
-	Weekly = { Yen = 9, Potion = 3, UnitTier = 5 },
+	Hourly = { Yen = 5, Potion = 5, UnitTier = 5 },
+	Daily = { Yen = 10, Potion = 10, UnitTier = 5 },
+	Weekly = { Yen = 9, Potion = 9, UnitTier = 5 },
 }
 
 QuestConfig.UnitTierOffsets = {
@@ -77,10 +77,12 @@ QuestConfig.Scaling = {
 	},
 
 	PlaytimeSeconds = {
-		HourlyMin = 600,
-		HourlyMax = 900,
-		Daily = 10800,
-		Weekly = 43200,
+		HourlyMin = 5 * 60,
+		HourlyMax = 20 * 60,
+		DailyMin = 45 * 60,
+		DailyMax = 6 * 60 * 60,
+		WeeklyMin = 4 * 60 * 60,
+		WeeklyMax = 16 * 60 * 60,
 	},
 
 	BuyUnitsMinimum = {

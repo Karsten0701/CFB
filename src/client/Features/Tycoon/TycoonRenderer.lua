@@ -41,6 +41,10 @@ local OTHER_UNIT_POOL_LIMIT_PER_TIER = 80
 local UNIT_DESTROY_BATCH_SIZE = 4
 local UNIT_DESTROY_BATCH_DELAY = 0.03
 local UNIT_POOL_CFRAME = CFrame.new(0, -10000, 0)
+local UNIT_DROP_HOP_TOP_FLOORS_SKIPPED = 5
+local UNIT_DROP_HOP_MAX_STARTS_PER_FRAME = 18
+local UNIT_DROP_HOP_DURATION = 0.34
+local UNIT_DROP_HOP_HEIGHT = 1.15
 local PLAYER_COLLISION_GROUP = "PlayerCharacters"
 local DROP_COLLISION_GROUP = "ManaDrops"
 local DROP_WALL_COLLISION_GROUP = "DropWalls"
@@ -458,6 +462,7 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.highestDisplayTier = nil
 	self.lastUnits = {}
 	self.lastRenderSignature = nil
+	self.renderedFloorCount = 0
 	self.spotCache = {}
 	self.rebuildToken = 0
 	self.activeOrbs = {}
@@ -475,6 +480,10 @@ function TycoonRenderer.new(tycoon: Instance, janitor: any, onPickup: ((number) 
 	self.pickupConnection = nil
 	self.pickupAnimationConnection = nil
 	self.pickupAnimations = {}
+	self.unitHopAnimations = {}
+	self.unitHopQueue = {}
+	self.unitHopLoopConnection = nil
+	self.unitHopQueueRunning = false
 	self.dropLoopConnection = nil
 	self.onManaDropSpawned = nil
 	self.nextMutationAt = os.clock()
@@ -676,6 +685,142 @@ function TycoonRenderer:scheduleUnitDrop(entry, unitIndex: number, now: number?,
 
 	local interval = self:getDropInterval()
 	entry.NextDropAt = now + self:getUnitDropPhase(unitIndex, interval)
+end
+
+function TycoonRenderer:shouldAnimateUnitDropHop(unitIndex: number): boolean
+	if not self.isOwn then
+		return false
+	end
+
+	local floorIndex = Grid.getFloorAndSpot(unitIndex)
+	local renderedFloorCount = math.max(math.floor(tonumber(self.renderedFloorCount) or 0), 1)
+	if
+		renderedFloorCount > UNIT_DROP_HOP_TOP_FLOORS_SKIPPED
+		and floorIndex > renderedFloorCount - UNIT_DROP_HOP_TOP_FLOORS_SKIPPED
+	then
+		return false
+	end
+
+	return true
+end
+
+function TycoonRenderer:clearUnitDropHop(model: Model?)
+	if not model then
+		return
+	end
+
+	local animation = self.unitHopAnimations[model]
+	if animation then
+		if model.Parent then
+			model:PivotTo(animation.BaseCFrame)
+		end
+		self.unitHopAnimations[model] = nil
+	end
+end
+
+function TycoonRenderer:clearUnitDropHops()
+	for model in self.unitHopAnimations do
+		self:clearUnitDropHop(model)
+	end
+
+	table.clear(self.unitHopAnimations)
+	table.clear(self.unitHopQueue)
+	self.unitHopQueueRunning = false
+	if self.unitHopLoopConnection then
+		self.unitHopLoopConnection:Disconnect()
+		self.unitHopLoopConnection = nil
+	end
+end
+
+function TycoonRenderer:ensureUnitHopLoop()
+	if self.unitHopLoopConnection then
+		return
+	end
+
+	self.unitHopLoopConnection = RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+		local hasActive = false
+
+		for model, animation in self.unitHopAnimations do
+			local entry = self.unitEntries[animation.UnitIndex]
+			if not model.Parent or not entry or entry.Model ~= model then
+				self.unitHopAnimations[model] = nil
+				continue
+			end
+
+			local alpha = math.clamp((now - animation.StartedAt) / UNIT_DROP_HOP_DURATION, 0, 1)
+			local offsetY = math.sin(alpha * math.pi) * UNIT_DROP_HOP_HEIGHT
+			model:PivotTo(animation.BaseCFrame * CFrame.new(0, offsetY, 0))
+
+			if alpha >= 1 then
+				model:PivotTo(animation.BaseCFrame)
+				self.unitHopAnimations[model] = nil
+			else
+				hasActive = true
+			end
+		end
+
+		if not hasActive and next(self.unitHopAnimations) == nil and #self.unitHopQueue <= 0 then
+			self.unitHopLoopConnection:Disconnect()
+			self.unitHopLoopConnection = nil
+		end
+	end)
+end
+
+function TycoonRenderer:flushUnitHopQueue()
+	if self.unitHopQueueRunning then
+		return
+	end
+
+	self.unitHopQueueRunning = true
+	task.spawn(function()
+		local readIndex = 1
+		while readIndex <= #self.unitHopQueue do
+			local started = 0
+			local now = os.clock()
+
+			while started < UNIT_DROP_HOP_MAX_STARTS_PER_FRAME and readIndex <= #self.unitHopQueue do
+				local request = self.unitHopQueue[readIndex]
+				readIndex += 1
+
+				local entry = self.unitEntries[request.UnitIndex]
+				local model = request.Model
+				if model and model.Parent and entry and entry.Model == model then
+					local active = self.unitHopAnimations[model]
+					local baseCFrame = if active then active.BaseCFrame else model:GetPivot()
+					self.unitHopAnimations[model] = {
+						BaseCFrame = baseCFrame,
+						StartedAt = now,
+						UnitIndex = request.UnitIndex,
+					}
+					started += 1
+				end
+			end
+
+			if started > 0 then
+				self:ensureUnitHopLoop()
+			end
+
+			if readIndex <= #self.unitHopQueue then
+				RunService.Heartbeat:Wait()
+			end
+		end
+
+		table.clear(self.unitHopQueue)
+		self.unitHopQueueRunning = false
+	end)
+end
+
+function TycoonRenderer:playUnitDropHop(entry, unitIndex: number)
+	if not entry or not entry.Model or not self:shouldAnimateUnitDropHop(unitIndex) then
+		return
+	end
+
+	table.insert(self.unitHopQueue, {
+		Model = entry.Model,
+		UnitIndex = unitIndex,
+	})
+	self:flushUnitHopQueue()
 end
 
 function TycoonRenderer:getDropperHolder(): Instance?
@@ -951,6 +1096,7 @@ end
 function TycoonRenderer:clearRenderedUnits()
 	self.rebuildToken += 1
 	self:clearHighestDisplayUnit()
+	self:clearUnitDropHops()
 
 	for _, entry in self.unitEntries do
 		if entry.Model then
@@ -974,6 +1120,7 @@ function TycoonRenderer:clearRenderedUnits()
 	self.destroyQueueRunning = false
 	table.clear(self.unitModelInfo)
 	self.lastRenderSignature = nil
+	self.renderedFloorCount = 0
 
 	local unitsFolder = self:getUnitsFolder()
 	for _, child in unitsFolder:GetChildren() do
@@ -1238,6 +1385,7 @@ function TycoonRenderer:queueDestroyUnitModel(model: Model?)
 		return
 	end
 
+	self:clearUnitDropHop(model)
 	model:SetAttribute("QueuedDestroy", true)
 	self:setUnitModelVisible(model, false)
 	self:setUnitModelAssignment(model, nil, tonumber(model:GetAttribute("UnitTier")), true)
@@ -1286,6 +1434,7 @@ function TycoonRenderer:recycleUnitEntry(entry)
 		return
 	end
 
+	self:clearUnitDropHop(entry.Model)
 	self:setUnitModelVisible(entry.Model, false)
 	self:setUnitModelAssignment(entry.Model, nil, tier, true)
 	entry.Model:PivotTo(UNIT_POOL_CFRAME)
@@ -2032,6 +2181,7 @@ function TycoonRenderer:ensureDropLoop()
 			entry.NextDropAt = now + interval
 
 			if self:trySpawnManaDrop(entry.DropPart, entry.Tier, tierData.DropValue or 1, true) then
+				self:playUnitDropHop(entry, unitIndex)
 				spawnedThisFrame += 1
 				activeDropCount += 1
 				spawnBudget -= 1
@@ -2060,6 +2210,7 @@ function TycoonRenderer:getSpotForUnitIndex(dropperHolder: Instance, unitIndex: 
 end
 
 function TycoonRenderer:moveRenderedUnit(unitIndex: number, entry, spotPart: BasePart)
+	self:clearUnitDropHop(entry.Model)
 	entry.Model:PivotTo(spotPart.CFrame)
 	entry.DropPart = self:findDropPart(spotPart, entry.Model)
 	self:scheduleUnitDrop(entry, unitIndex, os.clock())
@@ -2089,6 +2240,7 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 	for unitIndex = 1, math.min(#sortedUnits, renderCapacity) do
 		visibleUnits[unitIndex] = sortedUnits[unitIndex]
 	end
+	self.renderedFloorCount = Grid.requiredFloors(#visibleUnits)
 
 	local nextRenderSignature = getUnitSignature(visibleUnits)
 	if nextRenderSignature == self.lastRenderSignature then
@@ -2237,6 +2389,7 @@ function TycoonRenderer:rebuild(units: { { Tier: number } })
 				continue
 			end
 
+			self:clearUnitDropHop(unitModel)
 			unitModel:PivotTo(spotPart.CFrame)
 			if unitModel.Parent ~= unitsFolder then
 				unitModel.Parent = unitsFolder
@@ -2266,6 +2419,7 @@ end
 
 function TycoonRenderer:destroy()
 	self:resetTowerToEmpty()
+	self:clearUnitDropHops()
 
 	if self.pickupConnection then
 		self.pickupConnection:Disconnect()

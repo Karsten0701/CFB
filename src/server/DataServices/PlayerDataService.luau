@@ -40,6 +40,7 @@ local LEADERBOARD_STAT_PATHS = {
 }
 
 local SESSION_TIME_MILESTONES = TierUnlockAnalytics.getSessionTimeMilestones()
+local PLAYTIME_MILESTONES = TierUnlockAnalytics.getPlaytimeMilestones()
 
 local function migrateNumberFieldInData(data: { [string]: any }, oldPath: string, newPath: string, defaultValue: number)
 	if type(data[newPath]) == "number" then
@@ -479,6 +480,12 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.Analytics.TierUnlockFunnelLogged) ~= "table" then
 		data.Analytics.TierUnlockFunnelLogged = {}
 	end
+	if type(data.Analytics.SessionTimeFunnelLogged) ~= "table" then
+		data.Analytics.SessionTimeFunnelLogged = {}
+	end
+	if type(data.Analytics.PlaytimeFunnelLogged) ~= "table" then
+		data.Analytics.PlaytimeFunnelLogged = {}
+	end
 	if type(data.Analytics.RebirthFunnelLogged) ~= "table" then
 		data.Analytics.RebirthFunnelLogged = {}
 	end
@@ -515,6 +522,11 @@ local function ensureManaData(data: { [string]: any })
 
 	data.YenUpgrades.BetterGoldenDrops = math.max(math.floor(tonumber(data.YenUpgrades.BetterGoldenDrops) or 0), 0)
 	data.YenUpgrades.Pickuprange = math.max(math.floor(tonumber(data.YenUpgrades.Pickuprange) or 0), 0)
+	data.YenUpgrades.MoreOfflineEarnings = math.clamp(
+		math.floor(tonumber(data.YenUpgrades.MoreOfflineEarnings) or 0),
+		0,
+		YenUpgrades.MoreOfflineEarnings.MaxLevel or 0
+	)
 	repairQuestData(data)
 	repairRebirthTokenEntitlement(data)
 
@@ -525,6 +537,7 @@ local function ensureManaData(data: { [string]: any })
 	data.Tutorial.Accepted = data.Tutorial.Accepted == true
 	data.Tutorial.Cancelled = data.Tutorial.Cancelled == true
 	data.Tutorial.Completed = data.Tutorial.Completed == true
+	data.Tutorial.RebirthGuideCompleted = data.Tutorial.RebirthGuideCompleted == true
 	data.Tutorial.RewardClaimed = data.Tutorial.RewardClaimed == true
 	if type(data.Tutorial.Step) ~= "string" or data.Tutorial.Step == "" then
 		data.Tutorial.Step = "PickupDrop"
@@ -542,16 +555,12 @@ local function ensureManaData(data: { [string]: any })
 		data.Tutorial.Cancelled = false
 		data.Tutorial.Prompted = true
 	end
-	if
-		data.Tutorial.Completed == true
-		and data.Tutorial.RewardClaimed ~= true
-		and (data.Rebirths < 1 or data.RebirthUpgrades.UnitSpawnTier < 1)
-	then
-		data.Tutorial.Completed = false
-		data.Tutorial.Accepted = true
-		data.Tutorial.Cancelled = false
-		data.Tutorial.Prompted = true
-		data.Tutorial.Step = if data.Rebirths >= 1 then "OpenUpgrades" else "WaitForRebirthReady"
+	if data.Tutorial.Completed == true and data.Tutorial.Step == "Completed" then
+		if data.RebirthUpgrades.UnitSpawnTier >= 1 then
+			data.Tutorial.RebirthGuideCompleted = true
+		else
+			data.Tutorial.Step = if data.Rebirths >= 1 then "OpenUpgrades" else "WaitForRebirthReady"
+		end
 	end
 
 	if type(data.TutorialBoostEndsAt) ~= "number" then
@@ -662,6 +671,68 @@ local function setupLeaderstats(player: Player)
 	syncLeaderstats(player)
 end
 
+local function markAnalyticsFlag(data: { [string]: any }, path: { string | number }, value: any)
+	local current = data
+	for index = 1, #path - 1 do
+		local key = path[index]
+		if type(current[key]) ~= "table" then
+			current[key] = {}
+		end
+		current = current[key]
+	end
+
+	current[path[#path]] = value
+end
+
+local function logInitialAnalyticsFunnels(player: Player, data: { [string]: any })
+	if data.Analytics.FirstJoinFunnelLogged ~= true and TierUnlockAnalytics.logFirstJoin(player) then
+		data.Analytics.FirstJoinFunnelLogged = true
+	end
+
+	for _, tier in
+		TierUnlockAnalytics.getUnlockedTiersToLog(data.UnlockedAnimeDroppers, data.Analytics.TierUnlockFunnelLogged)
+	do
+		if TierUnlockAnalytics.logTierUnlocked(player, tier) then
+			markAnalyticsFlag(data, { "Analytics", "TierUnlockFunnelLogged", tostring(tier) }, true)
+		end
+	end
+
+	if data.Tutorial.Completed == true and data.Analytics.TutorialCompleteFunnelLogged ~= true then
+		if TierUnlockAnalytics.logTutorialCompleted(player) then
+			data.Analytics.TutorialCompleteFunnelLogged = true
+		end
+	end
+
+	local rebirths = math.max(math.floor(tonumber(data.Rebirths) or 0), 0)
+	for rebirthNumber = 1, rebirths do
+		local key = tostring(rebirthNumber)
+		if data.Analytics.RebirthFunnelLogged[key] == true then
+			continue
+		end
+
+		if TierUnlockAnalytics.logRebirthReached(player, rebirthNumber) then
+			markAnalyticsFlag(data, { "Analytics", "RebirthFunnelLogged", key }, true)
+		end
+	end
+
+	if rebirths >= 1 and data.Analytics.QuestUnlockedFunnelLogged ~= true then
+		if TierUnlockAnalytics.logQuestUnlocked(player) then
+			data.Analytics.QuestUnlockedFunnelLogged = true
+		end
+	end
+end
+
+function PlayerDataService:LogPendingTierUnlockFunnels(player: Player)
+	local unlockedDroppers = self:Get(player, "UnlockedAnimeDroppers")
+	local loggedTiers = self:Get(player, { "Analytics", "TierUnlockFunnelLogged" })
+
+	for _, tier in TierUnlockAnalytics.getUnlockedTiersToLog(unlockedDroppers, loggedTiers) do
+		if TierUnlockAnalytics.logTierUnlocked(player, tier) then
+			self:Set(player, { "Analytics", "TierUnlockFunnelLogged", tostring(tier) }, true)
+		end
+	end
+end
+
 function PlayerDataService:KnitInit()
 	local ProfileStore = require(ReplicatedStorage.Packages._Index["leifstout_dataservice@1.0.0"].ProfileStore)
 	ProfileStore.OnCriticalToggle:Connect(function(isCritical: boolean)
@@ -685,10 +756,10 @@ function PlayerDataService:KnitInit()
 			if ok and QuestService then
 				QuestService:EnsureQuestsFresh(player)
 			end
+			PlayerDataService:LogPendingTierUnlockFunnels(player)
+			PlayerDataService:LogPlaytimeFunnel(player)
 		end)
-		if data.Analytics.FirstJoinFunnelLogged ~= true and TierUnlockAnalytics.logFirstJoin(player) then
-			data.Analytics.FirstJoinFunnelLogged = true
-		end
+		logInitialAnalyticsFunnels(player, data)
 
 		PlayerDataService:Observe(player, "Yen", function()
 			syncLeaderstats(player)
@@ -705,7 +776,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "PLAYERDATA_test4", --PLAYERDATA gameversion
+		profileStoreIndex = "PLAYERDATA_test7", --PLAYERDATA gameversion
 	})
 end
 
@@ -715,6 +786,7 @@ function PlayerDataService:KnitStart()
 			pcall(function()
 				PlayerDataService:PersistPlaytime(player)
 				PlayerDataService:LogSessionTimeFunnel(player)
+				PlayerDataService:LogPlaytimeFunnel(player)
 				PlayerDataService:Set(player, "LastLogoutAt", os.time())
 			end)
 		end
@@ -736,6 +808,7 @@ function PlayerDataService:KnitStart()
 				pcall(function()
 					PlayerDataService:PersistPlaytime(player)
 					PlayerDataService:LogSessionTimeFunnel(player)
+					PlayerDataService:LogPlaytimeFunnel(player)
 				end)
 			end
 		end
@@ -928,18 +1001,51 @@ function PlayerDataService:LogSessionTimeFunnel(player: Player)
 		logged = {}
 		sessionTimeFunnelLogged[player] = logged
 	end
+	local persistentLogged = self:Get(player, { "Analytics", "SessionTimeFunnelLogged" })
+	if type(persistentLogged) ~= "table" then
+		persistentLogged = {}
+	end
 
 	for step, milestone in SESSION_TIME_MILESTONES do
 		if milestone > elapsedMinutes then
 			break
 		end
 
-		if logged[milestone] == true then
+		local key = tostring(milestone)
+		if logged[milestone] == true or persistentLogged[key] == true or persistentLogged[milestone] == true then
 			continue
 		end
 
 		if TierUnlockAnalytics.logSessionTimeReached(player, milestone, step) then
 			logged[milestone] = true
+			self:Set(player, { "Analytics", "SessionTimeFunnelLogged", key }, true)
+		end
+	end
+end
+
+function PlayerDataService:LogPlaytimeFunnel(player: Player)
+	local totalMinutes = math.floor(self:GetPlaytimeSeconds(player) / 60)
+	if totalMinutes <= 0 then
+		return
+	end
+
+	local logged = self:Get(player, { "Analytics", "PlaytimeFunnelLogged" })
+	if type(logged) ~= "table" then
+		logged = {}
+	end
+
+	for step, milestone in PLAYTIME_MILESTONES do
+		if milestone > totalMinutes then
+			break
+		end
+
+		local key = tostring(milestone)
+		if logged[key] == true or logged[milestone] == true then
+			continue
+		end
+
+		if TierUnlockAnalytics.logPlaytimeReached(player, milestone, step) then
+			self:Set(player, { "Analytics", "PlaytimeFunnelLogged", key }, true)
 		end
 	end
 end
@@ -1208,19 +1314,13 @@ function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } },
 
 	self:Set(player, "Units", normalizedUnits)
 
-	local previousUnlocked = self:Get(player, "UnlockedAnimeDroppers")
-	local nextUnlocked = self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)
+	self:Update(player, "UnlockedAnimeDroppers", function(currentUnlocked: any)
 		if resetUnlocks then
 			return normalizeUnlockedAnimeDroppers({}, normalizedUnits)
 		end
 		return normalizeUnlockedAnimeDroppers(currentUnlocked, normalizedUnits)
 	end)
-	local loggedTiers = self:Get(player, { "Analytics", "TierUnlockFunnelLogged" })
-	for _, tier in TierUnlockAnalytics.getNewUnlockTiers(previousUnlocked, nextUnlocked, loggedTiers) do
-		if TierUnlockAnalytics.logTierUnlocked(player, tier) then
-			self:Set(player, { "Analytics", "TierUnlockFunnelLogged", tostring(tier) }, true)
-		end
-	end
+	self:LogPendingTierUnlockFunnels(player)
 end
 
 function PlayerDataService:Observe(player: Player, path: Path, callback: (any, any?) -> ())

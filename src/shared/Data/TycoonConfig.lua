@@ -48,7 +48,7 @@ return {
 	OfflineReward = {
 		MinimumOfflineSeconds = 5 * 60,
 		ClaimPopupDelay = 5,
-		RewardMultiplier = 0.1,
+		RewardMultiplier = 0.15,
 		MaxOfflineSeconds = 24 * 60 * 60,
 	},
 	FavoritePrompt = {

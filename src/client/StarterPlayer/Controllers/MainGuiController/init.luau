@@ -1336,6 +1336,10 @@ function MainGuiController:KnitStart()
 			self:updateYenUpgradesFrame()
 		end)
 
+		PlayerDataController:Observe({ "YenUpgrades", "MoreOfflineEarnings" }, function()
+			self:updateYenUpgradesFrame()
+		end)
+
 		PlayerDataController:Observe("Quests", function()
 			self:updateQuestsFrame()
 		end)

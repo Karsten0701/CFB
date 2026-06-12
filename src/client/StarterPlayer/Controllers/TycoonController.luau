@@ -607,8 +607,10 @@ local function mergeEntitlementsWithSettings(
 	local yenUpgrades = PlayerDataController:Get("YenUpgrades")
 	local goldenDropsLevel = if type(yenUpgrades) == "table" then yenUpgrades.BetterGoldenDrops else 0
 	local pickupRangeLevel = if type(yenUpgrades) == "table" then yenUpgrades.Pickuprange else 0
+	local moreOfflineLevel = if type(yenUpgrades) == "table" then yenUpgrades.MoreOfflineEarnings else 0
 	merged.GoldenDropsLevel = math.max(math.floor(tonumber(goldenDropsLevel) or 0), 0)
 	merged.PickupRangeMultiplier = YenUpgrades.getPickupRangeMultiplier(pickupRangeLevel)
+	merged.OfflineEarningsMultiplier = YenUpgrades.getOfflineEarningsMultiplier(moreOfflineLevel)
 
 	local activePotionBoosts = PlayerDataController:Get("ActivePotionBoosts")
 	if type(activePotionBoosts) == "table" then
@@ -1541,6 +1543,10 @@ function TycoonController:setupOwnTycoon(): boolean
 	end, janitor)
 
 	PlayerDataController:Observe({ "YenUpgrades", "Pickuprange" }, function()
+		self:applyEntitlementsToOwnTycoon()
+	end, janitor)
+
+	PlayerDataController:Observe({ "YenUpgrades", "MoreOfflineEarnings" }, function()
 		self:applyEntitlementsToOwnTycoon()
 	end, janitor)
 

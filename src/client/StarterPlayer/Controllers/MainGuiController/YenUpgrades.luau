@@ -16,12 +16,13 @@ local upgradesNotiDismissed = false
 local UPGRADES_NOTI_KEY = "Upgrades"
 local UPGRADES_BUTTON_NAME = "UpgradesButton"
 
-local YEN_UPGRADE_KEYS = { "BetterMaxButton", "BetterGoldenDrops", "Pickuprange" }
+local YEN_UPGRADE_KEYS = { "BetterMaxButton", "BetterGoldenDrops", "Pickuprange", "MoreOfflineEarnings" }
 
 local UPGRADE_ROW_NAMES = {
 	BetterMaxButton = "BetterMaxButton",
 	BetterGoldenDrops = "Better Golden Drops",
 	Pickuprange = "Pickuprange",
+	MoreOfflineEarnings = "MoreOfflineEarnings",
 }
 
 function YenUpgrades.Install(MainGuiController)
@@ -198,6 +199,34 @@ function YenUpgrades.Install(MainGuiController)
 		end
 	end
 
+	function MainGuiController:updateMoreOfflineEarningsUpgrade(row: GuiObject)
+		local level = self:getYenUpgradeLevel("MoreOfflineEarnings")
+		local currentMultiplier = YenUpgradesConfig.getOfflineEarningsMultiplier(level)
+		local nextMultiplier = YenUpgradesConfig.getNextOfflineEarningsMultiplier(level)
+		local isMaxed = YenUpgradesConfig.isMaxed("MoreOfflineEarnings", level)
+		local cost = YenUpgradesConfig.getCost("MoreOfflineEarnings", level)
+
+		self:setNamedText(row, "CurrentUnit", "Current multi: " .. self:formatMultiplierLabel(currentMultiplier))
+		self:setNamedText(row, "TokenPrice", self:formatYenUpgradePrice(cost))
+		self:setNamedText(
+			row,
+			"BuyButton",
+			if isMaxed then "MAX" else "Buy " .. self:formatMultiplierLabel(nextMultiplier)
+		)
+
+		local currentTier = row:FindFirstChild("CurrentTier", true)
+		local currentText = currentTier and currentTier:FindFirstChild("Multi", true)
+		if currentText and currentText:IsA("TextLabel") then
+			currentText.Text = self:formatMultiplierLabel(currentMultiplier)
+		end
+
+		local nextTier = row:FindFirstChild("nextTier", true)
+		local nextText = nextTier and nextTier:FindFirstChild("Multi", true)
+		if nextText and nextText:IsA("TextLabel") then
+			nextText.Text = if isMaxed then "MAX" else self:formatMultiplierLabel(nextMultiplier)
+		end
+	end
+
 	function MainGuiController:canAffordAnyYenUpgrade(): boolean
 		local PlayerDataController = Knit.GetController("PlayerDataController")
 		local yen = math.max(math.floor(tonumber(PlayerDataController:Get("Yen")) or 0), 0)
@@ -249,6 +278,11 @@ function YenUpgrades.Install(MainGuiController)
 		local pickupRange = self:findYenUpgradeRow(frame, "Pickuprange")
 		if pickupRange then
 			self:updatePickupRangeUpgrade(pickupRange)
+		end
+
+		local moreOfflineEarnings = self:findYenUpgradeRow(frame, "MoreOfflineEarnings")
+		if moreOfflineEarnings then
+			self:updateMoreOfflineEarningsUpgrade(moreOfflineEarnings)
 		end
 
 		self:updateUpgradesButtonNoti()
@@ -306,6 +340,7 @@ function YenUpgrades.Install(MainGuiController)
 			{ "BetterMaxButton", "Better Max Button" },
 			{ "BetterGoldenDrops", "Better Golden Drops" },
 			{ "Pickuprange", "Pickup Range" },
+			{ "MoreOfflineEarnings", "More Offline Earnings" },
 		}
 
 		for _, binding in upgradeBindings do

@@ -453,6 +453,7 @@ function Handlers.viewData(_context, targetPlayer: Player)
 		`BetterMaxButton: {math.floor(tonumber(yenUpgrades.BetterMaxButton) or 0)}`,
 		`BetterGoldenDrops: {math.floor(tonumber(yenUpgrades.BetterGoldenDrops) or 0)}`,
 		`Pickuprange: {math.floor(tonumber(yenUpgrades.Pickuprange) or 0)}`,
+		`MoreOfflineEarnings: {math.floor(tonumber(yenUpgrades.MoreOfflineEarnings) or 0)}`,
 		`Units: {#units}`,
 		`TotalUnitsPurchased: {PlayerDataService:Get(targetPlayer, "TotalUnitsPurchased")}`,
 		`TotalUnitsBought: {PlayerDataService:Get(targetPlayer, "TotalUnitsBought")}`,

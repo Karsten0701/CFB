@@ -35,6 +35,12 @@ YenUpgrades.Pickuprange = {
 	Multipliers = { 1, 1.25, 1.5, 1.75, 2 },
 }
 
+YenUpgrades.MoreOfflineEarnings = {
+	MaxLevel = 5,
+	Costs = { 100000, 5e6, 1e9, 500e9, 25e12 },
+	MultiplierPerLevel = 0.2,
+}
+
 function YenUpgrades.getCost(upgradeKey: string, level: number): number?
 	local config = YenUpgrades[upgradeKey]
 	if type(config) ~= "table" or type(config.Costs) ~= "table" then
@@ -123,6 +129,18 @@ function YenUpgrades.getNextPickupRangeMultiplier(level: number): number
 	local config = YenUpgrades.Pickuprange
 	local nextLevel = math.clamp(math.floor(level or 0) + 1, 0, config.MaxLevel)
 	return config.Multipliers[nextLevel + 1] or config.Multipliers[#config.Multipliers] or 1
+end
+
+function YenUpgrades.getOfflineEarningsMultiplier(level: number): number
+	local config = YenUpgrades.MoreOfflineEarnings
+	level = math.clamp(math.floor(level or 0), 0, config.MaxLevel)
+	return 1 + level * (config.MultiplierPerLevel or 0.2)
+end
+
+function YenUpgrades.getNextOfflineEarningsMultiplier(level: number): number
+	local config = YenUpgrades.MoreOfflineEarnings
+	local nextLevel = math.clamp(math.floor(level or 0) + 1, 0, config.MaxLevel)
+	return YenUpgrades.getOfflineEarningsMultiplier(nextLevel)
 end
 
 return YenUpgrades

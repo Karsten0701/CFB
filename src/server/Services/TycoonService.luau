@@ -59,8 +59,8 @@ local TUTORIAL_STEPS = {
 	DepositMana = 2,
 	BuySecondUnit = 3,
 	PickupDropAgain = 4,
-	UpgradeRate = 5,
-	DepositManaAgain = 6,
+	DepositManaAgain = 5,
+	UpgradeRate = 6,
 	BuyThirdUnit = 7,
 	MergeUnits = 8,
 	VisitGroupReward = 9,
@@ -232,7 +232,7 @@ local function grantTutorialReward(PlayerDataService, player: Player): number
 	return nextEndsAt
 end
 
-local function getOfflineYenMultiplier(player: Player): number
+local function getOfflineBaseYenMultiplier(player: Player): number
 	local MonetizationService = Knit.GetService("MonetizationService")
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local multiplier = 1
@@ -247,6 +247,13 @@ local function getOfflineYenMultiplier(player: Player): number
 	multiplier *= EventUtil.getEffectMultiplier("YenMultiplier", 1)
 
 	return multiplier
+end
+
+local function getOfflineEarningsUpgradeMultiplier(player: Player): number
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local yenUpgrades = PlayerDataService:Get(player, "YenUpgrades")
+	local moreOfflineLevel = if type(yenUpgrades) == "table" then yenUpgrades.MoreOfflineEarnings else 0
+	return YenUpgrades.getOfflineEarningsMultiplier(moreOfflineLevel)
 end
 
 local function getUnitManaPerSecond(units: { { Tier: number } }): number
@@ -286,8 +293,11 @@ local function getOfflineRewardPayload(player: Player)
 
 	local rewardedSeconds = math.min(offlineSeconds, maxOfflineSeconds)
 	local units = PlayerDataService:GetUnits(player)
-	local yenPerSecond = getUnitManaPerSecond(units) * getOfflineYenMultiplier(player)
-	local reward = math.max(math.floor(yenPerSecond * rewardedSeconds * rewardMultiplier), 0)
+	local baseYenPerSecond = getUnitManaPerSecond(units) * getOfflineBaseYenMultiplier(player)
+	local offlineEarningsMultiplier = getOfflineEarningsUpgradeMultiplier(player)
+	local yenPerSecond = baseYenPerSecond * offlineEarningsMultiplier
+	local baseReward = math.max(math.floor(baseYenPerSecond * rewardedSeconds * rewardMultiplier), 0)
+	local reward = math.max(math.floor(baseYenPerSecond * rewardedSeconds * rewardMultiplier * offlineEarningsMultiplier), 0)
 	if reward <= 0 then
 		pendingOfflineRewards[player] = false
 		return false
@@ -296,8 +306,11 @@ local function getOfflineRewardPayload(player: Player)
 	local payload = {
 		OfflineSeconds = offlineSeconds,
 		RewardedSeconds = rewardedSeconds,
+		BaseReward = baseReward,
 		Reward = reward,
+		BaseYenPerHour = baseYenPerSecond * 60 * 60,
 		YenPerHour = yenPerSecond * 60 * 60,
+		OfflineEarningsMultiplier = offlineEarningsMultiplier,
 		RewardMultiplier = rewardMultiplier,
 	}
 	pendingOfflineRewards[player] = payload
@@ -506,6 +519,13 @@ local function getUnitSpawnTier(PlayerDataService, player: Player): number
 	local level = if type(upgrades) == "table" then upgrades.UnitSpawnTier else 0
 	local eventBonus = math.max(math.floor(EventUtil.getEffectBonus("UnitSpawnTierBonus", 0)), 0)
 	return math.clamp(RebirthUpgrades.getUnitSpawnTier(level) + eventBonus, 1, AnimeDroppers.MaxTier)
+end
+
+local function getQuestUnitBuyProgressAmount(amount: number, spawnTier: number): number
+	amount = math.max(math.floor(tonumber(amount) or 0), 0)
+	local tierData = AnimeDroppers.Tiers[spawnTier]
+	local baseUnitValue = math.max(math.floor(tonumber(tierData and tierData.RequiredTier1) or 1), 1)
+	return amount * baseUnitValue
 end
 
 local function getMaxButtonCount(PlayerDataService, player: Player): number
@@ -1006,13 +1026,20 @@ function TycoonService.Client:UpdateTutorialStep(player: Player, step: string): 
 	PlayerDataService:WaitForData(player)
 
 	local tutorial = getTutorialData(PlayerDataService, player)
-	if tutorial.Accepted ~= true or tutorial.Cancelled == true or tutorial.Completed == true then
+	if tutorial.Accepted ~= true or tutorial.Cancelled == true then
+		return false
+	end
+	if tutorial.RebirthGuideCompleted == true then
 		return false
 	end
 
 	local currentStep = if type(tutorial.Step) == "string" then tutorial.Step else "Prompt"
 	local currentIndex = TUTORIAL_STEPS[currentStep] or 0
 	local nextIndex = TUTORIAL_STEPS[step] or 0
+	local coreCompleteIndex = TUTORIAL_STEPS.WaitForRebirthReady
+	if tutorial.Completed == true and currentIndex < coreCompleteIndex then
+		currentIndex = coreCompleteIndex
+	end
 	if nextIndex < currentIndex then
 		return false
 	end
@@ -1035,6 +1062,9 @@ function TycoonService.Client:UpdateTutorialStep(player: Player, step: string): 
 	end
 
 	PlayerDataService:Set(player, { "Tutorial", "Step" }, step)
+	if step == "Completed" then
+		PlayerDataService:Set(player, { "Tutorial", "RebirthGuideCompleted" }, true)
+	end
 	return true
 end
 
@@ -1046,11 +1076,14 @@ function TycoonService.Client:CompleteTutorial(player: Player): (boolean, string
 	if tutorial.Cancelled == true then
 		return false, "Cancelled"
 	end
+	local currentStep = if type(tutorial.Step) == "string" then tutorial.Step else "PickupDrop"
+	if (TUTORIAL_STEPS[currentStep] or 0) < TUTORIAL_STEPS.WaitForRebirthReady then
+		return false, "Tutorial not finished"
+	end
 
 	PlayerDataService:Set(player, { "Tutorial", "Prompted" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Completed" }, true)
-	PlayerDataService:Set(player, { "Tutorial", "Step" }, "Completed")
 	if PlayerDataService:Get(player, { "Analytics", "TutorialCompleteFunnelLogged" }) ~= true then
 		if TierUnlockAnalytics.logTutorialCompleted(player) then
 			PlayerDataService:Set(player, { "Analytics", "TutorialCompleteFunnelLogged" }, true)
@@ -1162,7 +1195,7 @@ function TycoonService.Client:BuyUnits(player: Player, amount: number, buttonNam
 	)
 
 	pcall(function()
-		Knit.GetService("QuestService"):TrackUnitsBought(player, amount)
+		Knit.GetService("QuestService"):TrackUnitsBought(player, getQuestUnitBuyProgressAmount(amount, spawnTier))
 	end)
 
 	return true
@@ -1217,7 +1250,7 @@ function TycoonService.Client:BuyMaxUnits(player: Player, buttonName: string): (
 	)
 
 	pcall(function()
-		Knit.GetService("QuestService"):TrackUnitsBought(player, amount)
+		Knit.GetService("QuestService"):TrackUnitsBought(player, getQuestUnitBuyProgressAmount(amount, spawnTier))
 	end)
 
 	return true, nil, amount
@@ -1333,7 +1366,7 @@ function TycoonService.Client:BuyRebirthUpgrade(player: Player, upgradeKey: stri
 end
 
 function TycoonService.Client:BuyYenUpgrade(player: Player, upgradeKey: string): (boolean, string?, number?)
-	if upgradeKey ~= "BetterMaxButton" and upgradeKey ~= "BetterGoldenDrops" and upgradeKey ~= "Pickuprange" then
+	if type(YenUpgrades[upgradeKey]) ~= "table" then
 		return false, "Invalid upgrade"
 	end
 

@@ -384,12 +384,26 @@ function QuestUtil.computeQuestTarget(
 				seconds = minSec
 			end
 		elseif category == "Daily" then
-			seconds = math.max(math.floor(tonumber(playtime.Daily) or 10800), 60)
+			local minSec = math.max(math.floor(tonumber(playtime.DailyMin or playtime.Daily) or 7200), 60)
+			local maxSec = math.max(math.floor(tonumber(playtime.DailyMax or playtime.Daily) or 14400), minSec)
+			if type(seed) == "string" then
+				local roll = getStableHash(seed .. ":playtime")
+				seconds = minSec + (roll % (maxSec - minSec + 1))
+			else
+				seconds = minSec
+			end
 		elseif category == "Weekly" then
-			seconds = math.max(math.floor(tonumber(playtime.Weekly) or 43200), 60)
+			local minSec = math.max(math.floor(tonumber(playtime.WeeklyMin or playtime.Weekly) or 43200), 60)
+			local maxSec = math.max(math.floor(tonumber(playtime.WeeklyMax or playtime.Weekly) or 86400), minSec)
+			if type(seed) == "string" then
+				local roll = getStableHash(seed .. ":playtime")
+				seconds = minSec + (roll % (maxSec - minSec + 1))
+			else
+				seconds = minSec
+			end
 		end
 
-		return scaleRequirement(category, seconds)
+		return math.max(math.floor(seconds), 1)
 	end
 
 	if questType == "ReachTier" then
@@ -499,20 +513,12 @@ end
 
 local function rollRewardKind(
 	rewardWeights: { [string]: number },
-	seed: string,
-	potionRewardsRolled: number?
+	seed: string
 ): string
-	local maxPotions = math.max(math.floor(tonumber(QuestConfig.MaxPotionRewardsPerPeriod) or 1), 0)
-	potionRewardsRolled = math.max(math.floor(tonumber(potionRewardsRolled) or 0), 0)
-
 	local candidates = {}
 	local totalWeight = 0
 
 	for kind, weight in rewardWeights do
-		if kind == "Potion" and potionRewardsRolled >= maxPotions then
-			continue
-		end
-
 		local normalizedWeight = math.max(math.floor(tonumber(weight) or 0), 0)
 		if normalizedWeight > 0 then
 			totalWeight += normalizedWeight
@@ -587,11 +593,10 @@ local function rollReward(
 	income: { [string]: any },
 	highestTier: number,
 	seed: string,
-	units: { { Tier: number } }?,
-	potionRewardsRolled: number?
+	units: { { Tier: number } }?
 )
 	local mergedWeights = mergeCategoryRewardWeights(rewardWeights or { Yen = 1 }, category)
-	local kind = rollRewardKind(mergedWeights, seed, potionRewardsRolled)
+	local kind = rollRewardKind(mergedWeights, seed)
 	return QuestUtil.buildReward(kind, category, income, highestTier, seed, units)
 end
 
@@ -603,11 +608,12 @@ function QuestUtil.rollQuestSlots(
 	yenMultiplier: number?
 )
 	local usedIds = {}
-	local potionRewardsRolled = 0
 	local slots = {}
 	units = if type(units) == "table" then units else {}
 	local income = QuestUtil.getIncomeProfile(units, yenMultiplier)
 	local highestTier = CapsuleUtil.getHighestUnitTier(units)
+	local guaranteedPotionSlot = (getStableHash(tostring(userId) .. ":" .. periodId .. ":" .. category .. ":potionSlot") % QuestConfig.QuestCount)
+		+ 1
 
 	for slotIndex = 1, QuestConfig.QuestCount do
 		local seed = tostring(userId) .. ":" .. periodId .. ":" .. category .. ":" .. tostring(slotIndex)
@@ -621,19 +627,9 @@ function QuestUtil.rollQuestSlots(
 		end
 
 		local target = QuestUtil.computeQuestTarget(questEntry.type, category, income, highestTier, seed)
-		local reward = rollReward(
-			questEntry.rewardWeights or { Yen = 1 },
-			category,
-			income,
-			highestTier,
-			seed,
-			units,
-			potionRewardsRolled
-		)
-
-		if type(reward) == "table" and reward.Kind == "Potion" then
-			potionRewardsRolled += 1
-		end
+		local reward = if slotIndex == guaranteedPotionSlot
+			then QuestUtil.buildReward("Potion", category, income, highestTier, seed, units)
+			else rollReward(questEntry.rewardWeights or { Yen = 1 }, category, income, highestTier, seed, units)
 
 		table.insert(slots, {
 			QuestId = questEntry.id,
@@ -710,13 +706,24 @@ end
 
 local function formatPlaytimeTarget(seconds: number): string
 	seconds = math.max(math.floor(tonumber(seconds) or 0), 0)
-	if seconds >= SECONDS_PER_HOUR and seconds % SECONDS_PER_HOUR == 0 then
-		local hours = seconds / SECONDS_PER_HOUR
-		return tostring(hours) .. (hours == 1 and " hour" or " hours")
+
+	if seconds <= 0 then
+		return "0m"
 	end
 
 	local minutes = math.max(math.ceil(seconds / SECONDS_PER_MINUTE), 1)
-	return tostring(minutes) .. (minutes == 1 and " min" or " min")
+	local hours = math.floor(minutes / 60)
+	local remainingMinutes = minutes % 60
+
+	if hours > 0 and remainingMinutes > 0 then
+		return tostring(hours) .. "h " .. tostring(remainingMinutes) .. "m"
+	end
+
+	if hours > 0 then
+		return tostring(hours) .. "h"
+	end
+
+	return tostring(minutes) .. "m"
 end
 
 function QuestUtil.formatProgressValue(questType: string, value: number): string
