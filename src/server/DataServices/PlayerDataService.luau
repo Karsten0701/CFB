@@ -31,6 +31,8 @@ local recordingLeaderboardAchievedAt = false
 
 local PLAYTIME_PERSIST_INTERVAL = 60
 local MAX_REASONABLE_PLAYTIME_SECONDS = 10 * 365 * 24 * 60 * 60
+local MAX_REASONABLE_REBIRTHS = 50
+local MAX_ACTIVE_BOOST_SECONDS = 24 * 60 * 60
 
 local LEADERBOARD_STAT_PATHS = {
 	Rebirths = true,
@@ -78,6 +80,19 @@ local function deepEqual(left: any, right: any): boolean
 	return true
 end
 
+local function finiteNumber(value: any, fallback: number): number
+	value = tonumber(value)
+	if value == nil or value ~= value or value == math.huge or value == -math.huge then
+		return fallback
+	end
+
+	return value
+end
+
+local function finiteNonNegativeInteger(value: any, fallback: number): number
+	return math.max(math.floor(finiteNumber(value, fallback)), 0)
+end
+
 local function getStarterUnits(): { { Tier: number } }
 	local configuredStarterUnits = TycoonConfig.StarterUnits
 	if type(configuredStarterUnits) ~= "table" then
@@ -113,7 +128,7 @@ local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
 			continue
 		end
 
-		local tier = math.clamp(math.floor(tonumber(unit.Tier) or 1), 1, AnimeDroppers.MaxTier)
+		local tier = math.clamp(math.floor(finiteNumber(unit.Tier, 1)), 1, AnimeDroppers.MaxTier)
 		if AnimeDroppers.Tiers[tier] then
 			table.insert(normalizedUnits, {
 				Tier = tier,
@@ -130,6 +145,13 @@ local function normalizeUnits(units: any): { { Tier: number, Slot: number } }
 		return left.Tier > right.Tier
 	end)
 
+	local maxUnits = finiteNonNegativeInteger(TycoonConfig.MaxUnits, 0)
+	if maxUnits > 0 and #normalizedUnits > maxUnits then
+		for index = #normalizedUnits, maxUnits + 1, -1 do
+			normalizedUnits[index] = nil
+		end
+	end
+
 	for slot, unit in normalizedUnits do
 		unit.Slot = slot
 	end
@@ -142,7 +164,7 @@ local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { 
 
 	if type(unlockedDroppers) == "table" then
 		for tier, unlocked in unlockedDroppers do
-			local normalizedTier = math.floor(tonumber(tier) or 0)
+			local normalizedTier = finiteNonNegativeInteger(tier, 0)
 			if unlocked == true and AnimeDroppers.Tiers[normalizedTier] then
 				normalized[normalizedTier] = true
 			end
@@ -185,7 +207,7 @@ local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { 
 	end
 
 	for _, unit in units do
-		local tier = math.floor(tonumber(unit.Tier) or 0)
+		local tier = finiteNonNegativeInteger(unit.Tier, 0)
 		unlockTierAndMergeRequirements(tier)
 	end
 
@@ -193,7 +215,7 @@ local function normalizeUnlockedAnimeDroppers(unlockedDroppers: any, units: { { 
 end
 
 local function getRebirthTokenReward(rebirthNumber: number): number
-	rebirthNumber = math.max(math.floor(rebirthNumber), 1)
+	rebirthNumber = math.max(finiteNonNegativeInteger(rebirthNumber, 1), 1)
 	local rebirthConfig = TycoonConfig.Rebirth or {}
 	local tokensPerRebirth = rebirthConfig.TokensPerRebirth
 	if type(tokensPerRebirth) == "table" then
@@ -201,7 +223,7 @@ local function getRebirthTokenReward(rebirthNumber: number): number
 		if configuredReward == nil then
 			local fallbackRebirth = 0
 			for configuredRebirth in tokensPerRebirth do
-				local numericRebirth = math.floor(tonumber(configuredRebirth) or 0)
+				local numericRebirth = finiteNonNegativeInteger(configuredRebirth, 0)
 				if numericRebirth > fallbackRebirth and numericRebirth <= rebirthNumber then
 					fallbackRebirth = numericRebirth
 					configuredReward = tokensPerRebirth[configuredRebirth]
@@ -210,10 +232,10 @@ local function getRebirthTokenReward(rebirthNumber: number): number
 		end
 
 		if configuredReward ~= nil then
-			return math.max(math.floor(tonumber(configuredReward) or 0), 0)
+			return finiteNonNegativeInteger(configuredReward, 0)
 		end
 	elseif tonumber(tokensPerRebirth) then
-		return math.max(math.floor(tonumber(tokensPerRebirth) or 0), 0)
+		return finiteNonNegativeInteger(tokensPerRebirth, 0)
 	end
 
 	local previousReward = 1
@@ -230,7 +252,7 @@ end
 
 local function getTotalRebirthTokenEntitlement(rebirths: number): number
 	local total = 0
-	for rebirthNumber = 1, math.max(math.floor(tonumber(rebirths) or 0), 0) do
+	for rebirthNumber = 1, math.min(finiteNonNegativeInteger(rebirths, 0), MAX_REASONABLE_REBIRTHS) do
 		total += getRebirthTokenReward(rebirthNumber)
 	end
 
@@ -246,9 +268,9 @@ local function getSpentRebirthTokensFromData(data: { [string]: any }): number
 			continue
 		end
 
-		local level = math.max(math.floor(tonumber(upgrades[upgradeKey]) or 0), 0)
+		local level = finiteNonNegativeInteger(upgrades[upgradeKey], 0)
 		for paidLevel = 0, level - 1 do
-			spent += math.max(math.floor(tonumber(RebirthUpgrades.getCost(upgradeKey, paidLevel)) or 0), 0)
+			spent += finiteNonNegativeInteger(RebirthUpgrades.getCost(upgradeKey, paidLevel), 0)
 		end
 	end
 
@@ -256,12 +278,12 @@ local function getSpentRebirthTokensFromData(data: { [string]: any }): number
 end
 
 local function repairRebirthTokenEntitlement(data: { [string]: any })
-	data.RebirthTokens = math.max(math.floor(tonumber(data.RebirthTokens) or 0), 0)
+	data.RebirthTokens = finiteNonNegativeInteger(data.RebirthTokens, 0)
 
 	local expectedTotal = getTotalRebirthTokenEntitlement(data.Rebirths)
 	local grantedTotal
 	if data.RebirthTokenEntitlementMigrated == true then
-		grantedTotal = math.max(math.floor(tonumber(data.RebirthTokenEntitlementGranted) or 0), 0)
+		grantedTotal = finiteNonNegativeInteger(data.RebirthTokenEntitlementGranted, 0)
 	else
 		grantedTotal = data.RebirthTokens + getSpentRebirthTokensFromData(data)
 	end
@@ -290,8 +312,8 @@ local function repairQuestSlot(slot: any)
 
 	slot.QuestId = if type(slot.QuestId) == "string" then slot.QuestId else ""
 	slot.Type = if type(slot.Type) == "string" then slot.Type else ""
-	slot.Target = math.max(math.floor(tonumber(slot.Target) or 1), 1)
-	slot.Progress = math.max(math.floor(tonumber(slot.Progress) or 0), 0)
+	slot.Target = math.max(finiteNonNegativeInteger(slot.Target, 1), 1)
+	slot.Progress = finiteNonNegativeInteger(slot.Progress, 0)
 	slot.Claimed = slot.Claimed == true
 	if type(slot.Reward) ~= "table" then
 		slot.Reward = { Kind = "Yen", Amount = 0 }
@@ -306,7 +328,7 @@ local function repairQuestCategory(categoryData: any)
 	end
 
 	categoryData.PeriodId = if type(categoryData.PeriodId) == "string" then categoryData.PeriodId else ""
-	categoryData.PeriodEnd = math.max(math.floor(tonumber(categoryData.PeriodEnd) or 0), 0)
+	categoryData.PeriodEnd = finiteNonNegativeInteger(categoryData.PeriodEnd, 0)
 
 	if type(categoryData.Baselines) ~= "table" then
 		categoryData.Baselines = {}
@@ -315,9 +337,9 @@ local function repairQuestCategory(categoryData: any)
 	if type(categoryData.Stats) ~= "table" then
 		categoryData.Stats = {}
 	end
-	categoryData.Stats.YenEarned = math.max(math.floor(tonumber(categoryData.Stats.YenEarned) or 0), 0)
-	categoryData.Stats.UnitsBought = math.max(math.floor(tonumber(categoryData.Stats.UnitsBought) or 0), 0)
-	categoryData.Stats.ManaCollected = math.max(math.floor(tonumber(categoryData.Stats.ManaCollected) or 0), 0)
+	categoryData.Stats.YenEarned = finiteNonNegativeInteger(categoryData.Stats.YenEarned, 0)
+	categoryData.Stats.UnitsBought = finiteNonNegativeInteger(categoryData.Stats.UnitsBought, 0)
+	categoryData.Stats.ManaCollected = finiteNonNegativeInteger(categoryData.Stats.ManaCollected, 0)
 
 	if type(categoryData.Slots) ~= "table" then
 		categoryData.Slots = {}
@@ -337,7 +359,7 @@ local function repairQuestData(data: { [string]: any })
 		data.Quests = {}
 	end
 
-	data.Quests.TotalManaCollected = math.max(math.floor(tonumber(data.Quests.TotalManaCollected) or 0), 0)
+	data.Quests.TotalManaCollected = finiteNonNegativeInteger(data.Quests.TotalManaCollected, 0)
 	data.Quests.Hourly = repairQuestCategory(data.Quests.Hourly)
 	data.Quests.Daily = repairQuestCategory(data.Quests.Daily)
 	data.Quests.Weekly = repairQuestCategory(data.Quests.Weekly)
@@ -350,29 +372,15 @@ local function ensureManaData(data: { [string]: any })
 	migrateNumberFieldInData(data, "ManaPowerInBag", "ManaInBag", 0)
 	migrateNumberFieldInData(data, "ManaPowerInDeposit", "ManaInDeposit", 0)
 
-	if type(data.Yen) ~= "number" then
-		data.Yen = TycoonConfig.StarterYen or 0
-	end
+	data.Yen = finiteNonNegativeInteger(data.Yen, TycoonConfig.StarterYen or 0)
 
-	if type(data.Rebirths) ~= "number" then
-		data.Rebirths = 0
-	end
-	data.Rebirths = math.max(math.floor(data.Rebirths), 0)
+	data.Rebirths = math.min(finiteNonNegativeInteger(data.Rebirths, 0), MAX_REASONABLE_REBIRTHS)
 
-	if type(data.RebirthTokens) ~= "number" then
-		data.RebirthTokens = 0
-	end
-	data.RebirthTokens = math.max(math.floor(data.RebirthTokens), 0)
+	data.RebirthTokens = finiteNonNegativeInteger(data.RebirthTokens, 0)
 
-	if type(data.LastGroupRewardClaimAt) ~= "number" then
-		data.LastGroupRewardClaimAt = 0
-	end
-	data.LastGroupRewardClaimAt = math.max(math.floor(data.LastGroupRewardClaimAt), 0)
+	data.LastGroupRewardClaimAt = finiteNonNegativeInteger(data.LastGroupRewardClaimAt, 0)
 
-	if type(data.GroupLikeReminderCount) ~= "number" then
-		data.GroupLikeReminderCount = 0
-	end
-	data.GroupLikeReminderCount = math.max(math.floor(data.GroupLikeReminderCount), 0)
+	data.GroupLikeReminderCount = finiteNonNegativeInteger(data.GroupLikeReminderCount, 0)
 
 	if type(data.GroupRewardLikeUnlocked) ~= "boolean" then
 		local likeRequired = math.max(
@@ -382,53 +390,34 @@ local function ensureManaData(data: { [string]: any })
 		data.GroupRewardLikeUnlocked = data.GroupLikeReminderCount >= likeRequired or data.LastGroupRewardClaimAt > 0
 	end
 
-	if type(data.LastLogoutAt) ~= "number" then
-		data.LastLogoutAt = 0
-	end
-	data.LastLogoutAt = math.max(math.floor(data.LastLogoutAt), 0)
+	data.LastLogoutAt = finiteNonNegativeInteger(data.LastLogoutAt, 0)
 
 	if type(data.FavoritePromptShown) ~= "boolean" then
 		data.FavoritePromptShown = false
 	end
 
-	if type(data.ManaInBag) ~= "number" then
-		data.ManaInBag = 0
+	if type(data.UpdateLogSeen) ~= "boolean" then
+		data.UpdateLogSeen = false
 	end
 
-	if type(data.ManaInDeposit) ~= "number" then
-		data.ManaInDeposit = 0
-	end
+	data.ManaInBag = finiteNonNegativeInteger(data.ManaInBag, 0)
 
-	if type(data.LifetimeYen) ~= "number" then
-		data.LifetimeYen = math.max(math.floor(tonumber(data.Yen) or 0), 0)
-	end
-	data.LifetimeYen = math.max(math.floor(data.LifetimeYen), 0)
+	data.ManaInDeposit = finiteNonNegativeInteger(data.ManaInDeposit, 0)
 
-	if type(data.TotalUnitsBought) ~= "number" then
-		data.TotalUnitsBought = math.max(math.floor(tonumber(data.TotalUnitsPurchased) or 0), 0)
-	end
-	data.TotalUnitsBought = math.max(math.floor(data.TotalUnitsBought), 0)
+	data.LifetimeYen = finiteNonNegativeInteger(data.LifetimeYen, data.Yen)
 
-	if type(data.TotalUnitsPurchased) ~= "number" then
-		data.TotalUnitsPurchased = 0
-	end
-	data.TotalUnitsPurchased = math.max(math.floor(data.TotalUnitsPurchased), 0)
+	data.TotalUnitsBought = finiteNonNegativeInteger(data.TotalUnitsBought, finiteNonNegativeInteger(data.TotalUnitsPurchased, 0))
 
-	if type(data.PlaytimeSeconds) ~= "number" then
-		data.PlaytimeSeconds = 0
-	end
-	data.PlaytimeSeconds = math.clamp(math.floor(data.PlaytimeSeconds), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
+	data.TotalUnitsPurchased = finiteNonNegativeInteger(data.TotalUnitsPurchased, 0)
+
+	data.PlaytimeSeconds = math.clamp(finiteNonNegativeInteger(data.PlaytimeSeconds, 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
 
 	if type(data.LeaderboardAchievedAt) ~= "table" then
 		data.LeaderboardAchievedAt = {}
 	end
 	for statPath in LEADERBOARD_STAT_PATHS do
 		local achievedAt = data.LeaderboardAchievedAt[statPath]
-		if type(achievedAt) ~= "number" then
-			data.LeaderboardAchievedAt[statPath] = 0
-		else
-			data.LeaderboardAchievedAt[statPath] = math.max(math.floor(achievedAt), 0)
-		end
+		data.LeaderboardAchievedAt[statPath] = finiteNonNegativeInteger(achievedAt, 0)
 	end
 
 	if type(data.ProcessedReceipts) ~= "table" then
@@ -447,8 +436,7 @@ local function ensureManaData(data: { [string]: any })
 		data.Potions = {}
 	end
 	for _, potionType in { "Yen", "Mana", "Deposit" } do
-		local amount = tonumber(data.Potions[potionType]) or 0
-		data.Potions[potionType] = math.max(math.floor(amount), 0)
+		data.Potions[potionType] = finiteNonNegativeInteger(data.Potions[potionType], 0)
 	end
 
 	if type(data.ActivePotionBoosts) ~= "table" then
@@ -460,8 +448,8 @@ local function ensureManaData(data: { [string]: any })
 			continue
 		end
 
-		local remaining = math.max(math.floor(tonumber(boost.RemainingSeconds) or 0), 0)
-		local multiplier = tonumber(boost.Multiplier) or 2
+		local remaining = math.min(finiteNonNegativeInteger(boost.RemainingSeconds, 0), MAX_ACTIVE_BOOST_SECONDS)
+		local multiplier = finiteNumber(boost.Multiplier, 2)
 		if remaining <= 0 then
 			data.ActivePotionBoosts[potionType] = nil
 		else
@@ -496,12 +484,12 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.RebirthUpgrades) ~= "table" then
 		data.RebirthUpgrades = {}
 	end
-	data.RebirthUpgrades.UnitSpawnTier = math.max(math.floor(tonumber(data.RebirthUpgrades.UnitSpawnTier) or 0), 0)
-	data.RebirthUpgrades.MoreMana = math.max(math.floor(tonumber(data.RebirthUpgrades.MoreMana) or 0), 0)
+	data.RebirthUpgrades.UnitSpawnTier = finiteNonNegativeInteger(data.RebirthUpgrades.UnitSpawnTier, 0)
+	data.RebirthUpgrades.MoreMana = finiteNonNegativeInteger(data.RebirthUpgrades.MoreMana, 0)
 
 	local legacyBetterMax = 0
 	if data.RebirthUpgrades.BetterMaxButton ~= nil then
-		legacyBetterMax = math.max(math.floor(tonumber(data.RebirthUpgrades.BetterMaxButton) or 0), 0)
+		legacyBetterMax = finiteNonNegativeInteger(data.RebirthUpgrades.BetterMaxButton, 0)
 	end
 
 	if type(data.YenUpgrades) ~= "table" then
@@ -511,7 +499,7 @@ local function ensureManaData(data: { [string]: any })
 	local betterMaxConfig = YenUpgrades.BetterMaxButton
 	local betterMaxMaxLevel = if type(betterMaxConfig) == "table" then betterMaxConfig.MaxLevel or 0 else 0
 	data.YenUpgrades.BetterMaxButton = math.clamp(
-		math.max(math.max(math.floor(tonumber(data.YenUpgrades.BetterMaxButton) or 0), 0), legacyBetterMax),
+		math.max(finiteNonNegativeInteger(data.YenUpgrades.BetterMaxButton, 0), legacyBetterMax),
 		0,
 		betterMaxMaxLevel
 	)
@@ -520,10 +508,10 @@ local function ensureManaData(data: { [string]: any })
 		data.RebirthUpgrades.BetterMaxButton = nil
 	end
 
-	data.YenUpgrades.BetterGoldenDrops = math.max(math.floor(tonumber(data.YenUpgrades.BetterGoldenDrops) or 0), 0)
-	data.YenUpgrades.Pickuprange = math.max(math.floor(tonumber(data.YenUpgrades.Pickuprange) or 0), 0)
+	data.YenUpgrades.BetterGoldenDrops = finiteNonNegativeInteger(data.YenUpgrades.BetterGoldenDrops, 0)
+	data.YenUpgrades.Pickuprange = finiteNonNegativeInteger(data.YenUpgrades.Pickuprange, 0)
 	data.YenUpgrades.MoreOfflineEarnings = math.clamp(
-		math.floor(tonumber(data.YenUpgrades.MoreOfflineEarnings) or 0),
+		finiteNonNegativeInteger(data.YenUpgrades.MoreOfflineEarnings, 0),
 		0,
 		YenUpgrades.MoreOfflineEarnings.MaxLevel or 0
 	)
@@ -542,14 +530,24 @@ local function ensureManaData(data: { [string]: any })
 	if type(data.Tutorial.Step) ~= "string" or data.Tutorial.Step == "" then
 		data.Tutorial.Step = "PickupDrop"
 	end
+	local wasLegacyTutorialCancelled = data.Tutorial.Step == "Cancelled" or data.Tutorial.Cancelled == true
 	local legacyTutorialStepMap = {
 		SaveForSecondUnit = "BuySecondUnit",
 		SaveForThirdUnit = "BuyThirdUnit",
 		WaitForTier5 = "WaitForRebirthReady",
 		Prompt = "PickupDrop",
-		Cancelled = "PickupDrop",
+		Cancelled = "Completed",
 	}
 	data.Tutorial.Step = legacyTutorialStepMap[data.Tutorial.Step] or data.Tutorial.Step
+	if wasLegacyTutorialCancelled then
+		data.Tutorial.Completed = true
+		data.Tutorial.RebirthGuideCompleted = true
+		data.Tutorial.RewardClaimed = true
+		data.Tutorial.Accepted = false
+		data.Tutorial.Prompted = true
+		data.Tutorial.Cancelled = true
+		data.Tutorial.Step = "Completed"
+	end
 	if data.Tutorial.Completed ~= true then
 		data.Tutorial.Accepted = true
 		data.Tutorial.Cancelled = false
@@ -563,10 +561,7 @@ local function ensureManaData(data: { [string]: any })
 		end
 	end
 
-	if type(data.TutorialBoostEndsAt) ~= "number" then
-		data.TutorialBoostEndsAt = 0
-	end
-	data.TutorialBoostEndsAt = math.max(math.floor(data.TutorialBoostEndsAt), 0)
+	data.TutorialBoostEndsAt = finiteNonNegativeInteger(data.TutorialBoostEndsAt, 0)
 
 	if type(data.Settings) ~= "table" then
 		data.Settings = {}
@@ -580,7 +575,7 @@ local function ensureManaData(data: { [string]: any })
 		data.Settings.ShowOtherTycoons = true
 	end
 
-	local autoMergeAt = tonumber(data.Settings.AutoMergeAt) or 100
+	local autoMergeAt = finiteNumber(data.Settings.AutoMergeAt, 100)
 	data.Settings.AutoMergeAt = math.clamp(math.floor(autoMergeAt), 0, 100)
 
 	if type(data.Settings.AutoCollect) ~= "boolean" then
@@ -625,7 +620,7 @@ local function ensureManaData(data: { [string]: any })
 	if #data.Units <= 0 then
 		data.Units = normalizeUnits(getStarterUnits())
 	end
-	data.TotalUnitsBought = math.max(data.TotalUnitsBought, math.floor(Pricing.getBaseUnitCount(data.Units)))
+	data.TotalUnitsBought = math.max(data.TotalUnitsBought, finiteNonNegativeInteger(Pricing.getBaseUnitCount(data.Units), 0))
 
 	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers(data.UnlockedAnimeDroppers, data.Units)
 end
@@ -703,7 +698,7 @@ local function logInitialAnalyticsFunnels(player: Player, data: { [string]: any 
 		end
 	end
 
-	local rebirths = math.max(math.floor(tonumber(data.Rebirths) or 0), 0)
+	local rebirths = math.min(finiteNonNegativeInteger(data.Rebirths, 0), MAX_REASONABLE_REBIRTHS)
 	for rebirthNumber = 1, rebirths do
 		local key = tostring(rebirthNumber)
 		if data.Analytics.RebirthFunnelLogged[key] == true then
@@ -776,7 +771,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "PLAYERDATA_test7", --PLAYERDATA gameversion
+		profileStoreIndex = "PLAYERDATA", --PLAYERDATA gameversion
 	})
 end
 
@@ -847,8 +842,8 @@ local function maybeRecordLeaderboardAchieved(player: Player, path: Path, oldVal
 		return
 	end
 
-	local previousValue = math.max(math.floor(tonumber(oldValue) or 0), 0)
-	local nextValue = math.max(math.floor(tonumber(newValue) or 0), 0)
+	local previousValue = finiteNonNegativeInteger(oldValue, 0)
+	local nextValue = finiteNonNegativeInteger(newValue, 0)
 	if nextValue <= 0 or nextValue <= previousValue then
 		return
 	end
@@ -886,10 +881,42 @@ function PlayerDataService:GetLeaderboardAchievedAt(player: Player, statPath: st
 	self:WaitForData(player)
 	local achievedAt = self:Get(player, { "LeaderboardAchievedAt", statPath })
 	if type(achievedAt) == "number" and achievedAt > 0 then
-		return math.floor(achievedAt)
+		return finiteNonNegativeInteger(achievedAt, 0)
 	end
 
 	return 0
+end
+
+function PlayerDataService:GetLeaderboardValueByUserId(userId: number, statPath: string): (number?, string?)
+	userId = finiteNonNegativeInteger(userId, 0)
+	if userId <= 0 then
+		return nil, "UserId must be greater than 0."
+	end
+
+	if type(statPath) ~= "string" or statPath == "" then
+		return nil, "Stat path is required."
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		if statPath == "PlaytimeSeconds" then
+			return self:GetPlaytimeSeconds(onlinePlayer), nil
+		end
+
+		return finiteNonNegativeInteger(self:Get(onlinePlayer, statPath), 0), nil
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile or type(profile.Data) ~= "table" then
+		return nil, `No saved data found for user {userId}.`
+	end
+
+	ensureManaData(profile.Data)
+	if statPath == "PlaytimeSeconds" then
+		return finiteNonNegativeInteger(profile.Data.PlaytimeSeconds, 0), nil
+	end
+
+	return finiteNonNegativeInteger(profile.Data[statPath], 0), nil
 end
 
 function PlayerDataService:AddYen(player: Player, amount: number)
@@ -897,7 +924,7 @@ function PlayerDataService:AddYen(player: Player, amount: number)
 
 	if amount > 0 then
 		self:Update(player, "LifetimeYen", function(currentLifetimeYen: number)
-			return math.max(math.floor(tonumber(currentLifetimeYen) or 0), 0) + amount
+			return finiteNonNegativeInteger(currentLifetimeYen, 0) + amount
 		end)
 
 		pcall(function()
@@ -920,13 +947,13 @@ function PlayerDataService:GetTotalRebirthTokenEntitlement(rebirths: number): nu
 end
 
 function PlayerDataService:AddRebirthTokens(player: Player, amount: number)
-	local normalizedAmount = math.max(math.floor(tonumber(amount) or 0), 0)
+	local normalizedAmount = finiteNonNegativeInteger(amount, 0)
 	if normalizedAmount <= 0 then
 		return self:Get(player, "RebirthTokens")
 	end
 
 	return self:Update(player, "RebirthTokens", function(currentTokens: number)
-		return math.max(math.floor(tonumber(currentTokens) or 0), 0) + normalizedAmount
+		return finiteNonNegativeInteger(currentTokens, 0) + normalizedAmount
 	end)
 end
 
@@ -938,26 +965,26 @@ function PlayerDataService:GrantRebirthTokenReward(player: Player, rebirthNumber
 
 	self:AddRebirthTokens(player, tokenReward)
 	self:Update(player, "RebirthTokenEntitlementGranted", function(currentGranted: number)
-		return math.max(math.floor(tonumber(currentGranted) or 0), 0) + tokenReward
+		return finiteNonNegativeInteger(currentGranted, 0) + tokenReward
 	end)
 	self:Set(player, "RebirthTokenEntitlementMigrated", true)
 	return tokenReward
 end
 
 function PlayerDataService:AddUnitsBought(player: Player, amount: number)
-	local normalizedAmount = math.floor(tonumber(amount) or 0)
+	local normalizedAmount = finiteNonNegativeInteger(amount, 0)
 	if normalizedAmount <= 0 then
 		return
 	end
 
 	self:Update(player, "TotalUnitsBought", function(current: number)
-		return math.max(math.floor(tonumber(current) or 0), 0) + normalizedAmount
+		return finiteNonNegativeInteger(current, 0) + normalizedAmount
 	end)
 end
 
 function PlayerDataService:GetPlaytimeSeconds(player: Player): number
 	local savedPlaytime =
-		math.clamp(math.floor(tonumber(self:Get(player, "PlaytimeSeconds")) or 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
+		math.clamp(finiteNonNegativeInteger(self:Get(player, "PlaytimeSeconds"), 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
 	local startedAt = playtimeSessionStartedAt[player]
 	if not startedAt then
 		return savedPlaytime
@@ -980,7 +1007,7 @@ function PlayerDataService:PersistPlaytime(player: Player)
 
 	playtimeSessionStartedAt[player] = now
 	self:Update(player, "PlaytimeSeconds", function(current: number)
-		local nextPlaytime = math.max(math.floor(tonumber(current) or 0), 0) + elapsed
+		local nextPlaytime = finiteNonNegativeInteger(current, 0) + elapsed
 		return math.min(nextPlaytime, MAX_REASONABLE_PLAYTIME_SECONDS)
 	end)
 end
@@ -1053,7 +1080,7 @@ end
 local function getUnitSpawnTierFromData(data: { [string]: any }): number
 	local upgrades = data.RebirthUpgrades
 	local level = if type(upgrades) == "table"
-		then math.max(math.floor(tonumber(upgrades.UnitSpawnTier) or 0), 0)
+		then finiteNonNegativeInteger(upgrades.UnitSpawnTier, 0)
 		else 0
 	return RebirthUpgrades.getUnitSpawnTier(level)
 end
@@ -1070,7 +1097,7 @@ local function getRebirthStarterUnitsFromData(data: { [string]: any }): { { Tier
 		end
 
 		table.insert(units, {
-			Tier = math.max(tonumber(unit.Tier) or 1, spawnTier),
+			Tier = math.max(finiteNonNegativeInteger(unit.Tier, 1), spawnTier),
 		})
 	end
 
@@ -1124,7 +1151,7 @@ local function _applyRebirthProgressResetToData(data: { [string]: any })
 	local resetYen = if rebirthConfig.ResetYen ~= nil then rebirthConfig.ResetYen else 100
 	local starterUnits = getRebirthStarterUnitsFromData(data)
 	local normalizedUnits = normalizeUnits(starterUnits)
-	local nextBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(normalizedUnits)), 0)
+	local nextBaseUnitCount = finiteNonNegativeInteger(Pricing.getBaseUnitCount(normalizedUnits), 0)
 
 	data.Yen = resetYen
 	data.ManaInBag = 0
@@ -1297,15 +1324,15 @@ end
 
 function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } }, options: { resetUnlocks: boolean }?)
 	local currentUnits = self:GetUnits(player)
-	local currentBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(currentUnits)), 0)
+	local currentBaseUnitCount = finiteNonNegativeInteger(Pricing.getBaseUnitCount(currentUnits), 0)
 	local normalizedUnits = normalizeUnits(units)
-	local nextBaseUnitCount = math.max(math.floor(Pricing.getBaseUnitCount(normalizedUnits)), 0)
+	local nextBaseUnitCount = finiteNonNegativeInteger(Pricing.getBaseUnitCount(normalizedUnits), 0)
 	local gainedBaseUnits = nextBaseUnitCount - currentBaseUnitCount
 	local resetUnlocks = options ~= nil and options.resetUnlocks == true
 
 	if gainedBaseUnits > 0 then
 		self:Update(player, "TotalUnitsBought", function(current: number)
-			return math.max(math.floor(tonumber(current) or 0), 0) + gainedBaseUnits
+			return finiteNonNegativeInteger(current, 0) + gainedBaseUnits
 		end)
 	elseif nextBaseUnitCount < currentBaseUnitCount then
 		self:Set(player, "TotalUnitsPurchased", 0)
@@ -1398,6 +1425,11 @@ end
 
 function PlayerDataService.Client:MarkFavoritePromptShown(player: Player): boolean
 	self.Server:Set(player, "FavoritePromptShown", true)
+	return true
+end
+
+function PlayerDataService.Client:MarkUpdateLogSeen(player: Player): boolean
+	self.Server:Set(player, "UpdateLogSeen", true)
 	return true
 end
 

@@ -15,6 +15,7 @@ ButtonPress.Settings = {
 	ReleaseTweenInfo = TweenInfo.new(1, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
 	RepeatCooldown = 1,
 	PulseInterval = 1.12,
+	StandingCheckInterval = 0.1,
 }
 
 local activeButtons: { [BasePart]: any } = {}
@@ -53,17 +54,32 @@ local function getLocalRoot(): BasePart?
 	return if root and root:IsA("BasePart") then root else nil
 end
 
-function ButtonPress.IsStandingOn(head: BasePart): boolean
-	local root = getLocalRoot()
+local function isRootStandingOn(root: BasePart?, head: BasePart): boolean
 	if not root then
 		return false
 	end
 
-	local horizontalOffset = Vector3.new(root.Position.X - head.Position.X, 0, root.Position.Z - head.Position.Z)
+	local rootPosition = root.Position
+	local headPosition = head.Position
+	local offsetX = rootPosition.X - headPosition.X
+	local offsetZ = rootPosition.Z - headPosition.Z
 	local radius = math.max(head.Size.X, head.Size.Y, head.Size.Z) * 0.5
-	local verticalOffset = root.Position.Y - head.Position.Y
+	local allowedRadius = radius + 0.6
+	local verticalOffset = rootPosition.Y - headPosition.Y
 
-	return horizontalOffset.Magnitude <= radius + 0.6 and verticalOffset >= 0 and verticalOffset <= 6
+	return offsetX * offsetX + offsetZ * offsetZ <= allowedRadius * allowedRadius and verticalOffset >= 0 and verticalOffset <= 6
+end
+
+function ButtonPress.GetLocalRoot(): BasePart?
+	return getLocalRoot()
+end
+
+function ButtonPress.IsRootStandingOn(root: BasePart?, head: BasePart): boolean
+	return isRootStandingOn(root, head)
+end
+
+function ButtonPress.IsStandingOn(head: BasePart): boolean
+	return isRootStandingOn(getLocalRoot(), head)
 end
 
 local function tweenHead(head: BasePart, data, targetPosition: Vector3, tweenInfo: TweenInfo)
@@ -235,9 +251,17 @@ function ButtonPress.Start()
 		ButtonPress.RemoveButton(object)
 	end)
 
-	RunService.Heartbeat:Connect(function()
+	local accumulatedTime = 0
+	RunService.Heartbeat:Connect(function(deltaTime)
+		accumulatedTime += deltaTime
+		if accumulatedTime < ButtonPress.Settings.StandingCheckInterval then
+			return
+		end
+
+		accumulatedTime = 0
+		local root = getLocalRoot()
 		for head in activeButtons do
-			ButtonPress.SetPressed(head, ButtonPress.IsStandingOn(head))
+			ButtonPress.SetPressed(head, isRootStandingOn(root, head))
 		end
 	end)
 end

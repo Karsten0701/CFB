@@ -256,9 +256,9 @@ local Tiers = {
 		DisplayName = "Lawyer",
 		AnimeGroup = "Pirates",
 		IconId = "rbxassetid://136761379074773",
-		DropValue = 2.28002921425e14,
+		DropValue = 644_828_619_192,
 		RequiredTier1 = 1289945088,
-		EstimatedTier1Cost = 4.15989582836e18,
+		EstimatedTier1Cost = 4.159895828363182e18,
 		MergeInto = 27,
 	},
 	[27] = {
@@ -266,9 +266,9 @@ local Tiers = {
 		DisplayName = "Shotoriko",
 		AnimeGroup = "Heroes",
 		IconId = "rbxassetid://100730607428895",
-		DropValue = 7.75209932845e14,
+		DropValue = 1_483_105_824_142,
 		RequiredTier1 = 2579890176,
-		EstimatedTier1Cost = 1.6639583307e19,
+		EstimatedTier1Cost = 1.6639583307003003e19,
 		MergeInto = 28,
 	},
 	[28] = {
@@ -276,9 +276,9 @@ local Tiers = {
 		DisplayName = "Tijo",
 		AnimeGroup = "Sorcerers",
 		IconId = "rbxassetid://120378945068145",
-		DropValue = 2.63571377167e15,
+		DropValue = 3_411_143_395_527,
 		RequiredTier1 = 5159780352,
-		EstimatedTier1Cost = 6.65583332151e19,
+		EstimatedTier1Cost = 6.655833321511256e19,
 		MergeInto = 29,
 	},
 	[29] = {
@@ -286,9 +286,9 @@ local Tiers = {
 		DisplayName = "Esta",
 		AnimeGroup = "Magic Knights",
 		IconId = "rbxassetid://74149124589958",
-		DropValue = 8.96142682369e15,
+		DropValue = 7_845_629_809_711,
 		RequiredTier1 = 10319560704,
-		EstimatedTier1Cost = 2.66233332835e20,
+		EstimatedTier1Cost = 2.6623333283465134e20,
 		MergeInto = 30,
 	},
 	[30] = {
@@ -296,9 +296,9 @@ local Tiers = {
 		DisplayName = "Gones",
 		AnimeGroup = "One Punch",
 		IconId = "rbxassetid://132398113776714",
-		DropValue = 3.04688512005e16,
+		DropValue = 18_044_948_562_336,
 		RequiredTier1 = 20639121408,
-		EstimatedTier1Cost = 1.06493333129e21,
+		EstimatedTier1Cost = 1.0649333312870076e21,
 		MergeInto = 31,
 	},
 	-- [31] = {
@@ -428,7 +428,7 @@ local BalanceSettings = {
 	DropValueBase = 1,
 	ThreeMergeDropValueGrowth = 4.5,
 	TwoMergeDropValueGrowth = 2.8,
-	LategameDropValueGrowth = 2.8,
+	LategameDropValueGrowth = 2.3,
 	EndgameDropValueGrowth = 2.8,
 }
 

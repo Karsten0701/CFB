@@ -29,6 +29,7 @@ return {
 	GroupRewardLikeUnlocked = false,
 	LastLogoutAt = 0,
 	FavoritePromptShown = false,
+	UpdateLogSeen = false,
 	ManaInBag = 0,
 	ManaInDeposit = 0,
 	LifetimeYen = 0,

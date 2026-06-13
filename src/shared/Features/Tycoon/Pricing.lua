@@ -12,7 +12,7 @@ local RATE_PRICE_GROWTH = 1.22
 local RATE_PRICE_GAIN_VALUE = 19
 local MAX_UNIT_BUY_AMOUNT = 1e100
 local MAX_RATE_BUY_AMOUNT = 10000
-local UNIT_INCREMENT_SCALE_INTERVAL = 1_000_000_000
+local UNIT_INCREMENT_SCALE_INTERVAL = 50_000_000
 
 local UNIT_BULK_DISCOUNTS = {
 	[5] = 0.075,
@@ -83,17 +83,39 @@ function Pricing.getUnitBulkPrice(
 	spawnTier: number?,
 	unitScaleCount: number?
 ): number
-	amount = math.max(math.floor(amount), 0)
+	purchaseCount = math.max(math.floor(tonumber(purchaseCount) or 0), 0)
+	amount = math.max(math.floor(tonumber(amount) or 0), 0)
 	if amount <= 0 then
 		return 0
 	end
+	local originalAmount = amount
 
 	local scaleCount = if unitScaleCount ~= nil then unitScaleCount else purchaseCount
+	local firstPrice = math.max(math.floor(tonumber(TycoonConfig.UnitPriceFirst) or 5), 1)
+	local secondPrice = math.max(math.floor(tonumber(TycoonConfig.UnitPriceSecond) or 10), firstPrice)
+	local increment = Pricing.getUnitPriceIncrement(scaleCount, spawnTier)
 	local totalPrice = 0
-	for offset = 0, amount - 1 do
-		totalPrice += Pricing.getUnitPrice(purchaseCount + offset, spawnTier, scaleCount)
+
+	if purchaseCount <= 0 and amount > 0 then
+		totalPrice += firstPrice
+		purchaseCount += 1
+		amount -= 1
 	end
-	local discount = getUnitBulkDiscount(amount, useMaxDiscount)
+
+	if purchaseCount == 1 and amount > 0 then
+		totalPrice += secondPrice
+		purchaseCount += 1
+		amount -= 1
+	end
+
+	if amount > 0 then
+		local firstLinearIndex = purchaseCount - 1
+		local lastLinearIndex = firstLinearIndex + amount - 1
+		local linearIndexSum = (firstLinearIndex + lastLinearIndex) * amount / 2
+		totalPrice += amount * secondPrice + linearIndexSum * increment
+	end
+
+	local discount = getUnitBulkDiscount(originalAmount, useMaxDiscount)
 	return math.max(math.floor(totalPrice * (1 - discount)), 0)
 end
 

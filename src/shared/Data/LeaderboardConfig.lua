@@ -8,19 +8,21 @@ LeaderboardConfig.MinPublishIntervalSeconds = 180
 LeaderboardConfig.WriteBudgetWaitTimeout = 25
 LeaderboardConfig.WriteSpacing = 0.6
 LeaderboardConfig.LowBudgetWarnCooldown = 300
-LeaderboardConfig.TopTierRigRefreshInterval = 15
-LeaderboardConfig.MaxEntries = 100
+LeaderboardConfig.TopTierRigRefreshInterval = 60
+LeaderboardConfig.MaxEntries = 50
 LeaderboardConfig.DataStorePrefix = "CFB_GlobalLeaderboard_v3_"
 LeaderboardConfig.LegacyTieBreakModulus = 1_000_000
 -- Values above these are auto-reset to 0 on the leaderboard (not removed/hidden).
 LeaderboardConfig.SanityMax = {
 	Rebirths = 50,
+	LifetimeYen = 1e300,
+	TotalUnitsBought = 1e300,
 	PlaytimeSeconds = 10 * 365 * 24 * 60 * 60,
 }
 LeaderboardConfig.ReadRetryCount = 3
 LeaderboardConfig.ReadRetryDelaySeconds = 2
 LeaderboardConfig.DisplayReadSpacing = 0.6
-LeaderboardConfig.DisplayEnrichMaxEntries = 25
+LeaderboardConfig.DisplayEnrichMaxEntries = 0
 
 LeaderboardConfig.Boards = {
 	Rebirth = {

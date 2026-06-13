@@ -84,4 +84,8 @@ function PlayerDataController:MarkFavoritePromptShown()
 	return Knit.GetService("PlayerDataService"):MarkFavoritePromptShown()
 end
 
+function PlayerDataController:MarkUpdateLogSeen()
+	return Knit.GetService("PlayerDataService"):MarkUpdateLogSeen()
+end
+
 return PlayerDataController

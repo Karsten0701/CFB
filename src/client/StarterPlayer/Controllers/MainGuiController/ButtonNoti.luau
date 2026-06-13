@@ -5,11 +5,11 @@ local ButtonNoti = {}
 local WIGGLE_INTERVAL = 10
 local WIGGLE_DEGREES = 10
 local WIGGLE_STEP_DURATION = 0.12
+local BASE_ROTATION = 0
 
 type NotiState = {
 	wiggleToken: number,
 	wiggleRunning: boolean,
-	baseRotation: number,
 }
 
 local states: { [string]: NotiState } = {}
@@ -20,7 +20,6 @@ local function getState(buttonKey: string): NotiState
 		state = {
 			wiggleToken = 0,
 			wiggleRunning = false,
-			baseRotation = 0,
 		}
 		states[buttonKey] = state
 	end
@@ -38,11 +37,11 @@ local function tweenRotation(noti: GuiObject, rotation: number, duration: number
 	tween.Completed:Wait()
 end
 
-local function playWiggleStep(noti: GuiObject, baseRotation: number, flipPositive: boolean)
+local function playWiggleStep(noti: GuiObject, flipPositive: boolean)
 	local offset = if flipPositive then WIGGLE_DEGREES else -WIGGLE_DEGREES
-	tweenRotation(noti, baseRotation + offset, WIGGLE_STEP_DURATION)
-	tweenRotation(noti, baseRotation - offset, WIGGLE_STEP_DURATION * 2)
-	tweenRotation(noti, baseRotation, WIGGLE_STEP_DURATION)
+	tweenRotation(noti, BASE_ROTATION + offset, WIGGLE_STEP_DURATION)
+	tweenRotation(noti, BASE_ROTATION - offset, WIGGLE_STEP_DURATION * 2)
+	tweenRotation(noti, BASE_ROTATION, WIGGLE_STEP_DURATION)
 end
 
 function ButtonNoti.getNoti(MainGuiController, buttonName: string): GuiObject?
@@ -59,6 +58,7 @@ function ButtonNoti.hideInitially(MainGuiController, buttonName: string)
 	local noti = ButtonNoti.getNoti(MainGuiController, buttonName)
 	if noti then
 		noti.Visible = false
+		noti.Rotation = BASE_ROTATION
 	end
 end
 
@@ -67,7 +67,7 @@ function ButtonNoti.stop(buttonKey: string, noti: GuiObject?)
 	state.wiggleToken += 1
 	state.wiggleRunning = false
 	if noti then
-		noti.Rotation = state.baseRotation
+		noti.Rotation = BASE_ROTATION
 	end
 end
 
@@ -79,14 +79,14 @@ function ButtonNoti.start(buttonKey: string, noti: GuiObject)
 
 	state.wiggleRunning = true
 	state.wiggleToken += 1
-	state.baseRotation = noti.Rotation
+	noti.Rotation = BASE_ROTATION
 	local wiggleToken = state.wiggleToken
 
 	task.spawn(function()
 		local flipPositive = false
 		while wiggleToken == state.wiggleToken and noti.Parent and noti.Visible do
 			flipPositive = not flipPositive
-			playWiggleStep(noti, state.baseRotation, flipPositive)
+			playWiggleStep(noti, flipPositive)
 
 			if wiggleToken ~= state.wiggleToken or not noti.Parent or not noti.Visible then
 				break
@@ -97,7 +97,7 @@ function ButtonNoti.start(buttonKey: string, noti: GuiObject)
 
 		state.wiggleRunning = false
 		if wiggleToken == state.wiggleToken and noti.Parent then
-			noti.Rotation = state.baseRotation
+			noti.Rotation = BASE_ROTATION
 		end
 	end)
 end

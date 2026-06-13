@@ -259,9 +259,13 @@ function YenUpgrades.Install(MainGuiController)
 		ButtonNoti.update(self, UPGRADES_NOTI_KEY, UPGRADES_BUTTON_NAME, self:shouldShowUpgradesButtonNoti())
 	end
 
-	function MainGuiController:updateYenUpgradesFrame()
+	function MainGuiController:updateYenUpgradesFrame(force: boolean?)
 		local frame = self:getYenUpgradesFrame()
 		if not frame then
+			return
+		end
+		if not force and not frame.Visible then
+			self:updateUpgradesButtonNoti()
 			return
 		end
 
@@ -327,7 +331,7 @@ function YenUpgrades.Install(MainGuiController)
 
 		frame.Visible = false
 		OpenFrame.SetupFrame(frame)
-		self:updateYenUpgradesFrame()
+		self:updateYenUpgradesFrame(true)
 
 		local closeButton = frame:FindFirstChild("CloseButton", true)
 		if closeButton and closeButton:IsA("GuiObject") then
@@ -361,9 +365,9 @@ function YenUpgrades.Install(MainGuiController)
 		if upgradesButton then
 			self:connectYenUpgradeGuiActivated(upgradesButton, function()
 				upgradesNotiDismissed = true
-				self:updateYenUpgradesFrame()
 				self:updateUpgradesButtonNoti()
 				OpenFrame.Toggle(frame)
+				self:updateYenUpgradesFrame(true)
 			end)
 		end
 

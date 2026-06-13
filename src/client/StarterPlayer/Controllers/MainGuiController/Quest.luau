@@ -281,7 +281,7 @@ function Quest.Install(MainGuiController)
 		end
 	end
 
-	function MainGuiController:updateQuestsFrame()
+	function MainGuiController:updateQuestsFrame(force: boolean?)
 		self:updateQuestsAccess()
 		if not self:areQuestsUnlocked() then
 			return
@@ -289,6 +289,10 @@ function Quest.Install(MainGuiController)
 
 		local frame = self:getQuestsFrame()
 		if not frame then
+			return
+		end
+		if not force and not frame.Visible then
+			self:updateQuestsButtonNoti()
 			return
 		end
 
@@ -359,8 +363,8 @@ function Quest.Install(MainGuiController)
 		task.spawn(function()
 			while timerRunning do
 				local frame = self:getQuestsFrame()
-				if frame and self:areQuestsUnlocked() then
-					self:updateQuestsFrame()
+				if frame and frame.Visible and self:areQuestsUnlocked() then
+					self:updateQuestCategoryTimers(frame)
 				end
 				task.wait(1)
 			end
@@ -381,7 +385,7 @@ function Quest.Install(MainGuiController)
 
 		activeCategory = "Hourly"
 		self:setActiveQuestCategory(frame, activeCategory)
-		self:updateQuestsFrame()
+		self:updateQuestsFrame(true)
 		self:startQuestTimerLoop()
 
 		local closeButton = frame:FindFirstChild("CloseButton", true)
@@ -452,13 +456,13 @@ function Quest.Install(MainGuiController)
 
 				local PlayerDataController = Knit.GetController("PlayerDataController")
 				acknowledgeQuestPeriods(PlayerDataController:Get("Quests"))
-				self:updateQuestsFrame()
-				self:updateQuestsButtonNoti()
 				local QuestService = Knit.GetService("QuestService")
 				QuestService:LogQuestOpened():catch(function(err)
 					warn("[MainGuiController] Quest open analytics failed:", err)
 				end)
 				OpenFrame.Toggle(frame)
+				self:updateQuestsFrame(true)
+				self:updateQuestsButtonNoti()
 			end)
 		end
 

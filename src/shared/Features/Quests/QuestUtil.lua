@@ -408,6 +408,11 @@ function QuestUtil.computeQuestTarget(
 
 	if questType == "ReachTier" then
 		local offset = (scaling.ReachTierOffset or {})[category] or 0
+		local maxOffsetHighestTier = math.floor(tonumber(scaling.ReachTierMaxOffsetHighestTier) or 20)
+		if highestTier >= AnimeDroppers.MaxTier or highestTier > maxOffsetHighestTier then
+			return math.clamp(highestTier, 2, AnimeDroppers.MaxTier)
+		end
+
 		return math.clamp(highestTier + offset, 2, AnimeDroppers.MaxTier)
 	end
 

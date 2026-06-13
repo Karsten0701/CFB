@@ -66,6 +66,7 @@ local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
 local OTHER_TYCOON_BATCH_SIZE = 1
 local OTHER_TYCOON_BATCH_DELAY = 0.08
 local BUTTON_PRICE_UPDATE_DELAY = 0.04
+local STANDING_ACTION_CHECK_INTERVAL = 0.1
 local ROBUX_ICON = ""
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
@@ -1348,15 +1349,23 @@ function TycoonController:startStandingLoop()
 		return
 	end
 
-	standingLoopConnection = RunService.Heartbeat:Connect(function()
+	local standingCheckElapsed = 0
+	standingLoopConnection = RunService.Heartbeat:Connect(function(deltaTime)
 		local now = os.clock()
 		if actionTycoon and now - lastGroupRewardDisplayAt >= 1 then
 			lastGroupRewardDisplayAt = now
 			self:updateGroupRewardDisplay(actionTycoon)
 		end
 
+		standingCheckElapsed += deltaTime
+		if standingCheckElapsed < STANDING_ACTION_CHECK_INTERVAL then
+			return
+		end
+
+		standingCheckElapsed = 0
+		local root = ButtonPress.GetLocalRoot()
 		for head in buttonActions do
-			local standing = ButtonPress.IsStandingOn(head)
+			local standing = ButtonPress.IsRootStandingOn(root, head)
 			local action = buttonActions[head]
 			local isSellAllProduct = action and action.kind == "sell_all_product"
 
@@ -1405,7 +1414,7 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 	renderer:setEntitlements({})
 	if isOwn then
 		local CapsuleController = Knit.GetController("CapsuleController")
-		renderer:setOnManaDropSpawned(function(dropPart: BasePart, onResult: (boolean) -> (), isCancelled: () -> boolean)
+		renderer:setOnManaDropSpawned(function(dropPart: BasePart, onResult: ((boolean) -> ())?, isCancelled: (() -> boolean)?)
 			CapsuleController:trySpawnCapsuleFromDrop(dropPart, onResult, isCancelled)
 		end)
 	end

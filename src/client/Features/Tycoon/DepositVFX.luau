@@ -15,6 +15,24 @@ local BEAM_THICKNESS = 2.5
 local MIN_BEAM_INTERVAL = 0.42
 local DEFAULT_PROCESS_INTERVAL = 1
 
+type OrbAnimation = {
+	Orb: Instance,
+	StartPosition: Vector3,
+	ControlA: Vector3,
+	ControlB: Vector3,
+	EndPosition: Vector3,
+	StartTime: number,
+	BurstStart: Vector3?,
+	BurstEnd: Vector3?,
+	BurstStartedAt: number?,
+}
+
+type BeamAnimation = {
+	Beam: BasePart,
+	BaseCFrame: CFrame,
+	StartedAt: number,
+}
+
 local TRAIL_COLOR_START = Color3.fromRGB(140, 220, 255)
 local TRAIL_COLOR_MID = Color3.fromRGB(70, 165, 255)
 local TRAIL_COLOR_END = Color3.fromRGB(25, 95, 210)
@@ -220,6 +238,9 @@ function DepositVFX.new(tycoon: Instance, janitor: any)
 	self.folder = getVfxFolder(tycoon, janitor)
 	self.processorDropTemplate = getProcessorDropTemplate(tycoon)
 	self.activeOrbs = 0
+	self.orbAnimations = {}
+	self.beamAnimations = {}
+	self.animationConnection = nil
 	self.lastBeamAt = 0
 	self.beamLoopToken = 0
 	self.beamLoopActive = false
@@ -236,10 +257,100 @@ function DepositVFX:setEnabled(enabled: boolean)
 	end
 
 	self:setProcessorActive(false)
+	if self.animationConnection then
+		self.animationConnection:Disconnect()
+		self.animationConnection = nil
+	end
+	table.clear(self.orbAnimations)
+	table.clear(self.beamAnimations)
 	for _, child in self.folder:GetChildren() do
 		child:Destroy()
 	end
 	self.activeOrbs = 0
+end
+
+function DepositVFX:ensureAnimationLoop()
+	if self.animationConnection then
+		return
+	end
+
+	self.animationConnection = RunService.Heartbeat:Connect(function()
+		local now = os.clock()
+
+		for orb, animation: OrbAnimation in self.orbAnimations do
+			if not self.enabled or not orb.Parent then
+				self.orbAnimations[orb] = nil
+				if orb.Parent then
+					orb:Destroy()
+				end
+				self.activeOrbs = math.max(self.activeOrbs - 1, 0)
+				continue
+			end
+
+			local alpha = math.clamp((now - animation.StartTime) / ORB_GATHER_TIME, 0, 1)
+			if alpha < 1 then
+				if alpha > 0 then
+					local eased = smoothStep(alpha)
+					local position = cubicBezier(
+						animation.StartPosition,
+						animation.ControlA,
+						animation.ControlB,
+						animation.EndPosition,
+						eased
+					)
+					setVisualCFrame(orb, CFrame.new(position))
+				end
+				continue
+			end
+
+			if not animation.BurstStartedAt then
+				animation.BurstStart = animation.EndPosition
+				animation.BurstEnd = animation.EndPosition + randomUnitVector() * math.random(3, 7)
+				animation.BurstStartedAt = now
+			end
+
+			local burstAlpha = math.clamp((now - animation.BurstStartedAt) / ORB_BURST_TIME, 0, 1)
+			local eased = 1 - (1 - burstAlpha) ^ 2
+			local burstStart = animation.BurstStart or animation.EndPosition
+			local burstEnd = animation.BurstEnd or animation.EndPosition
+			setVisualCFrame(orb, CFrame.new(burstStart:Lerp(burstEnd, eased)))
+			setVisualScale(orb, 0.75 * (1 - eased))
+			setVisualTransparency(orb, eased)
+
+			if burstAlpha >= 1 then
+				self.orbAnimations[orb] = nil
+				orb:Destroy()
+				self.activeOrbs = math.max(self.activeOrbs - 1, 0)
+			end
+		end
+
+		for beam, animation: BeamAnimation in self.beamAnimations do
+			if not self.enabled or not beam.Parent then
+				self.beamAnimations[beam] = nil
+				if beam.Parent then
+					beam:Destroy()
+				end
+				continue
+			end
+
+			local alpha = math.clamp((now - animation.StartedAt) / BEAM_LIFETIME, 0, 1)
+			local eased = 1 - (1 - alpha) ^ 3
+			local height = 0.25 + (BEAM_HEIGHT - 0.25) * eased
+			beam.Size = Vector3.new(height, BEAM_THICKNESS, BEAM_THICKNESS)
+			beam.CFrame = animation.BaseCFrame * CFrame.new(0, height / 2, 0) * CFrame.Angles(0, 0, math.rad(90))
+			beam.Transparency = 0.1 + alpha * 0.85
+
+			if alpha >= 1 then
+				self.beamAnimations[beam] = nil
+				beam:Destroy()
+			end
+		end
+
+		if next(self.orbAnimations) == nil and next(self.beamAnimations) == nil then
+			self.animationConnection:Disconnect()
+			self.animationConnection = nil
+		end
+	end)
 end
 
 function DepositVFX:createOrb(): Instance
@@ -293,50 +404,17 @@ function DepositVFX:playDeposit(amount: number)
 		local startTime = os.clock() + (index - 1) * 0.012
 
 		setVisualCFrame(orb, CFrame.new(orbStart))
-
-		task.spawn(function()
-			while orb.Parent do
-				local alpha = math.clamp((os.clock() - startTime) / ORB_GATHER_TIME, 0, 1)
-				if alpha > 0 then
-					local eased = smoothStep(alpha)
-					local position = cubicBezier(orbStart, controlA, controlB, endPosition, eased)
-					setVisualCFrame(orb, CFrame.new(position))
-				end
-
-				if alpha >= 1 then
-					break
-				end
-
-				RunService.Heartbeat:Wait()
-			end
-
-			if orb.Parent then
-				local burstStart = endPosition
-				local burstEnd = burstStart + randomUnitVector() * math.random(3, 7)
-				local burstStartedAt = os.clock()
-
-				while orb.Parent do
-					local alpha = math.clamp((os.clock() - burstStartedAt) / ORB_BURST_TIME, 0, 1)
-					local eased = 1 - (1 - alpha) ^ 2
-					setVisualCFrame(orb, CFrame.new(burstStart:Lerp(burstEnd, eased)))
-					setVisualScale(orb, 0.75 * (1 - eased))
-					setVisualTransparency(orb, eased)
-
-					if alpha >= 1 then
-						break
-					end
-
-					RunService.Heartbeat:Wait()
-				end
-
-				if orb.Parent then
-					orb:Destroy()
-				end
-			end
-
-			self.activeOrbs = math.max(self.activeOrbs - 1, 0)
-		end)
+		self.orbAnimations[orb] = {
+			Orb = orb,
+			StartPosition = orbStart,
+			ControlA = controlA,
+			ControlB = controlB,
+			EndPosition = endPosition,
+			StartTime = startTime,
+		}
 	end
+
+	self:ensureAnimationLoop()
 
 	task.delay(0.28, function()
 		self:pulseBeam(true)
@@ -401,31 +479,12 @@ function DepositVFX:pulseBeam(force: boolean?)
 	beam.Size = Vector3.new(0.25, BEAM_THICKNESS, BEAM_THICKNESS)
 	beam.Parent = self.folder
 
-	local baseCFrame = beamPos.CFrame
-	local startedAt = os.clock()
-	local connection: RBXScriptConnection?
-	connection = RunService.Heartbeat:Connect(function()
-		if not beam.Parent then
-			if connection then
-				connection:Disconnect()
-			end
-			return
-		end
-
-		local alpha = math.clamp((os.clock() - startedAt) / BEAM_LIFETIME, 0, 1)
-		local eased = 1 - (1 - alpha) ^ 3
-		local height = 0.25 + (BEAM_HEIGHT - 0.25) * eased
-		beam.Size = Vector3.new(height, BEAM_THICKNESS, BEAM_THICKNESS)
-		beam.CFrame = baseCFrame * CFrame.new(0, height / 2, 0) * CFrame.Angles(0, 0, math.rad(90))
-		beam.Transparency = 0.1 + alpha * 0.85
-
-		if alpha >= 1 then
-			if connection then
-				connection:Disconnect()
-			end
-			beam:Destroy()
-		end
-	end)
+	self.beamAnimations[beam] = {
+		Beam = beam,
+		BaseCFrame = beamPos.CFrame,
+		StartedAt = os.clock(),
+	}
+	self:ensureAnimationLoop()
 end
 
 return DepositVFX

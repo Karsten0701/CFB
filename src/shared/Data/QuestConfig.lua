@@ -122,10 +122,11 @@ QuestConfig.Scaling = {
 	},
 
 	ReachTierOffset = {
-		Hourly = 0,
-		Daily = 1,
+		Hourly = 1,
+		Daily = 2,
 		Weekly = 5,
 	},
+	ReachTierMaxOffsetHighestTier = 20,
 }
 
 QuestConfig.Pool = {

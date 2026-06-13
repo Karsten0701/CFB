@@ -22,6 +22,7 @@ local sortedReadUnavailable: { [string]: boolean } = {}
 local playerPublishConnections: { [Player]: { RBXScriptConnection } } = {}
 local dirtyPlayers: { [Player]: boolean } = {}
 local displayValueCache: { [string]: { [number]: { Value: number, FetchedAt: number } } } = {}
+local authoritativeValueCache: { [string]: { [number]: { Value: number, FetchedAt: number } } } = {}
 local dirtyDebounceScheduled: { [Player]: boolean } = {}
 local publishQueue: { [Player]: boolean } = {}
 local lastPublishAttemptAt: { [Player]: number } = {}
@@ -43,12 +44,18 @@ end
 local LOG_SORT_SCALE = 1_000_000
 local ORDERED_SORT_MAX = 2_147_483_647
 local DISPLAY_VALUE_CACHE_SECONDS = 300
+local AUTHORITATIVE_VALUE_CACHE_SECONDS = 600
 local lastLowBudgetWarnAt = -math.huge
 local lastPublishErrorWarnAt = -math.huge
 local lastReadErrorWarnAt = -math.huge
 
 local function normalizeValue(value: any): number
-	return math.max(math.floor(tonumber(value) or 0), 0)
+	value = tonumber(value) or 0
+	if value ~= value or value == math.huge or value == -math.huge then
+		return 0
+	end
+
+	return math.max(math.floor(value), 0)
 end
 
 local function getLegacyTieBreakModulus(): number
@@ -370,12 +377,84 @@ local function getSortValue(boardConfig, value: number): number
 	return getPrimarySortValue(boardConfig, value)
 end
 
+local function clearLeaderboardValueCaches(boardName: string, userId: number)
+	if displayValueCache[boardName] then
+		displayValueCache[boardName][userId] = nil
+	end
+	if authoritativeValueCache[boardName] then
+		authoritativeValueCache[boardName][userId] = nil
+	end
+end
+
 local function getPlayerValue(PlayerDataService, player: Player, boardConfig): number
 	local rawValue = if boardConfig.DataPath == "PlaytimeSeconds"
 		then PlayerDataService:GetPlaytimeSeconds(player)
 		else PlayerDataService:Get(player, boardConfig.DataPath)
 
 	return prepareLeaderboardValue(PlayerDataService, player, boardConfig, rawValue)
+end
+
+local function getAuthoritativeLeaderboardValue(
+	boardName: string,
+	boardConfig,
+	userId: number,
+	PlayerDataService
+): number?
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 or type(boardConfig.DataPath) ~= "string" then
+		return nil
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		return getPlayerValue(PlayerDataService, onlinePlayer, boardConfig)
+	end
+
+	authoritativeValueCache[boardName] = authoritativeValueCache[boardName] or {}
+	local cached = authoritativeValueCache[boardName][userId]
+	if cached and os.clock() - cached.FetchedAt < AUTHORITATIVE_VALUE_CACHE_SECONDS then
+		return cached.Value
+	end
+
+	local ok, valueOrErr = pcall(function()
+		return PlayerDataService:GetLeaderboardValueByUserId(userId, boardConfig.DataPath)
+	end)
+	if not ok or type(valueOrErr) ~= "number" then
+		return nil
+	end
+
+	local value = prepareLeaderboardValue(PlayerDataService, nil, boardConfig, valueOrErr)
+	authoritativeValueCache[boardName][userId] = {
+		Value = value,
+		FetchedAt = os.clock(),
+	}
+	return value
+end
+
+local function republishBoardWithAuthoritativeValue(
+	boardName: string,
+	boardConfig,
+	userId: number,
+	value: number
+)
+	local sortValue = getSortValue(boardConfig, value)
+	task.spawn(function()
+		if isShuttingDown() then
+			return
+		end
+
+		publishBoardForUserId(userId, boardName, boardConfig, value, sortValue)
+	end)
+end
+
+local function getCachedAuthoritativeValue(boardName: string, userId: number): number?
+	local boardCache = authoritativeValueCache[boardName]
+	local cached = boardCache and boardCache[userId]
+	if cached and os.clock() - cached.FetchedAt < AUTHORITATIVE_VALUE_CACHE_SECONDS then
+		return cached.Value
+	end
+
+	return nil
 end
 
 local function resolveDisplayValue(boardConfig, sortValue: number): number
@@ -720,7 +799,11 @@ function LeaderboardService:getDisplayValue(boardName: string, boardConfig, user
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 	displayValueCache[boardName] = displayValueCache[boardName] or {}
 	local cached = displayValueCache[boardName][userId]
-	if cached and os.clock() - cached.FetchedAt < DISPLAY_VALUE_CACHE_SECONDS then
+	if
+		cached
+		and os.clock() - cached.FetchedAt < DISPLAY_VALUE_CACHE_SECONDS
+		and not isCorruptOrderedSortValue(boardConfig, sortValue)
+	then
 		return cached.Value
 	end
 
@@ -737,6 +820,20 @@ function LeaderboardService:getDisplayValue(boardName: string, boardConfig, user
 			}
 			return displayValue
 		end
+	end
+
+	local authoritativeValue = getAuthoritativeLeaderboardValue(boardName, boardConfig, userId, PlayerDataService)
+	if authoritativeValue ~= nil then
+		local authoritativeSortValue = getSortValue(boardConfig, authoritativeValue)
+		if authoritativeSortValue ~= normalizeValue(sortValue) then
+			republishBoardWithAuthoritativeValue(boardName, boardConfig, userId, authoritativeValue)
+		end
+
+		displayValueCache[boardName][userId] = {
+			Value = authoritativeValue,
+			FetchedAt = os.clock(),
+		}
+		return authoritativeValue
 	end
 
 	if isCorruptOrderedSortValue(boardConfig, sortValue) then
@@ -905,10 +1002,17 @@ function LeaderboardService:buildBoardEntriesFromPages(
 		end
 
 		local sortValue = normalizeValue(item.value)
+		local value = self:getDisplayValue(boardName, boardConfig, userId, sortValue)
+		local authoritativeValue = getCachedAuthoritativeValue(boardName, userId)
+		if authoritativeValue ~= nil then
+			value = authoritativeValue
+			sortValue = getSortValue(boardConfig, authoritativeValue)
+		end
+
 		table.insert(entries, {
 			UserId = userId,
 			SortValue = sortValue,
-			Value = self:getDisplayValue(boardName, boardConfig, userId, sortValue),
+			Value = value,
 		})
 	end
 
@@ -928,10 +1032,17 @@ function LeaderboardService:buildFallbackBoardEntries(
 			return
 		end
 
+		local value = self:getDisplayValue(boardName, boardConfig, userId, sortValue)
+		local authoritativeValue = getCachedAuthoritativeValue(boardName, userId)
+		if authoritativeValue ~= nil then
+			value = authoritativeValue
+			sortValue = getSortValue(boardConfig, authoritativeValue)
+		end
+
 		entriesByUser[userId] = {
 			UserId = userId,
 			SortValue = sortValue,
-			Value = self:getDisplayValue(boardName, boardConfig, userId, sortValue),
+			Value = value,
 		}
 	end
 
@@ -1078,9 +1189,7 @@ function LeaderboardService:RemoveUserFromBoard(
 		return false
 	end
 
-	if displayValueCache[boardName] then
-		displayValueCache[boardName][userId] = nil
-	end
+	clearLeaderboardValueCaches(boardName, userId)
 	if lastPublishedValues[userId] then
 		lastPublishedValues[userId][boardName] = nil
 	end

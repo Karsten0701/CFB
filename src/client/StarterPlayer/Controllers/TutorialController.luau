@@ -55,6 +55,7 @@ local STEP_TEXT = {
 
 local currentStep = "PickupDrop"
 local CORE_TUTORIAL_COMPLETE_STEP = "WaitForRebirthReady"
+local GUIDE_UPDATE_INTERVAL = 0.1
 local rewardConnections: { RBXScriptConnection } = {}
 local dataConnections: { RBXScriptConnection } = {}
 local guideConnection: RBXScriptConnection? = nil
@@ -963,10 +964,21 @@ function TutorialController:startGuideLoop()
 		return
 	end
 
-	guideConnection = RunService.RenderStepped:Connect(function()
+	local elapsed = 0
+	guideConnection = RunService.RenderStepped:Connect(function(dt)
+		elapsed += dt
+		if elapsed < GUIDE_UPDATE_INTERVAL then
+			return
+		end
+		elapsed = 0
+
 		if not self:shouldTrack() then
 			clearGuide()
 			clearTutorialFingers()
+			if guideConnection then
+				guideConnection:Disconnect()
+				guideConnection = nil
+			end
 			return
 		end
 

@@ -13,6 +13,10 @@ local QuestService = Knit.CreateService({
 	Client = {},
 })
 
+local QUEST_STAT_FLUSH_DELAY = 1
+local pendingQuestStats: { [Player]: { [string]: number } } = {}
+local questStatFlushScheduled: { [Player]: boolean } = {}
+
 local function areQuestsUnlocked(PlayerDataService, player: Player): boolean
 	return math.max(math.floor(tonumber(PlayerDataService:Get(player, "Rebirths")) or 0), 0) >= 1
 end
@@ -179,7 +183,7 @@ local function refreshCategoryProgress(PlayerDataService, player: Player, catego
 	end
 end
 
-local function incrementCategoryStat(player: Player, statKey: string, amount: number)
+local function incrementCategoryStatNow(player: Player, statKey: string, amount: number)
 	if amount <= 0 then
 		return
 	end
@@ -198,19 +202,53 @@ local function incrementCategoryStat(player: Player, statKey: string, amount: nu
 	end
 end
 
+function QuestService:FlushPendingStats(player: Player)
+	questStatFlushScheduled[player] = nil
+	local pending = pendingQuestStats[player]
+	if not pending then
+		return
+	end
+
+	pendingQuestStats[player] = nil
+	for statKey, amount in pending do
+		incrementCategoryStatNow(player, statKey, amount)
+	end
+end
+
+function QuestService:QueueStat(player: Player, statKey: string, amount: number)
+	amount = math.max(math.floor(tonumber(amount) or 0), 0)
+	if amount <= 0 then
+		return
+	end
+
+	pendingQuestStats[player] = pendingQuestStats[player] or {}
+	pendingQuestStats[player][statKey] = (pendingQuestStats[player][statKey] or 0) + amount
+
+	if questStatFlushScheduled[player] then
+		return
+	end
+
+	questStatFlushScheduled[player] = true
+	task.delay(QUEST_STAT_FLUSH_DELAY, function()
+		if player.Parent then
+			self:FlushPendingStats(player)
+		else
+			pendingQuestStats[player] = nil
+			questStatFlushScheduled[player] = nil
+		end
+	end)
+end
+
 function QuestService:TrackYenEarned(player: Player, amount: number)
-	self:EnsureQuestsFresh(player)
-	incrementCategoryStat(player, "YenEarned", amount)
+	self:QueueStat(player, "YenEarned", amount)
 end
 
 function QuestService:TrackUnitsBought(player: Player, amount: number)
-	self:EnsureQuestsFresh(player)
-	incrementCategoryStat(player, "UnitsBought", amount)
+	self:QueueStat(player, "UnitsBought", amount)
 end
 
 function QuestService:TrackManaCollected(player: Player, amount: number)
-	self:EnsureQuestsFresh(player)
-	incrementCategoryStat(player, "ManaCollected", amount)
+	self:QueueStat(player, "ManaCollected", amount)
 end
 
 local function rollCategoryQuests(PlayerDataService, player: Player, category: string, now: number)
@@ -436,6 +474,12 @@ end
 function QuestService:KnitStart()
 	local Players = game:GetService("Players")
 	local PlayerDataService = Knit.GetService("PlayerDataService")
+
+	Players.PlayerRemoving:Connect(function(player)
+		self:FlushPendingStats(player)
+		pendingQuestStats[player] = nil
+		questStatFlushScheduled[player] = nil
+	end)
 
 	local function bindPlayer(player: Player)
 		task.spawn(function()

@@ -281,7 +281,6 @@ function TopTierRig.refresh(PlayerDataService)
 		and currentTrack
 		and currentTrack.IsPlaying
 	then
-		startDanceForRig(rig)
 		return
 	end
 

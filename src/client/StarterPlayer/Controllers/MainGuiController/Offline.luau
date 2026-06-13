@@ -20,6 +20,8 @@ local offlineRewardRequestOpen = false
 local offlineRewardClaimed = false
 local offlineRobuxPromptOpen = false
 local offlineRewardListenersBound = false
+local offlineRewardFinishedCallback: (() -> ())? = nil
+local offlineRewardFinishedNotified = false
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
 	if firstArg == localPlayer then
@@ -34,6 +36,19 @@ local function isLocalProductPromptFinished(firstArg: any): boolean
 end
 
 function Offline.Install(MainGuiController)
+
+function MainGuiController:notifyOfflineRewardFlowFinished()
+	if offlineRewardFinishedNotified then
+		return
+	end
+
+	offlineRewardFinishedNotified = true
+	local callback = offlineRewardFinishedCallback
+	offlineRewardFinishedCallback = nil
+	if callback then
+		callback()
+	end
+end
 
 function MainGuiController:clearOfflineRewardConnections()
 	for _, connection in offlineRewardConnections do
@@ -117,6 +132,10 @@ function MainGuiController:finishOfflineRewardClaim(frame: GuiObject?, reward: n
 		SoundUtil.RewardClaim()
 		self:ShowOfflineRewardMessage(reward, multiplier)
 	end
+
+	task.delay(0.16, function()
+		self:notifyOfflineRewardFlowFinished()
+	end)
 end
 
 function MainGuiController:claimOfflineReward(frame: GuiObject?)
@@ -124,6 +143,9 @@ function MainGuiController:claimOfflineReward(frame: GuiObject?)
 		if frame then
 			OpenFrame.Toggle(frame, false)
 		end
+		task.delay(0.16, function()
+			self:notifyOfflineRewardFlowFinished()
+		end)
 		return
 	end
 
@@ -261,8 +283,12 @@ function MainGuiController:setupOfflineEarningFrame()
 	end
 end
 
-function MainGuiController:showOfflineEarningAfterDelay()
+function MainGuiController:showOfflineEarningAfterDelay(afterOfflineReward: (() -> ())?)
+	offlineRewardFinishedCallback = afterOfflineReward
+	offlineRewardFinishedNotified = false
+
 	if offlineRewardClaimed then
+		self:notifyOfflineRewardFlowFinished()
 		return
 	end
 
@@ -271,11 +297,13 @@ function MainGuiController:showOfflineEarningAfterDelay()
 	local offlineConfig = TycoonConfig.OfflineReward or {}
 	task.delay(tonumber(offlineConfig.ClaimPopupDelay) or 20, function()
 		if offlineRewardClaimed then
+			self:notifyOfflineRewardFlowFinished()
 			return
 		end
 
 		local frame = self:getOfflineEarningFrame()
 		if not frame then
+			self:notifyOfflineRewardFlowFinished()
 			return
 		end
 
@@ -283,6 +311,7 @@ function MainGuiController:showOfflineEarningAfterDelay()
 		TycoonService:GetOfflineReward()
 			:andThen(function(success, payload)
 				if not success or type(payload) ~= "table" or payload.Eligible ~= true then
+					self:notifyOfflineRewardFlowFinished()
 					return
 				end
 
@@ -291,6 +320,7 @@ function MainGuiController:showOfflineEarningAfterDelay()
 			end)
 			:catch(function(err)
 				warn("[MainGuiController] Failed to get offline reward:", err)
+				self:notifyOfflineRewardFlowFinished()
 			end)
 	end)
 end

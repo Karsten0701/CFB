@@ -5,9 +5,12 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SocialService = game:GetService("SocialService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local ExperienceEventConfig = require(ReplicatedStorage.Shared.Data.ExperienceEventConfig)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
+local OpenFrame = require(ReplicatedStorage.Shared.Observers.OpenFrame)
 local Pricing = require(ReplicatedStorage.Shared.Features.Tycoon.Pricing)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
@@ -40,6 +43,9 @@ local LOADING_FORCED_FINISH_DURATION = 0.45
 local NEW_UNIT_POPUP_HOLD_TIME = 2.4
 local YEN_ICON_IMAGE = "rbxassetid://96573285096968"
 local REBIRTH_TOKEN_ICON_IMAGE = "rbxassetid://107689343391713"
+local UPDATE_LOG_ICON_IMAGE = "rbxassetid://127950751570533"
+local FEEDBACK_ICON_IMAGE = "rbxassetid://85885975543495"
+local JOIN_EVENT_ICON_IMAGE = "rbxassetid://71317030306496"
 
 local displayedValues = {
 	ManaBag = 0,
@@ -48,9 +54,16 @@ local displayedValues = {
 
 local homeIcon = nil
 local lastHomeTeleportAt = 0
+local updateLogIcon = nil
+local boundUpdateLogFrame: GuiObject? = nil
+local updateLogCloseConnection: RBXScriptConnection? = nil
+local updateLogVisibleConnection: RBXScriptConnection? = nil
 local feedbackIcon = nil
 local feedbackPromptOpen = false
 local lastFeedbackPromptAt = 0
+local joinEventIcon = nil
+local joinEventPromptOpen = false
+local lastJoinEventPromptAt = 0
 local activeMessages = {}
 local nextMessageLayoutOrder = 0
 local indexWarnedMissingGui = false
@@ -65,6 +78,35 @@ local animationTokens = {
 	ManaBag = 0,
 	YenShow = 0,
 }
+
+local function isTouchTopbarDevice(): boolean
+	if not UserInputService.TouchEnabled then
+		return false
+	end
+
+	if not UserInputService.KeyboardEnabled or not UserInputService.MouseEnabled then
+		return true
+	end
+
+	local camera = workspace.CurrentCamera
+	local viewportSize = if camera then camera.ViewportSize else Vector2.zero
+	return math.min(viewportSize.X, viewportSize.Y) <= 900
+end
+
+local function applyResponsiveTopbarButtonStyle(icon: any, label: string, image: string, desktopWidth: number)
+	local compact = isTouchTopbarDevice()
+	icon:setLabel(if compact then "" else label)
+	icon:setImage(image)
+	icon:setImageScale(if compact then 0.68 else 0.56)
+	icon:modifyTheme({
+		{ "Widget", "MinimumWidth", if compact then 42 else desktopWidth - 14 },
+		{ "Widget", "DesiredWidth", if compact then 42 else desktopWidth },
+		{ "Widget", "MinimumHeight", 44 },
+		{ "IconLabel", "TextSize", 17 },
+		{ "PaddingLeft", "Size", UDim2.new(0, if compact then 0 else 9, 1, 0) },
+		{ "PaddingRight", "Size", UDim2.new(0, if compact then 0 else 11, 1, 0) },
+	})
+end
 
 local function isTextGui(instance: Instance): boolean
 	return instance:IsA("TextLabel") or instance:IsA("TextButton")
@@ -295,6 +337,22 @@ function MainGuiController:getSettingsFrame(): GuiObject?
 
 	local settingsFrame = mainGui:FindFirstChild("SettingsFrame")
 	return if settingsFrame and settingsFrame:IsA("GuiObject") then settingsFrame else nil
+end
+
+function MainGuiController:getUpdateLogFrame(): GuiObject?
+	local mainGui = self:getMainGui()
+	if not mainGui then
+		return nil
+	end
+
+	for _, frameName in { "UpdateLogFrame", "UpdateLog", "UpdateLogGui" } do
+		local frame = mainGui:FindFirstChild(frameName, true)
+		if frame and frame:IsA("GuiObject") then
+			return frame
+		end
+	end
+
+	return nil
 end
 
 function MainGuiController:getOfflineEarningFrame(): GuiObject?
@@ -994,6 +1052,86 @@ function MainGuiController:setupHomeIcon()
 	end)
 end
 
+function MainGuiController:setupUpdateLogIcon()
+	if updateLogIcon then
+		return
+	end
+
+	updateLogIcon = Icon.new()
+		:setName("UpdateLog")
+		:setLabel("Update Log")
+		:setImage(UPDATE_LOG_ICON_IMAGE)
+		:setCaption("Open update log")
+		:setOrder(9999)
+		:align("Right")
+
+	applyResponsiveTopbarButtonStyle(updateLogIcon, "Update Log", UPDATE_LOG_ICON_IMAGE, 150)
+
+	updateLogIcon.selected:Connect(function()
+		local updateLogFrame = self:getUpdateLogFrame()
+		if not updateLogFrame then
+			self:showMessage("UpdateLogUnavailable", "Update log is unavailable right now.")
+			updateLogIcon:deselect("MissingFrame", updateLogIcon)
+			return
+		end
+
+		self:setupUpdateLogFrame()
+		OpenFrame.Toggle(updateLogFrame, true)
+	end)
+
+	updateLogIcon.deselected:Connect(function()
+		local updateLogFrame = self:getUpdateLogFrame()
+		if updateLogFrame then
+			self:setupUpdateLogFrame()
+			OpenFrame.Toggle(updateLogFrame, false)
+		end
+	end)
+end
+
+function MainGuiController:setupUpdateLogFrame()
+	local updateLogFrame = self:getUpdateLogFrame()
+	if not updateLogFrame then
+		return
+	end
+
+	if boundUpdateLogFrame == updateLogFrame then
+		return
+	end
+
+	if updateLogCloseConnection then
+		updateLogCloseConnection:Disconnect()
+		updateLogCloseConnection = nil
+	end
+	if updateLogVisibleConnection then
+		updateLogVisibleConnection:Disconnect()
+		updateLogVisibleConnection = nil
+	end
+
+	boundUpdateLogFrame = updateLogFrame
+	updateLogFrame.Visible = false
+	OpenFrame.SetupFrame(updateLogFrame)
+
+	updateLogVisibleConnection = updateLogFrame:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not updateLogFrame.Visible and updateLogIcon then
+			updateLogIcon:deselect("FrameClosed", updateLogIcon)
+		end
+	end)
+
+	local topBar = updateLogFrame:FindFirstChild("TopBar")
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true) or updateLogFrame:FindFirstChild("CloseButton", true)
+	if closeButton and closeButton:IsA("GuiObject") then
+		local clickable = self:getClickableGui(closeButton)
+		if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
+			updateLogCloseConnection = clickable.Activated:Connect(function()
+				OpenFrame.Toggle(updateLogFrame, false)
+				if updateLogIcon then
+					updateLogIcon:deselect("CloseButton", updateLogIcon)
+				end
+			end)
+		end
+	end
+end
+
 function MainGuiController:setupFeedbackIcon()
 	if feedbackIcon then
 		return
@@ -1002,16 +1140,13 @@ function MainGuiController:setupFeedbackIcon()
 	feedbackIcon = Icon.new()
 		:setName("Feedback")
 		:setLabel("Feedback")
+		:setImage(FEEDBACK_ICON_IMAGE)
 		:setCaption("Send feedback")
-		:setOrder(9999)
+		:setOrder(9998)
 		:align("Right")
 		:oneClick(true)
 
-	feedbackIcon:modifyTheme({
-		{ "Widget", "MinimumWidth", 118 },
-		{ "Widget", "DesiredWidth", 132 },
-		{ "IconLabel", "TextSize", 17 },
-	})
+	applyResponsiveTopbarButtonStyle(feedbackIcon, "Feedback", FEEDBACK_ICON_IMAGE, 132)
 
 	feedbackIcon.selected:Connect(function()
 		local now = os.clock()
@@ -1033,6 +1168,90 @@ function MainGuiController:setupFeedbackIcon()
 			end
 		end)
 	end)
+end
+
+function MainGuiController:setupJoinEventIcon()
+	if joinEventIcon then
+		return
+	end
+
+	joinEventIcon = Icon.new()
+		:setName("JoinEvent")
+		:setLabel("Join Event")
+		:setImage(JOIN_EVENT_ICON_IMAGE)
+		:setCaption("RSVP to the next event")
+		:setOrder(9997)
+		:align("Right")
+		:oneClick(true)
+
+	applyResponsiveTopbarButtonStyle(joinEventIcon, "Join Event", JOIN_EVENT_ICON_IMAGE, 146)
+
+	joinEventIcon.selected:Connect(function()
+		local now = os.clock()
+		if joinEventPromptOpen or now - lastJoinEventPromptAt < 2 then
+			return
+		end
+
+		local eventId = tostring(ExperienceEventConfig.EventId or "")
+		if eventId == "" then
+			self:showMessage("JoinEventNotConfigured", "Event RSVP is not configured yet.")
+			return
+		end
+
+		joinEventPromptOpen = true
+		lastJoinEventPromptAt = now
+		task.spawn(function()
+			local success, err = pcall(function()
+				SocialService:PromptRsvpToEventAsync(eventId)
+			end)
+
+			joinEventPromptOpen = false
+			if not success then
+				warn("[MainGuiController] Event RSVP prompt failed:", err)
+				self:showMessage("JoinEventUnavailable", "Event RSVP is unavailable right now.")
+			end
+		end)
+	end)
+end
+
+function MainGuiController:refreshResponsiveTopbarButtons()
+	if updateLogIcon then
+		applyResponsiveTopbarButtonStyle(updateLogIcon, "Update Log", UPDATE_LOG_ICON_IMAGE, 150)
+	end
+
+	if feedbackIcon then
+		applyResponsiveTopbarButtonStyle(feedbackIcon, "Feedback", FEEDBACK_ICON_IMAGE, 132)
+	end
+
+	if joinEventIcon then
+		applyResponsiveTopbarButtonStyle(joinEventIcon, "Join Event", JOIN_EVENT_ICON_IMAGE, 146)
+	end
+end
+
+function MainGuiController:setupResponsiveTopbarButtons()
+	self:refreshResponsiveTopbarButtons()
+end
+
+function MainGuiController:showUpdateLogOnFirstJoin()
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	if PlayerDataController:Get("UpdateLogSeen") == true then
+		return
+	end
+
+	local updateLogFrame = self:getUpdateLogFrame()
+	if not updateLogFrame then
+		return
+	end
+
+	self:setupUpdateLogIcon()
+	self:setupUpdateLogFrame()
+	if updateLogIcon then
+		updateLogIcon:select("FirstJoin", updateLogIcon)
+	else
+		OpenFrame.Toggle(updateLogFrame, true)
+	end
+
+	PlayerDataController:MarkUpdateLogSeen()
 end
 
 function MainGuiController:getClickableGui(root: GuiObject): GuiObject
@@ -1169,7 +1388,11 @@ function MainGuiController:updateAll(instant: boolean?)
 		else yen
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
+	self:setupJoinEventIcon()
 	self:setupFeedbackIcon()
+	self:setupUpdateLogIcon()
+	self:setupUpdateLogFrame()
+	self:setupResponsiveTopbarButtons()
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()
@@ -1204,7 +1427,11 @@ function MainGuiController:KnitStart()
 	self:startLoadingScreen()
 	self:setupSettingsFeature()
 	self:setupHomeIcon()
+	self:setupJoinEventIcon()
 	self:setupFeedbackIcon()
+	self:setupUpdateLogIcon()
+	self:setupUpdateLogFrame()
+	self:setupResponsiveTopbarButtons()
 	self:setupShopFeature()
 	self:setupRebirthFrame()
 	self:setupUpgradesFrame()
@@ -1235,17 +1462,17 @@ function MainGuiController:KnitStart()
 		self:syncRebirthReadyState(false)
 		self:refreshSettingsFeature()
 		self:setupFavoritePrompt()
-		self:showOfflineEarningAfterDelay()
+		self:showOfflineEarningAfterDelay(function()
+			self:showUpdateLogOnFirstJoin()
+		end)
 
 		PlayerDataController:Observe("ManaInBag", function()
 			self:updateManaBag()
-			self:updateQuestsFrame()
 		end)
 
 		PlayerDataController:Observe("Yen", function()
 			self:updateYenShow()
 			self:updateYenUpgradesFrame()
-			self:updateQuestsFrame()
 		end)
 
 		PlayerDataController:Observe({ "PurchasedProducts", "DoubleYen" }, function()
@@ -1349,22 +1576,6 @@ function MainGuiController:KnitStart()
 		end)
 
 		PlayerDataController:Observe("PlaytimeSeconds", function()
-			self:updateQuestsFrame()
-		end)
-
-		PlayerDataController:Observe("LifetimeYen", function()
-			self:updateQuestsFrame()
-		end)
-
-		PlayerDataController:Observe("TotalUnitsPurchased", function()
-			self:updateQuestsFrame()
-		end)
-
-		PlayerDataController:Observe("Units", function()
-			self:updateQuestsFrame()
-		end)
-
-		PlayerDataController:Observe("Rebirths", function()
 			self:updateQuestsFrame()
 		end)
 

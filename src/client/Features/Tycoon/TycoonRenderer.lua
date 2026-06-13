@@ -17,6 +17,8 @@ TycoonRenderer.__index = TycoonRenderer
 local DROP_INTERVAL = 6
 local MAX_ACTIVE_DROPS = 150
 local MAX_DROP_SPAWNS_PER_FRAME = 4
+local DROP_LOOP_INTERVAL = 0.1
+local PICKUP_CHECK_INTERVAL = 0.05
 local DROP_MAX_FALL_SPEED = 26
 local DROP_NEAR_FLOOR_HEIGHT = 5
 local DROP_NEAR_FLOOR_MAX_SPEED = 5
@@ -41,6 +43,7 @@ local OTHER_UNIT_POOL_LIMIT_PER_TIER = 80
 local UNIT_DESTROY_BATCH_SIZE = 4
 local UNIT_DESTROY_BATCH_DELAY = 0.03
 local UNIT_POOL_CFRAME = CFrame.new(0, -10000, 0)
+local UNIT_DROP_HOP_ENABLED = false
 local UNIT_DROP_HOP_TOP_FLOORS_SKIPPED = 5
 local UNIT_DROP_HOP_MAX_STARTS_PER_FRAME = 18
 local UNIT_DROP_HOP_DURATION = 0.34
@@ -688,6 +691,10 @@ function TycoonRenderer:scheduleUnitDrop(entry, unitIndex: number, now: number?,
 end
 
 function TycoonRenderer:shouldAnimateUnitDropHop(unitIndex: number): boolean
+	if not UNIT_DROP_HOP_ENABLED then
+		return false
+	end
+
 	if not self.isOwn then
 		return false
 	end
@@ -1938,9 +1945,17 @@ function TycoonRenderer:ensurePickupLoop()
 		return
 	end
 
+	local pickupCheckElapsed = 0
 	self.pickupConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		pickupCheckElapsed += deltaTime
+		if pickupCheckElapsed < PICKUP_CHECK_INTERVAL then
+			return
+		end
+
+		pickupCheckElapsed = 0
 		local root = self:getLocalRoot()
 		local autoCollect = self.entitlements.AutoCollect and self:getAutoCollectPart() or nil
+		local rootPosition = if root then root.Position else nil
 
 		for orb, entry in self.activeOrbs do
 			if not orb.Parent then
@@ -1951,16 +1966,22 @@ function TycoonRenderer:ensurePickupLoop()
 			self:limitDropFallSpeed(orb, entry)
 
 			local pickupRangeMultiplier = math.max(tonumber(self.entitlements.PickupRangeMultiplier) or 1, 1)
-			local pickedByPlayer = root ~= nil and (root.Position - orb.Position).Magnitude <= 3 * pickupRangeMultiplier
-			local pickedByAutoCollect = autoCollect ~= nil and self:isPointInsidePart(autoCollect, orb.Position)
-			if pickedByPlayer or pickedByAutoCollect or not self:isInsideDropBounds(orb.Position) then
+			local pickupRange = 3 * pickupRangeMultiplier
+			local orbPosition = orb.Position
+			local pickedByPlayer = false
+			if rootPosition then
+				local offset = rootPosition - orbPosition
+				pickedByPlayer = offset:Dot(offset) <= pickupRange * pickupRange
+			end
+			local pickedByAutoCollect = autoCollect ~= nil and self:isPointInsidePart(autoCollect, orbPosition)
+			if pickedByPlayer or pickedByAutoCollect or not self:isInsideDropBounds(orbPosition) then
 				self:pickupOrb(orb)
 			end
 		end
 	end)
 end
 
-function TycoonRenderer:setOnManaDropSpawned(handler: ((BasePart, (boolean) -> (), () -> boolean) -> ())?)
+function TycoonRenderer:setOnManaDropSpawned(handler: ((BasePart, ((boolean) -> ())?, (() -> boolean)?) -> ())?)
 	self.onManaDropSpawned = handler
 end
 
@@ -2018,35 +2039,7 @@ function TycoonRenderer:trySpawnManaDrop(dropPart: BasePart, tier: number, value
 		return self:spawnManaDrop(dropPart, tier, value, skipPrune)
 	end
 
-	local settled = false
-	local spawnCapsule = false
-
-	local function settle(replaced: boolean)
-		if settled then
-			return
-		end
-
-		settled = true
-		spawnCapsule = replaced
-	end
-
-	self.onManaDropSpawned(dropPart, settle, function()
-		return settled
-	end)
-
-	local deadline = os.clock() + 0.35
-	while not settled and os.clock() < deadline do
-		RunService.Heartbeat:Wait()
-	end
-
-	if not settled then
-		settled = true
-	end
-
-	if spawnCapsule then
-		return true
-	end
-
+	self.onManaDropSpawned(dropPart, nil, nil)
 	return self:spawnManaDrop(dropPart, tier, value, skipPrune)
 end
 
@@ -2133,7 +2126,14 @@ function TycoonRenderer:ensureDropLoop()
 	end
 
 	self.nextMutationAt = os.clock() + self:getMutationInterval()
-	self.dropLoopConnection = RunService.Heartbeat:Connect(function()
+	local dropLoopElapsed = 0
+	self.dropLoopConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		dropLoopElapsed += deltaTime
+		if dropLoopElapsed < DROP_LOOP_INTERVAL then
+			return
+		end
+
+		dropLoopElapsed = 0
 		local now = os.clock()
 		local interval = self:getDropInterval()
 		local activeDropCount = self:pruneActiveDrops()
