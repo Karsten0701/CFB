@@ -1,7 +1,7 @@
 return {
 	Name = "clearLeaderboard",
 	Aliases = { "clearleaderboard", "lbremove" },
-	Description = "Remove a user from the leaderboard DataStore by UserId without changing their saved progress.",
+	Description = "Remove a user from leaderboards and add them to the persistent blacklist (saved across servers).",
 	Group = "DefaultAdmin",
 	Args = {
 		{ Type = "integer", Name = "userId", Description = "Roblox UserId" },

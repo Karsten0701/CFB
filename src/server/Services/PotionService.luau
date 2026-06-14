@@ -214,6 +214,33 @@ function PotionService.Client:UsePotion(player: Player, potionType: string)
 	return self.Server:UsePotion(player, potionType)
 end
 
+function PotionService:AdminActivatePotion(player: Player, potionType: string, durationSeconds: number?): (boolean, string?)
+	if not table.find(POTION_TYPES, potionType) then
+		return false, "invalid_potion_type"
+	end
+
+	local typeConfig = PotionConfig.getTypeConfig(potionType)
+	if not typeConfig then
+		return false, "invalid_potion_type"
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local activeBoosts = snapshotActiveBoosts(PlayerDataService:Get(player, "ActivePotionBoosts"))
+	local boostDuration = if durationSeconds and durationSeconds > 0
+		then math.min(math.floor(durationSeconds), MAX_ACTIVE_BOOST_SECONDS)
+		else PotionConfig.DurationSeconds
+
+	activeBoosts[potionType] = {
+		RemainingSeconds = boostDuration,
+		Multiplier = typeConfig.Multiplier,
+	}
+	PlayerDataService:Set(player, "ActivePotionBoosts", activeBoosts)
+	lastTickAt[player] = os.clock()
+	return true, nil
+end
+
 function PotionService:KnitStart()
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 

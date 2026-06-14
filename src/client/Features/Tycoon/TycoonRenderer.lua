@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
+local DeviceUtil = require(ReplicatedStorage.Shared.Features.DeviceUtil)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Grid = require(ReplicatedStorage.Shared.Features.Tycoon.Grid)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
@@ -18,7 +19,6 @@ local DROP_INTERVAL = 6
 local MAX_ACTIVE_DROPS = 150
 local MAX_DROP_SPAWNS_PER_FRAME = 4
 local DROP_LOOP_INTERVAL = 0.1
-local PICKUP_CHECK_INTERVAL = 0.05
 local DROP_MAX_FALL_SPEED = 26
 local DROP_NEAR_FLOOR_HEIGHT = 5
 local DROP_NEAR_FLOOR_MAX_SPEED = 5
@@ -1931,13 +1931,7 @@ function TycoonRenderer:animatePickupOrb(orb: BasePart, container: Instance?)
 end
 
 function TycoonRenderer:getLocalRoot(): BasePart?
-	local character = Players.LocalPlayer.Character
-	if not character then
-		return nil
-	end
-
-	local root = character:FindFirstChild("HumanoidRootPart")
-	return if root and root:IsA("BasePart") then root else nil
+	return DeviceUtil.getLocalCharacterRoot()
 end
 
 function TycoonRenderer:ensurePickupLoop()
@@ -1946,16 +1940,16 @@ function TycoonRenderer:ensurePickupLoop()
 	end
 
 	local pickupCheckElapsed = 0
+	local pickupCheckInterval = DeviceUtil.getPickupCheckInterval()
 	self.pickupConnection = RunService.Heartbeat:Connect(function(deltaTime)
 		pickupCheckElapsed += deltaTime
-		if pickupCheckElapsed < PICKUP_CHECK_INTERVAL then
+		if pickupCheckElapsed < pickupCheckInterval then
 			return
 		end
 
 		pickupCheckElapsed = 0
 		local root = self:getLocalRoot()
 		local autoCollect = self.entitlements.AutoCollect and self:getAutoCollectPart() or nil
-		local rootPosition = if root then root.Position else nil
 
 		for orb, entry in self.activeOrbs do
 			if not orb.Parent then
@@ -1966,13 +1960,9 @@ function TycoonRenderer:ensurePickupLoop()
 			self:limitDropFallSpeed(orb, entry)
 
 			local pickupRangeMultiplier = math.max(tonumber(self.entitlements.PickupRangeMultiplier) or 1, 1)
-			local pickupRange = 3 * pickupRangeMultiplier
+			local pickupRange = 3 * pickupRangeMultiplier * DeviceUtil.getPickupRangeMultiplier()
 			local orbPosition = orb.Position
-			local pickedByPlayer = false
-			if rootPosition then
-				local offset = rootPosition - orbPosition
-				pickedByPlayer = offset:Dot(offset) <= pickupRange * pickupRange
-			end
+			local pickedByPlayer = DeviceUtil.isWithinPickupRange(root, orbPosition, pickupRange)
 			local pickedByAutoCollect = autoCollect ~= nil and self:isPointInsidePart(autoCollect, orbPosition)
 			if pickedByPlayer or pickedByAutoCollect or not self:isInsideDropBounds(orbPosition) then
 				self:pickupOrb(orb)

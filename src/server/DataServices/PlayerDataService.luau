@@ -33,6 +33,7 @@ local PLAYTIME_PERSIST_INTERVAL = 60
 local MAX_REASONABLE_PLAYTIME_SECONDS = 10 * 365 * 24 * 60 * 60
 local MAX_REASONABLE_REBIRTHS = 50
 local MAX_ACTIVE_BOOST_SECONDS = 24 * 60 * 60
+local PROFILE_STORE_INDEX = "PLAYERDATA"
 
 local LEADERBOARD_STAT_PATHS = {
 	Rebirths = true,
@@ -406,11 +407,13 @@ local function ensureManaData(data: { [string]: any })
 
 	data.LifetimeYen = finiteNonNegativeInteger(data.LifetimeYen, data.Yen)
 
-	data.TotalUnitsBought = finiteNonNegativeInteger(data.TotalUnitsBought, finiteNonNegativeInteger(data.TotalUnitsPurchased, 0))
+	data.TotalUnitsBought =
+		finiteNonNegativeInteger(data.TotalUnitsBought, finiteNonNegativeInteger(data.TotalUnitsPurchased, 0))
 
 	data.TotalUnitsPurchased = finiteNonNegativeInteger(data.TotalUnitsPurchased, 0)
 
-	data.PlaytimeSeconds = math.clamp(finiteNonNegativeInteger(data.PlaytimeSeconds, 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
+	data.PlaytimeSeconds =
+		math.clamp(finiteNonNegativeInteger(data.PlaytimeSeconds, 0), 0, MAX_REASONABLE_PLAYTIME_SECONDS)
 
 	if type(data.LeaderboardAchievedAt) ~= "table" then
 		data.LeaderboardAchievedAt = {}
@@ -620,7 +623,8 @@ local function ensureManaData(data: { [string]: any })
 	if #data.Units <= 0 then
 		data.Units = normalizeUnits(getStarterUnits())
 	end
-	data.TotalUnitsBought = math.max(data.TotalUnitsBought, finiteNonNegativeInteger(Pricing.getBaseUnitCount(data.Units), 0))
+	data.TotalUnitsBought =
+		math.max(data.TotalUnitsBought, finiteNonNegativeInteger(Pricing.getBaseUnitCount(data.Units), 0))
 
 	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers(data.UnlockedAnimeDroppers, data.Units)
 end
@@ -756,6 +760,15 @@ function PlayerDataService:KnitInit()
 		end)
 		logInitialAnalyticsFunnels(player, data)
 
+		task.defer(function()
+			local ok, TycoonService = pcall(function()
+				return Knit.GetService("TycoonService")
+			end)
+			if ok and TycoonService then
+				TycoonService:AssignTycoon(player)
+			end
+		end)
+
 		PlayerDataService:Observe(player, "Yen", function()
 			syncLeaderstats(player)
 		end)
@@ -771,7 +784,7 @@ function PlayerDataService:KnitInit()
 
 	DataService:init({
 		template = DataTemplate,
-		profileStoreIndex = "PLAYERDATA", --PLAYERDATA gameversion
+		profileStoreIndex = PROFILE_STORE_INDEX,
 	})
 end
 
@@ -1079,9 +1092,7 @@ end
 
 local function getUnitSpawnTierFromData(data: { [string]: any }): number
 	local upgrades = data.RebirthUpgrades
-	local level = if type(upgrades) == "table"
-		then finiteNonNegativeInteger(upgrades.UnitSpawnTier, 0)
-		else 0
+	local level = if type(upgrades) == "table" then finiteNonNegativeInteger(upgrades.UnitSpawnTier, 0) else 0
 	return RebirthUpgrades.getUnitSpawnTier(level)
 end
 

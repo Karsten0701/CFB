@@ -26,6 +26,7 @@ local TycoonService = Knit.CreateService({
 
 local playerTycoons: { [Player]: Instance } = {}
 local playerCharacterConnections: { [Player]: RBXScriptConnection } = {}
+local assignRetryScheduled: { [Player]: boolean } = {}
 local pickupBudget: { [Player]: number } = {}
 local pickupBudgetUpdatedAt: { [Player]: number } = {}
 local mutationPickupAt: { [Player]: number } = {}
@@ -569,66 +570,195 @@ local function getMaxPickupRate(player: Player, units: { { Tier: number } }): nu
 	return math.max(total, 1)
 end
 
-function TycoonService:AssignTycoon(player: Player)
-	local PlayerDataService = Knit.GetService("PlayerDataService")
-	PlayerDataService:WaitForData(player)
+local function releaseTycoonInstance(tycoon: Instance)
+	tycoon:SetAttribute("Claimed", false)
+	tycoon:SetAttribute("Owner", 0)
+end
 
-	local existingName = PlayerDataService:Get(player, "TycoonName")
-	if existingName and existingName ~= "" then
-		local existingTycoon = TycoonUtil.getPlayerTycoon(player, existingName)
-		if existingTycoon then
-			playerTycoons[player] = existingTycoon
-			resetPickupBudgetTimer(player)
+local function findTycoonOwnedBy(player: Player): Instance?
+	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
+	if not tycoonsFolder then
+		return nil
+	end
 
-			if not playerCharacterConnections[player] then
-				playerCharacterConnections[player] = player.CharacterAdded:Connect(function()
-					TycoonUtil.teleportToSpawn(player, existingTycoon)
-				end)
-			end
-
-			TycoonUtil.teleportToSpawn(player, existingTycoon)
-			return
+	for _, tycoon in tycoonsFolder:GetChildren() do
+		if math.floor(tonumber(tycoon:GetAttribute("Owner")) or 0) == player.UserId then
+			return tycoon
 		end
 	end
 
+	return nil
+end
+
+local function isTycoonAvailableForPlayer(tycoon: Instance, player: Player): boolean
+	if tycoon:GetAttribute("Claimed") ~= true then
+		return true
+	end
+
+	local ownerUserId = math.floor(tonumber(tycoon:GetAttribute("Owner")) or 0)
+	if ownerUserId <= 0 or ownerUserId == player.UserId then
+		return true
+	end
+
+	return Players:GetPlayerByUserId(ownerUserId) == nil
+end
+
+local function bindPlayerCharacterToTycoon(player: Player, tycoon: Instance)
+	if not playerCharacterConnections[player] then
+		playerCharacterConnections[player] = player.CharacterAdded:Connect(function()
+			TycoonUtil.teleportToSpawn(player, tycoon)
+		end)
+	end
+
+	if player.Character then
+		TycoonUtil.teleportToSpawn(player, tycoon)
+	end
+end
+
+local function claimTycoonForPlayer(player: Player, tycoon: Instance, PlayerDataService)
+	releaseTycoonInstance(tycoon)
+	tycoon:SetAttribute("Claimed", true)
+	tycoon:SetAttribute("Owner", player.UserId)
+	PlayerDataService:Set(player, "TycoonName", tycoon.Name)
+	playerTycoons[player] = tycoon
+	resetPickupBudgetTimer(player)
+	bindPlayerCharacterToTycoon(player, tycoon)
+end
+
+function TycoonService:cleanupOrphanedTycoons()
 	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
 	if not tycoonsFolder then
-		warn("[TycoonService] Tycoons folder not found")
 		return
 	end
 
 	for _, tycoon in tycoonsFolder:GetChildren() do
 		if tycoon:GetAttribute("Claimed") ~= true then
-			tycoon:SetAttribute("Claimed", true)
-			tycoon:SetAttribute("Owner", player.UserId)
-			PlayerDataService:Set(player, "TycoonName", tycoon.Name)
-			playerTycoons[player] = tycoon
-			resetPickupBudgetTimer(player)
+			continue
+		end
 
-			if not playerCharacterConnections[player] then
-				playerCharacterConnections[player] = player.CharacterAdded:Connect(function()
-					TycoonUtil.teleportToSpawn(player, tycoon)
-				end)
-			end
+		local ownerUserId = math.floor(tonumber(tycoon:GetAttribute("Owner")) or 0)
+		if ownerUserId <= 0 then
+			releaseTycoonInstance(tycoon)
+			continue
+		end
 
-			if player.Character then
-				TycoonUtil.teleportToSpawn(player, tycoon)
-			end
-			return
+		local owner = Players:GetPlayerByUserId(ownerUserId)
+		if not owner then
+			releaseTycoonInstance(tycoon)
+			continue
+		end
+
+		if playerTycoons[owner] == tycoon then
+			continue
+		end
+
+		if playerTycoons[owner] == nil then
+			task.defer(function()
+				if owner.Parent then
+					self:AssignTycoon(owner)
+				end
+			end)
+		else
+			releaseTycoonInstance(tycoon)
+		end
+	end
+end
+
+function TycoonService:scheduleAssignRetry(player: Player, delaySeconds: number?)
+	if assignRetryScheduled[player] then
+		return
+	end
+
+	assignRetryScheduled[player] = true
+	task.delay(delaySeconds or 2, function()
+		assignRetryScheduled[player] = nil
+		if player.Parent then
+			self:AssignTycoon(player)
+		end
+	end)
+end
+
+function TycoonService:AssignTycoon(player: Player): boolean
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	self:cleanupOrphanedTycoons()
+
+	local assignedTycoon = playerTycoons[player]
+	if assignedTycoon and assignedTycoon.Parent then
+		bindPlayerCharacterToTycoon(player, assignedTycoon)
+		if PlayerDataService:Get(player, "TycoonName") ~= assignedTycoon.Name then
+			PlayerDataService:Set(player, "TycoonName", assignedTycoon.Name)
+		end
+		return true
+	end
+
+	local existingName = PlayerDataService:Get(player, "TycoonName")
+	if existingName and existingName ~= "" then
+		local savedTycoon = TycoonUtil.getTycoonByName(existingName)
+		if savedTycoon and isTycoonAvailableForPlayer(savedTycoon, player) then
+			claimTycoonForPlayer(player, savedTycoon, PlayerDataService)
+			return true
+		end
+
+		if not savedTycoon then
+			self:scheduleAssignRetry(player, 1)
+			return false
+		end
+
+		warn("[TycoonService] Saved tycoon unavailable for", player.Name, existingName)
+		PlayerDataService:Set(player, "TycoonName", "")
+	end
+
+	local ownedTycoon = findTycoonOwnedBy(player)
+	if ownedTycoon and isTycoonAvailableForPlayer(ownedTycoon, player) then
+		claimTycoonForPlayer(player, ownedTycoon, PlayerDataService)
+		return true
+	end
+
+	local tycoonsFolder = TycoonUtil.getTycoonsFolder()
+	if not tycoonsFolder then
+		warn("[TycoonService] Tycoons folder not found for", player.Name)
+		self:scheduleAssignRetry(player)
+		return false
+	end
+
+	for _, tycoon in tycoonsFolder:GetChildren() do
+		if isTycoonAvailableForPlayer(tycoon, player) then
+			claimTycoonForPlayer(player, tycoon, PlayerDataService)
+			return true
 		end
 	end
 
 	warn("[TycoonService] No open tycoon for", player.Name)
+	self:scheduleAssignRetry(player)
+	return false
 end
 
 function TycoonService:ReleaseTycoon(player: Player)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
 	local tycoon = playerTycoons[player]
+
+	if not tycoon then
+		tycoon = findTycoonOwnedBy(player)
+	end
+
+	if not tycoon then
+		local ok, tycoonName = pcall(function()
+			PlayerDataService:WaitForData(player)
+			return PlayerDataService:Get(player, "TycoonName")
+		end)
+		if ok and type(tycoonName) == "string" and tycoonName ~= "" then
+			tycoon = TycoonUtil.getTycoonByName(tycoonName)
+		end
+	end
+
 	if tycoon then
-		tycoon:SetAttribute("Claimed", false)
-		tycoon:SetAttribute("Owner", 0)
+		releaseTycoonInstance(tycoon)
 	end
 
 	playerTycoons[player] = nil
+	assignRetryScheduled[player] = nil
 	pickupBudget[player] = nil
 	pickupBudgetUpdatedAt[player] = nil
 	mutationPickupAt[player] = nil
@@ -646,16 +776,6 @@ function TycoonService:ReleaseTycoon(player: Player)
 	if characterConnection then
 		characterConnection:Disconnect()
 		playerCharacterConnections[player] = nil
-	end
-
-	local PlayerDataService = Knit.GetService("PlayerDataService")
-	local ok, tycoonName = pcall(function()
-		return PlayerDataService:Get(player, "TycoonName")
-	end)
-	if ok and tycoonName and tycoonName ~= "" then
-		pcall(function()
-			PlayerDataService:Set(player, "TycoonName", "")
-		end)
 	end
 end
 
@@ -1814,6 +1934,7 @@ end
 
 function TycoonService:KnitStart()
 	setupCollisionGroups()
+	self:cleanupOrphanedTycoons()
 
 	for _, player in Players:GetPlayers() do
 		if player.Character then
@@ -1845,12 +1966,27 @@ function TycoonService:KnitStart()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
-		if GameShutdown.isShuttingDown() then
-			return
-		end
-
 		clearPlayerCapsuleState(player, true)
 		self:ReleaseTycoon(player)
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(5)
+			if GameShutdown.isShuttingDown() then
+				continue
+			end
+
+			self:cleanupOrphanedTycoons()
+
+			for _, player in Players:GetPlayers() do
+				if not playerTycoons[player] then
+					task.spawn(function()
+						self:AssignTycoon(player)
+					end)
+				end
+			end
+		end
 	end)
 
 	local PlayerDataService = Knit.GetService("PlayerDataService")

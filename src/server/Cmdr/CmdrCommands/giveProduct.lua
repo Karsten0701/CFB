@@ -1,7 +1,7 @@
 return {
 	Name = "giveProduct",
 	Aliases = { "giveproduct", "grantproduct" },
-	Description = "Grant a developer product reward to a player (units, 2x Yen, sell all, etc.).",
+	Description = "Grant a developer product reward to a player (units, potions, 2x Yen, sell all, etc.).",
 	Group = "DefaultAdmin",
 	Args = {
 		{ Type = "player", Name = "player", Description = "Target player" },

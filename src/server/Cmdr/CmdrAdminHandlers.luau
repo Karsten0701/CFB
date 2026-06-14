@@ -216,6 +216,51 @@ function Handlers.giveProduct(_context, targetPlayer: Player, productKey: string
 	return `Granted product {productKey} to {targetPlayer.Name}.`
 end
 
+function Handlers.givePotion(_context, targetPlayer: Player, potionType: string, amount: number)
+	local _, err = CmdrUtil.requirePlayerData(targetPlayer)
+	if err then
+		return `Failed: {err}`
+	end
+
+	local PotionService = CmdrUtil.getKnitService("PotionService")
+	if potionType == "Bundle" then
+		if not PotionService:AddPotionsFromBundle(targetPlayer, amount) then
+			return `Failed to grant potion bundle x{math.floor(amount)} to {targetPlayer.Name}.`
+		end
+
+		return `Granted potion bundle x{math.floor(amount)} per type to {targetPlayer.Name}.`
+	end
+
+	if not PotionService:AddPotions(targetPlayer, potionType, amount) then
+		return `Failed to grant {amount} {potionType} potion(s) to {targetPlayer.Name}.`
+	end
+
+	return `Granted {math.floor(amount)} {potionType} potion(s) to {targetPlayer.Name}.`
+end
+
+function Handlers.usePotion(_context, targetPlayer: Player, potionType: string, durationMinutes: number)
+	local _, err = CmdrUtil.requirePlayerData(targetPlayer)
+	if err then
+		return `Failed: {err}`
+	end
+
+	if potionType == "Bundle" then
+		return "Bundle cannot be activated directly. Use Yen, Mana, or Deposit."
+	end
+
+	local PotionService = CmdrUtil.getKnitService("PotionService")
+	local durationSeconds = math.max(math.floor((tonumber(durationMinutes) or 0) * 60), 0)
+	local ok, reason = PotionService:AdminActivatePotion(targetPlayer, potionType, if durationSeconds > 0 then durationSeconds else nil)
+	if not ok then
+		return `Failed to activate {potionType} potion for {targetPlayer.Name}: {reason or "unknown"}`
+	end
+
+	local durationLabel = if durationSeconds > 0
+		then `{math.floor(durationSeconds / 60)} min`
+		else "default duration"
+	return `Activated {potionType} potion for {targetPlayer.Name} ({durationLabel}).`
+end
+
 function Handlers.sellAll(_context, targetPlayer: Player)
 	local _, err = CmdrUtil.requirePlayerData(targetPlayer)
 	if err then
@@ -250,7 +295,7 @@ function Handlers.clearLeaderboard(_context, userId: number, boardName: string)
 	end
 
 	local boardLabel = if boardName == "all" then "all boards" else boardName
-	return `Removed user {userId} from {boardLabel}. Player data was not changed.`
+	return `Removed user {userId} from {boardLabel} and added them to the persistent leaderboard blacklist.`
 end
 
 function Handlers.resetData(_context, targetPlayer: Player)
@@ -425,12 +470,12 @@ function Handlers.addLeaderboard(_context, userId: number)
 	end
 
 	local LeaderboardService = CmdrUtil.getKnitService("LeaderboardService")
-	local ok, err = LeaderboardService:RestoreUserToLeaderboards(userId)
+	local ok, err = LeaderboardService:AllowUserOnLeaderboards(userId)
 	if not ok then
 		return `Failed to restore user {userId} to leaderboards: {err or "unknown"}`
 	end
 
-	return `User {userId} can show on leaderboards again. They will republish when online or on next update.`
+	return `Removed user {userId} from the leaderboard blacklist. They can show on leaderboards again.`
 end
 
 function Handlers.viewData(_context, targetPlayer: Player)

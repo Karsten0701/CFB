@@ -7,6 +7,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
+local DeviceUtil = require(ReplicatedStorage.Shared.Features.DeviceUtil)
 
 ButtonPress.TagName = "Button"
 ButtonPress.Settings = {
@@ -45,29 +46,11 @@ local function isLocalCharacterPart(part: BasePart): boolean
 end
 
 local function getLocalRoot(): BasePart?
-	local character = Players.LocalPlayer.Character
-	if not character then
-		return nil
-	end
-
-	local root = character:FindFirstChild("HumanoidRootPart")
-	return if root and root:IsA("BasePart") then root else nil
+	return DeviceUtil.getLocalCharacterRoot()
 end
 
 local function isRootStandingOn(root: BasePart?, head: BasePart): boolean
-	if not root then
-		return false
-	end
-
-	local rootPosition = root.Position
-	local headPosition = head.Position
-	local offsetX = rootPosition.X - headPosition.X
-	local offsetZ = rootPosition.Z - headPosition.Z
-	local radius = math.max(head.Size.X, head.Size.Y, head.Size.Z) * 0.5
-	local allowedRadius = radius + 0.6
-	local verticalOffset = rootPosition.Y - headPosition.Y
-
-	return offsetX * offsetX + offsetZ * offsetZ <= allowedRadius * allowedRadius and verticalOffset >= 0 and verticalOffset <= 6
+	return DeviceUtil.isRootStandingOnButton(root, head)
 end
 
 function ButtonPress.GetLocalRoot(): BasePart?
@@ -254,7 +237,7 @@ function ButtonPress.Start()
 	local accumulatedTime = 0
 	RunService.Heartbeat:Connect(function(deltaTime)
 		accumulatedTime += deltaTime
-		if accumulatedTime < ButtonPress.Settings.StandingCheckInterval then
+		if accumulatedTime < DeviceUtil.getStandingCheckInterval() then
 			return
 		end
 

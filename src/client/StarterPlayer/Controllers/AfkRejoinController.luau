@@ -55,6 +55,16 @@ function AfkRejoinController:KnitStart()
 	UserInputService.TouchEnded:Connect(markActivity)
 	UserInputService.WindowFocused:Connect(markActivity)
 
+	TeleportService.TeleportInitFailed:Connect(function(player, _result, errorMessage)
+		if player ~= localPlayer then
+			return
+		end
+
+		teleporting = false
+		markActivity()
+		warn("[AfkRejoinController] AFK rejoin teleport init failed:", errorMessage)
+	end)
+
 	task.spawn(function()
 		while true do
 			task.wait(1)

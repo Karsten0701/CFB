@@ -332,55 +332,78 @@ local function getHighestUnitTier(units: any): number
 	return highest
 end
 
-local function getStepFromData(PlayerDataController): string
+local function initStepBaselines(step: string)
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	if step == "PickupDropAgain" then
+		secondCollectBaselineMana = (tonumber(PlayerDataController:Get("ManaInBag")) or 0)
+			+ (tonumber(PlayerDataController:Get("ManaInDeposit")) or 0)
+		secondCollectBaselineYen = tonumber(PlayerDataController:Get("Yen")) or 0
+	elseif step == "DepositManaAgain" then
+		secondDepositBaselineDeposit = tonumber(PlayerDataController:Get("ManaInDeposit")) or 0
+		secondDepositBaselineYen = tonumber(PlayerDataController:Get("Yen")) or 0
+	end
+end
+
+local function getWorkingTutorialStep(PlayerDataController): string
 	local tutorial = PlayerDataController:Get("Tutorial")
-	local savedStep = if type(tutorial) == "table" and type(tutorial.Step) == "string"
-		then tutorial.Step
-		else "PickupDrop"
-	local index = STEP_INDEX[savedStep] or 1
+	if type(tutorial) ~= "table" then
+		return "PickupDrop"
+	end
+
+	if tutorial.RebirthGuideCompleted == true then
+		return "Completed"
+	end
+
+	local savedStep = if type(tutorial.Step) == "string" and tutorial.Step ~= "" then tutorial.Step else "PickupDrop"
+	if not STEP_INDEX[savedStep] then
+		savedStep = "PickupDrop"
+	end
+
+	if tutorial.Completed == true then
+		local minIndex = STEP_INDEX[CORE_TUTORIAL_COMPLETE_STEP]
+		local savedIndex = STEP_INDEX[savedStep] or minIndex
+		savedStep = STEP_ORDER[math.max(savedIndex, minIndex)] or CORE_TUTORIAL_COMPLETE_STEP
+	end
+
+	return savedStep
+end
+
+local function isStepObjectiveComplete(step: string, PlayerDataController): boolean
 	local yen = tonumber(PlayerDataController:Get("Yen")) or 0
 	local manaInBag = tonumber(PlayerDataController:Get("ManaInBag")) or 0
 	local manaInDeposit = tonumber(PlayerDataController:Get("ManaInDeposit")) or 0
 	local totalPurchased = math.max(math.floor(tonumber(PlayerDataController:Get("TotalUnitsPurchased")) or 0), 0)
-	local units = PlayerDataController:Get("Units") or {}
-	local highestTier = getHighestUnitTier(units)
+	local highestTier = getHighestUnitTier(PlayerDataController:Get("Units") or {})
 	local rateLevel = math.max(math.floor(tonumber(PlayerDataController:Get("RateLevel")) or 0), 0)
 	local rebirths = math.max(math.floor(tonumber(PlayerDataController:Get("Rebirths")) or 0), 0)
 	local upgrades = PlayerDataController:Get("RebirthUpgrades")
 	local unitSpawnTierLevel = if type(upgrades) == "table"
 		then math.max(math.floor(tonumber(upgrades.UnitSpawnTier) or 0), 0)
 		else 0
-	local requiredRebirthTier = TycoonConfig.Rebirth.FirstRequiredTier or 5
-	if type(tutorial) == "table" and tutorial.Completed == true then
-		if tutorial.RebirthGuideCompleted == true then
-			return "Completed"
-		end
-
-		index = math.max(index, STEP_INDEX[CORE_TUTORIAL_COMPLETE_STEP])
-	end
-
 	local collectGoal = math.max(math.floor(tonumber(getTutorialConfig().DropCollectGoal) or 5), 1)
 	local collectGoal2 = math.max(math.floor(tonumber(getTutorialConfig().DropCollectGoal2) or 10), 1)
-	local collectedManaProgress = math.max(manaInBag + manaInDeposit, if yen > 0 then collectGoal else 0)
+	local requiredRebirthTier = TycoonConfig.Rebirth.FirstRequiredTier or 5
 	local currentMana = manaInBag + manaInDeposit
 
-	if index == STEP_INDEX.PickupDrop and collectedManaProgress >= collectGoal then
-		index = STEP_INDEX.DepositMana
-	elseif index == STEP_INDEX.DepositMana and (manaInDeposit > 0 or yen > 0) then
-		index = STEP_INDEX.BuySecondUnit
-	elseif index == STEP_INDEX.BuySecondUnit and totalPurchased >= 1 then
-		index = STEP_INDEX.PickupDropAgain
-	elseif index == STEP_INDEX.PickupDropAgain then
+	if step == "PickupDrop" then
+		local collectedManaProgress = math.max(currentMana, if yen > 0 then collectGoal else 0)
+		return collectedManaProgress >= collectGoal
+	elseif step == "DepositMana" then
+		return manaInDeposit > 0 or yen > 0
+	elseif step == "BuySecondUnit" then
+		return totalPurchased >= 1
+	elseif step == "PickupDropAgain" then
 		if secondCollectBaselineMana == nil then
 			secondCollectBaselineMana = currentMana
 			secondCollectBaselineYen = yen
 		end
-		local secondCollectProgress =
-			math.max(currentMana - (secondCollectBaselineMana or currentMana), yen - (secondCollectBaselineYen or yen), 0)
-		if totalPurchased >= 1 and secondCollectProgress >= collectGoal2 then
-			index = STEP_INDEX.DepositManaAgain
-		end
-	elseif index == STEP_INDEX.DepositManaAgain then
+		local secondCollectProgress = math.max(
+			currentMana - (secondCollectBaselineMana or currentMana),
+			yen - (secondCollectBaselineYen or yen),
+			0
+		)
+		return totalPurchased >= 1 and secondCollectProgress >= collectGoal2
+	elseif step == "DepositManaAgain" then
 		if secondDepositBaselineDeposit == nil then
 			secondDepositBaselineDeposit = manaInDeposit
 			secondDepositBaselineYen = yen
@@ -390,30 +413,60 @@ local function getStepFromData(PlayerDataController): string
 			yen - (secondDepositBaselineYen or yen),
 			0
 		)
-		if secondDepositProgress > 0 then
-			index = STEP_INDEX.UpgradeRate
-		end
-	elseif index == STEP_INDEX.UpgradeRate and rateLevel >= 1 then
-		index = STEP_INDEX.BuyThirdUnit
-	elseif index == STEP_INDEX.BuyThirdUnit and totalPurchased >= 2 then
-		index = STEP_INDEX.MergeUnits
-	elseif index == STEP_INDEX.MergeUnits and highestTier >= 2 then
-		index = STEP_INDEX.VisitGroupReward
-	elseif index == STEP_INDEX.WaitForRebirthReady and highestTier >= requiredRebirthTier then
-		index = STEP_INDEX.Rebirth
-	elseif index == STEP_INDEX.Rebirth and rebirths >= 1 then
-		index = STEP_INDEX.OpenUpgrades
-	elseif index == STEP_INDEX.OpenUpgrades and rebirths >= 1 then
+		return secondDepositProgress > 0
+	elseif step == "UpgradeRate" then
+		return rateLevel >= 1
+	elseif step == "BuyThirdUnit" then
+		return totalPurchased >= 2
+	elseif step == "MergeUnits" then
+		return highestTier >= 2
+	elseif step == "VisitGroupReward" then
+		return false
+	elseif step == "WaitForRebirthReady" then
+		return highestTier >= requiredRebirthTier
+	elseif step == "Rebirth" then
+		return rebirths >= 1
+	elseif step == "OpenUpgrades" then
 		local mainGui = localPlayer.PlayerGui:FindFirstChild("MainGui")
 		local upgradesFrame = mainGui and mainGui:FindFirstChild("UpgradesFrame")
-		if upgradesFrame and upgradesFrame:IsA("GuiObject") and upgradesFrame.Visible then
-			index = STEP_INDEX.UpgradeUnitSpawnTier
-		end
-	elseif index == STEP_INDEX.UpgradeUnitSpawnTier and rebirths >= 1 and unitSpawnTierLevel >= 1 then
-		index = STEP_INDEX.Completed
+		return rebirths >= 1 and upgradesFrame and upgradesFrame:IsA("GuiObject") and upgradesFrame.Visible
+	elseif step == "UpgradeUnitSpawnTier" then
+		return rebirths >= 1 and unitSpawnTierLevel >= 1
+	elseif step == "Completed" then
+		return true
 	end
 
-	return STEP_ORDER[index] or "PickupDrop"
+	return false
+end
+
+local function getAdvancedStep(workingStep: string, PlayerDataController): string
+	if workingStep == "Completed" or workingStep == "VisitGroupReward" then
+		return workingStep
+	end
+
+	if not isStepObjectiveComplete(workingStep, PlayerDataController) then
+		return workingStep
+	end
+
+	local nextIndex = (STEP_INDEX[workingStep] or 1) + 1
+	return STEP_ORDER[nextIndex] or workingStep
+end
+
+local function syncStepFromServer(PlayerDataController)
+	local tutorial = PlayerDataController:Get("Tutorial")
+	if type(tutorial) ~= "table" or type(tutorial.Step) ~= "string" or not STEP_INDEX[tutorial.Step] then
+		return
+	end
+
+	local serverStep = tutorial.Step
+	local serverIndex = STEP_INDEX[serverStep]
+	local currentIndex = STEP_INDEX[currentStep] or 1
+
+	if serverIndex > currentIndex then
+		currentStep = serverStep
+		lastPersistedStep = serverStep
+		initStepBaselines(serverStep)
+	end
 end
 
 local function getGuiButton(root: Instance?, name: string): GuiButton?
@@ -793,10 +846,18 @@ function TutorialController:MarkGroupRewardVisited()
 end
 
 function TutorialController:isActive(): boolean
-	return currentStep ~= "Completed"
+	return self:shouldTrack()
 end
 
 function TutorialController:shouldTrack(): boolean
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local tutorial = PlayerDataController:Get("Tutorial")
+	if type(tutorial) == "table" then
+		if tutorial.RebirthGuideCompleted == true or tutorial.Cancelled == true then
+			return false
+		end
+	end
+
 	return currentStep ~= "Completed"
 end
 
@@ -885,16 +946,46 @@ function TutorialController:persistStep(step: string)
 	if step == lastPersistedStep then
 		return
 	end
-	lastPersistedStep = step
 
+	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local TycoonService = Knit.GetService("TycoonService")
+
+	local function onPersistFailed()
+		local tutorial = PlayerDataController:Get("Tutorial")
+		local serverStep = if type(tutorial) == "table" and type(tutorial.Step) == "string" then tutorial.Step else "PickupDrop"
+		if not STEP_INDEX[serverStep] then
+			return
+		end
+
+		if (STEP_INDEX[serverStep] or 0) < (STEP_INDEX[step] or 0) then
+			currentStep = serverStep
+			lastPersistedStep = serverStep
+			initStepBaselines(serverStep)
+			self:updateOptionalProgressUi()
+			updateRebirthTutorialFingers()
+		end
+	end
+
 	if step == "Completed" then
-		TycoonService:UpdateTutorialStep(step):catch(function(err)
+		TycoonService:UpdateTutorialStep(step):andThen(function(success)
+			if success then
+				lastPersistedStep = step
+			else
+				onPersistFailed()
+			end
+		end):catch(function(err)
 			warn("[TutorialController] UpdateTutorialStep failed:", err)
+			onPersistFailed()
 		end)
 	elseif step == CORE_TUTORIAL_COMPLETE_STEP then
 		TycoonService:UpdateTutorialStep(step)
-			:andThen(function()
+			:andThen(function(success)
+				if not success then
+					onPersistFailed()
+					return false
+				end
+
+				lastPersistedStep = step
 				return TycoonService:CompleteTutorial()
 			end)
 			:andThen(function(success)
@@ -904,10 +995,18 @@ function TutorialController:persistStep(step: string)
 			end)
 			:catch(function(err)
 				warn("[TutorialController] CompleteTutorial failed:", err)
+				onPersistFailed()
 			end)
 	else
-		TycoonService:UpdateTutorialStep(step):catch(function(err)
+		TycoonService:UpdateTutorialStep(step):andThen(function(success)
+			if success then
+				lastPersistedStep = step
+			else
+				onPersistFailed()
+			end
+		end):catch(function(err)
 			warn("[TutorialController] UpdateTutorialStep failed:", err)
+			onPersistFailed()
 		end)
 	end
 end
@@ -954,8 +1053,13 @@ function TutorialController:setStep(step: string)
 end
 
 function TutorialController:evaluateProgress()
+	if not self:shouldTrack() then
+		return
+	end
+
 	local PlayerDataController = Knit.GetController("PlayerDataController")
-	self:setStep(getStepFromData(PlayerDataController))
+	syncStepFromServer(PlayerDataController)
+	self:setStep(getAdvancedStep(currentStep, PlayerDataController))
 	self:updateOptionalProgressUi()
 end
 
@@ -1015,7 +1119,6 @@ function TutorialController:startProgressTracking()
 			"RateLevel",
 			"Rebirths",
 			"RebirthUpgrades",
-			"Tutorial",
 		}
 	do
 		table.insert(
@@ -1068,10 +1171,22 @@ function TutorialController:KnitStart()
 	PlayerDataController:WaitForData()
 
 	local tutorial = PlayerDataController:Get("Tutorial")
-	local initialStep = getStepFromData(PlayerDataController)
-	currentStep = initialStep
-	lastPersistedStep = initialStep
-	local shouldTrack = currentStep ~= "Completed"
+	if type(tutorial) == "table" and (tutorial.RebirthGuideCompleted == true or tutorial.Cancelled == true) then
+		currentStep = "Completed"
+		lastPersistedStep = "Completed"
+	elseif type(tutorial) == "table" and tutorial.Completed == true then
+		currentStep = getWorkingTutorialStep(PlayerDataController)
+		lastPersistedStep = if type(tutorial.Step) == "string" then tutorial.Step else currentStep
+		initStepBaselines(currentStep)
+	else
+		currentStep = getWorkingTutorialStep(PlayerDataController)
+		lastPersistedStep = if type(tutorial) == "table" and type(tutorial.Step) == "string"
+			then tutorial.Step
+			else currentStep
+		initStepBaselines(currentStep)
+	end
+
+	local shouldTrack = self:shouldTrack()
 
 	task.spawn(function()
 		local deadline = os.clock() + 20
@@ -1094,7 +1209,17 @@ function TutorialController:KnitStart()
 	end)
 
 	PlayerDataController:Observe("Tutorial", function()
+		syncStepFromServer(PlayerDataController)
 		self:updateTutorialRewardUi()
+		if self:shouldTrack() then
+			self:evaluateProgress()
+		elseif currentStep ~= "Completed" then
+			currentStep = "Completed"
+			lastPersistedStep = "Completed"
+			clearGuide()
+			clearTutorialFingers()
+			self:updateOptionalProgressUi()
+		end
 	end)
 
 	if self:canClaimTutorialReward() then

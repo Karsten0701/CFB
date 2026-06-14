@@ -7,6 +7,7 @@ local CollectionService = game:GetService("CollectionService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local AnimeDroppers = require(ReplicatedStorage.Shared.Data.AnimeDroppers)
 local ButtonPress = require(ReplicatedStorage.Shared.Observers.Button)
+local DeviceUtil = require(ReplicatedStorage.Shared.Features.DeviceUtil)
 local EventUtil = require(ReplicatedStorage.Shared.Features.Events.EventUtil)
 local FormatUtil = require(ReplicatedStorage.Shared.Features.Tycoon.FormatUtil)
 local Loading = require(ReplicatedStorage.Shared.Performance.Loading)
@@ -18,6 +19,7 @@ local ShowOther = require(ReplicatedStorage.Shared.Performance.ShowOther)
 local SoundUtil = require(ReplicatedStorage.Shared.Features.SoundUtil)
 local TycoonConfig = require(ReplicatedStorage.Shared.Data.TycoonConfig)
 local DepositVFX = require(script.Parent.Parent.Parent.Features.Tycoon.DepositVFX)
+local ButtonPressVFX = require(script.Parent.Parent.Parent.Features.Tycoon.ButtonPressVFX)
 local TycoonRenderer = require(script.Parent.Parent.Parent.Features.Tycoon.TycoonRenderer)
 local TycoonUtil = require(ReplicatedStorage.Shared.Features.Tycoon.TycoonUtil)
 local Janitor = require(ReplicatedStorage.Packages.janitor)
@@ -66,8 +68,32 @@ local OTHER_TYCOON_VISUAL_REFRESH_INTERVAL = 3
 local OTHER_TYCOON_BATCH_SIZE = 1
 local OTHER_TYCOON_BATCH_DELAY = 0.08
 local BUTTON_PRICE_UPDATE_DELAY = 0.04
-local STANDING_ACTION_CHECK_INTERVAL = 0.1
+
+local function getStandingActionCheckInterval(): number
+	return DeviceUtil.getStandingCheckInterval()
+end
+
+local function resetStandingButtonState()
+	for head in wasStandingOnButton do
+		wasStandingOnButton[head] = false
+	end
+end
 local ROBUX_ICON = ""
+local UNIT_BUY_CANNOT_AFFORD_COLOR = Color3.fromRGB(255, 0, 0)
+local UNIT_BUY_CAN_AFFORD_COLOR = Color3.fromRGB(255, 255, 0)
+local RATE_BUY_CANNOT_AFFORD_COLOR = Color3.fromRGB(255, 0, 0)
+local RATE_BUY_CAN_AFFORD_COLOR = Color3.fromRGB(0, 255, 0)
+local DEPOSIT_BUTTON_COLOR = Color3.fromRGB(255, 102, 0)
+local MERGE_BUTTON_COLOR = Color3.fromRGB(0, 255, 0)
+local VFXColor = Color3.fromRGB(255, 255, 255)
+local BUTTON_PRESS_VFX_COLORS = {
+	buy = VFXColor,
+	buy_max = VFXColor,
+	rate = VFXColor,
+	rate_max = VFXColor,
+	deposit = VFXColor,
+	merge = VFXColor,
+}
 
 local function isLocalProductPromptFinished(firstArg: any): boolean
 	if firstArg == localPlayer then
@@ -245,6 +271,49 @@ local function getButtonHead(buttonModel: Model, taggedObject: Instance?): BaseP
 
 	local head = buttonModel:FindFirstChild("Head", true)
 	return if head and head:IsA("BasePart") then head else nil
+end
+
+local function setBuyButtonHeadColor(buttonModel: Instance, canAfford: boolean, isRateButton: boolean)
+	local head = getButtonHead(buttonModel :: Model, nil)
+	if not head then
+		return
+	end
+
+	head.Color = if isRateButton
+		then if canAfford then RATE_BUY_CAN_AFFORD_COLOR else RATE_BUY_CANNOT_AFFORD_COLOR
+		else if canAfford then UNIT_BUY_CAN_AFFORD_COLOR else UNIT_BUY_CANNOT_AFFORD_COLOR
+end
+
+local function setButtonHeadStaticColor(buttonModel: Instance, color: Color3)
+	local head = getButtonHead(buttonModel :: Model, nil)
+	if not head then
+		return
+	end
+
+	head.Color = color
+end
+
+local function shouldShowButtonVFX(): boolean
+	local ok, PlayerDataController = pcall(function()
+		return Knit.GetController("PlayerDataController")
+	end)
+	if not ok or not PlayerDataController then
+		return true
+	end
+
+	local settings = PlayerDataController:Get("Settings")
+	return type(settings) ~= "table" or settings.ShowVFX ~= false
+end
+
+local function playSuccessfulButtonVFX(head: BasePart, actionKind: string)
+	if not shouldShowButtonVFX() then
+		return
+	end
+
+	local color = BUTTON_PRESS_VFX_COLORS[actionKind]
+	if color then
+		ButtonPressVFX.play(head, color)
+	end
 end
 
 local function getButtonInfo(buttonModel: Instance)
@@ -934,8 +1003,7 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 			if display.Price and display.Price.Parent then
 				display.Price.Text = if not Monetization.isEnabled()
 					then "Disabled"
-					elseif product
-					then formatRobuxPrice(product.Price)
+					elseif product then formatRobuxPrice(product.Price)
 					else ""
 			end
 
@@ -948,8 +1016,13 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 		if info.IsBuyMaxUnits then
 			local maxAmount, maxPrice = 0, 0
 			if maxButtonCount > 0 then
-				maxAmount, maxPrice =
-					Pricing.getMaxAffordableUnitPurchase(purchasedUnitCount, yen, maxButtonCount, buyUnitTier, unitScaleCount)
+				maxAmount, maxPrice = Pricing.getMaxAffordableUnitPurchase(
+					purchasedUnitCount,
+					yen,
+					maxButtonCount,
+					buyUnitTier,
+					unitScaleCount
+				)
 			end
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
@@ -967,20 +1040,24 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 				display.Amount.Text = if maxButtonCount <= 0 then "Locked" else getBuyUnitText(maxAmount, buyUnitTier)
 			end
 
+			setBuyButtonHeadColor(child, maxButtonCount > 0 and maxAmount > 0, false)
 			continue
 		end
 
 		local buyAmount = info.BuyAmount
 		if buyAmount then
+			local unitPrice =
+				Pricing.getUnitBulkPrice(purchasedUnitCount, buyAmount, false, buyUnitTier, unitScaleCount)
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				display.Price.Text =
-					Pricing.formatYen(Pricing.getUnitBulkPrice(purchasedUnitCount, buyAmount, false, buyUnitTier, unitScaleCount))
+				display.Price.Text = Pricing.formatYen(unitPrice)
 			end
 
 			if display.Amount and display.Amount.Parent then
 				display.Amount.Text = getBuyUnitText(buyAmount, buyUnitTier)
 			end
+
+			setBuyButtonHeadColor(child, yen >= unitPrice, false)
 		end
 
 		if info.IsRateMax then
@@ -993,23 +1070,29 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 				if maxButtonCount <= 0 then
 					display.Price.Text = "[LOCKED]"
 				else
-					local displayPrice = if maxAmount > 0 then maxPrice else Pricing.getRateUpgradePrice(rateLevel, 1, true)
+					local displayPrice = if maxAmount > 0
+						then maxPrice
+						else Pricing.getRateUpgradePrice(rateLevel, 1, true)
 					display.Price.Text = Pricing.formatYen(displayPrice)
 				end
 			end
 
 			if display.Rate and display.Rate.Parent then
-				display.Rate.Text = if maxButtonCount <= 0 then "Locked" else "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
+				display.Rate.Text = if maxButtonCount <= 0
+					then "Locked"
+					else "+" .. FormatUtil.formatNumber(maxGain) .. " Rate"
 			end
 
+			setBuyButtonHeadColor(child, maxButtonCount > 0 and maxAmount > 0, true)
 			continue
 		end
 
 		local rateAmount = info.RateAmount
 		if rateAmount then
+			local ratePrice = Pricing.getRateUpgradePrice(rateLevel, rateAmount)
 			local display = getButtonDisplay(child)
 			if display.Price and display.Price.Parent then
-				display.Price.Text = Pricing.formatYen(Pricing.getRateUpgradePrice(rateLevel, rateAmount))
+				display.Price.Text = Pricing.formatYen(ratePrice)
 			end
 
 			if display.Rate and display.Rate.Parent then
@@ -1017,6 +1100,8 @@ function TycoonController:updateButtonPrices(tycoon: Instance)
 					.. FormatUtil.formatNumber(Pricing.getRateGain(rateAmount, rateLevel))
 					.. " Rate"
 			end
+
+			setBuyButtonHeadColor(child, yen >= ratePrice, true)
 		end
 	end
 end
@@ -1117,6 +1202,7 @@ function TycoonController:performButtonAction(head: BasePart)
 	elseif action.kind == "buy" and action.amount then
 		TycoonService:BuyUnits(action.amount, action.buttonName):andThen(function(success, err)
 			if success then
+				playSuccessfulButtonVFX(head, "buy")
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowBoughtUnitsMessage(action.amount)
 			elseif err == "Not enough yen" then
@@ -1134,6 +1220,7 @@ function TycoonController:performButtonAction(head: BasePart)
 
 		TycoonService:BuyMaxUnits(action.buttonName):andThen(function(success, err, boughtAmount)
 			if success then
+				playSuccessfulButtonVFX(head, "buy_max")
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowBoughtUnitsMessage(boughtAmount or 0)
 			elseif err == "Not enough yen" then
@@ -1149,6 +1236,7 @@ function TycoonController:performButtonAction(head: BasePart)
 	elseif action.kind == "merge" then
 		TycoonService:MergeUnits(action.buttonName):andThen(function(success, err, mergedUnitCount)
 			if success then
+				playSuccessfulButtonVFX(head, "merge")
 				SoundUtil.Merge()
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowMergedUnitsMessage(mergedUnitCount or 0)
@@ -1157,6 +1245,7 @@ function TycoonController:performButtonAction(head: BasePart)
 	elseif action.kind == "rate" and action.amount then
 		TycoonService:UpgradeRate(action.amount, action.buttonName):andThen(function(success, err, boughtAmount, gain)
 			if success then
+				playSuccessfulButtonVFX(head, "rate")
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowRateUpgradeMessage(gain or 0, boughtAmount or action.amount)
 			elseif err == "Not enough yen" then
@@ -1176,6 +1265,7 @@ function TycoonController:performButtonAction(head: BasePart)
 
 		TycoonService:UpgradeRateMax(action.buttonName):andThen(function(success, err, amount, gain)
 			if success then
+				playSuccessfulButtonVFX(head, "rate_max")
 				local MainGuiController = Knit.GetController("MainGuiController")
 				MainGuiController:ShowRateUpgradeMessage(gain or 0, amount or 0)
 			elseif err == "Not enough yen" then
@@ -1194,6 +1284,7 @@ function TycoonController:performButtonAction(head: BasePart)
 				warn("[TycoonController] Deposit failed:", err)
 			elseif success then
 				if (depositedAmount or 0) > 0 then
+					playSuccessfulButtonVFX(head, "deposit")
 					SoundUtil.Deposit()
 				end
 				local MainGuiController = Knit.GetController("MainGuiController")
@@ -1293,6 +1384,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 		end
 
 		if info.IsMerge then
+			setButtonHeadStaticColor(buttonModel, MERGE_BUTTON_COLOR)
 			nextButtonActions[head] = {
 				kind = "merge",
 				buttonName = buttonModel.Name,
@@ -1301,6 +1393,7 @@ function TycoonController:setupButtonActions(tycoon: Instance)
 		end
 
 		if info.IsDeposit then
+			setButtonHeadStaticColor(buttonModel, DEPOSIT_BUTTON_COLOR)
 			nextButtonActions[head] = {
 				kind = "deposit",
 				buttonName = buttonModel.Name,
@@ -1358,12 +1451,16 @@ function TycoonController:startStandingLoop()
 		end
 
 		standingCheckElapsed += deltaTime
-		if standingCheckElapsed < STANDING_ACTION_CHECK_INTERVAL then
+		if standingCheckElapsed < getStandingActionCheckInterval() then
 			return
 		end
 
 		standingCheckElapsed = 0
 		local root = ButtonPress.GetLocalRoot()
+		if not root then
+			return
+		end
+
 		for head in buttonActions do
 			local standing = ButtonPress.IsRootStandingOn(root, head)
 			local action = buttonActions[head]
@@ -1414,9 +1511,11 @@ function TycoonController:setupTycoon(tycoon: Instance, isOwn: boolean): boolean
 	renderer:setEntitlements({})
 	if isOwn then
 		local CapsuleController = Knit.GetController("CapsuleController")
-		renderer:setOnManaDropSpawned(function(dropPart: BasePart, onResult: ((boolean) -> ())?, isCancelled: (() -> boolean)?)
-			CapsuleController:trySpawnCapsuleFromDrop(dropPart, onResult, isCancelled)
-		end)
+		renderer:setOnManaDropSpawned(
+			function(dropPart: BasePart, onResult: ((boolean) -> ())?, isCancelled: (() -> boolean)?)
+				CapsuleController:trySpawnCapsuleFromDrop(dropPart, onResult, isCancelled)
+			end
+		)
 	end
 	renderers[tycoon] = {
 		renderer = renderer,
@@ -1481,6 +1580,69 @@ function TycoonController:ClearOwnDrops()
 			entry.renderer:clearDrops()
 		end
 	end
+end
+
+function TycoonController:getOwnTycoonInstance(): Instance?
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	local tycoonName = PlayerDataController:Get("TycoonName")
+	if type(tycoonName) ~= "string" or tycoonName == "" then
+		return nil
+	end
+
+	return TycoonUtil.getTycoonByName(tycoonName)
+end
+
+function TycoonController:isOwnTycoonReady(): boolean
+	local tycoon = self:getOwnTycoonInstance()
+	if not tycoon then
+		return false
+	end
+
+	local entry = renderers[tycoon]
+	return entry ~= nil and entry.isOwn == true and actionTycoon == tycoon
+end
+
+function TycoonController:teardownOwnTycoonClient()
+	for existingTycoon, entry in renderers do
+		if not entry.isOwn then
+			continue
+		end
+
+		entry.janitor:Destroy()
+		if entry.renderer then
+			entry.renderer:destroy()
+		end
+
+		renderers[existingTycoon] = nil
+		buttonModelsByTycoon[existingTycoon] = nil
+		buttonBillboardCacheByTycoon[existingTycoon] = nil
+		buttonBillboardsEnabledByTycoon[existingTycoon] = nil
+		buttonPriceUpdateScheduled[existingTycoon] = nil
+	end
+
+	table.clear(buttonActions)
+	resetStandingButtonState()
+	actionTycoon = nil
+	table.clear(pendingManaPickups)
+	manaPickupFlushScheduled = false
+end
+
+function TycoonController:ensureOwnTycoonReady(): boolean
+	if self:isOwnTycoonReady() then
+		return true
+	end
+
+	if not self:getOwnTycoonInstance() then
+		return false
+	end
+
+	self:teardownOwnTycoonClient()
+
+	if not self:setupOwnTycoon() then
+		return false
+	end
+
+	return self:isOwnTycoonReady()
 end
 
 function TycoonController:setupOwnTycoon(): boolean
@@ -1829,6 +1991,32 @@ end
 function TycoonController:KnitStart()
 	local PlayerDataController = Knit.GetController("PlayerDataController")
 	local initialized = false
+	local otherTycoonsInitialized = false
+
+	local function finishJoinSetup()
+		if otherTycoonsInitialized then
+			return
+		end
+
+		otherTycoonsInitialized = true
+		self:setupOtherTycoons()
+	end
+
+	local function tryEnsureOwnTycoonReady(): boolean
+		self:bindAllReleasedTycoonCleanup()
+		self:updateAllDefaultProcesserDisplays()
+
+		if not self:ensureOwnTycoonReady() then
+			return false
+		end
+
+		if not initialized then
+			initialized = true
+			finishJoinSetup()
+		end
+
+		return true
+	end
 
 	MarketplaceService.PromptProductPurchaseFinished:Connect(function(firstArg, _productId, wasPurchased)
 		if not Monetization.isEnabled() then
@@ -1868,40 +2056,57 @@ function TycoonController:KnitStart()
 	end)
 
 	local function init()
-		self:bindAllReleasedTycoonCleanup()
-
-		if initialized then
-			return
-		end
-
-		self:updateAllDefaultProcesserDisplays()
-
-		local tycoonName = PlayerDataController:Get("TycoonName")
-		if not tycoonName or tycoonName == "" then
-			return
-		end
-
-		if not self:setupOwnTycoon() then
-			return
-		end
-
-		initialized = true
-		self:setupOtherTycoons()
+		tryEnsureOwnTycoonReady()
 	end
 
 	task.spawn(function()
 		PlayerDataController:WaitForData()
 		init()
 
-		PlayerDataController:Observe("TycoonName", function(name)
-			if name and name ~= "" then
-				init()
+		PlayerDataController:Observe("TycoonName", function(name, previousName)
+			if type(name) ~= "string" or name == "" then
+				return
 			end
+
+			if previousName ~= nil and previousName ~= name then
+				self:teardownOwnTycoonClient()
+				initialized = false
+			end
+
+			init()
 		end)
 
 		while not initialized do
 			task.wait(0.5)
 			init()
+		end
+
+		while true do
+			task.wait(5)
+			if not self:isOwnTycoonReady() then
+				tryEnsureOwnTycoonReady()
+			end
+		end
+	end)
+
+	localPlayer.CharacterAdded:Connect(function()
+		resetStandingButtonState()
+		task.defer(function()
+			tryEnsureOwnTycoonReady()
+		end)
+	end)
+
+	task.spawn(function()
+		local tycoonsFolder = TycoonUtil.getTycoonsFolder()
+		while not tycoonsFolder do
+			task.wait(0.5)
+			tycoonsFolder = TycoonUtil.getTycoonsFolder()
+		end
+
+		if not tycoonsFolderChildAddedConnection then
+			tycoonsFolderChildAddedConnection = tycoonsFolder.ChildAdded:Connect(function()
+				task.defer(init)
+			end)
 		end
 	end)
 

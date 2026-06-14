@@ -28,6 +28,11 @@ local publishQueue: { [Player]: boolean } = {}
 local lastPublishAttemptAt: { [Player]: number } = {}
 local publishWorkerRunning = false
 local excludedFromBoards: { [number]: { [string]: boolean } } = {}
+local leaderboardBlacklist: { [number]: boolean } = {}
+local blacklistStore: GlobalDataStore? = nil
+local blacklistLoaded = false
+local blacklistSaveScheduled = false
+local BLACKLIST_DATA_KEY = "Blacklist"
 
 local function isShuttingDown(): boolean
 	return GameShutdown.isShuttingDown()
@@ -507,14 +512,110 @@ local function getWriteSpacing(): number
 	return LeaderboardConfig.WriteSpacing or 0.6
 end
 
-local function isUserExcludedFromBoard(userId: number, boardName: string): boolean
-	local userBoards = excludedFromBoards[userId]
-	return type(userBoards) == "table" and userBoards[boardName] == true
+local function getBlacklistStore(): GlobalDataStore?
+	if blacklistStore then
+		return blacklistStore
+	end
+
+	local ok, store = pcall(function()
+		return DataStoreService:GetDataStore(LeaderboardConfig.DataStorePrefix .. "Blacklist")
+	end)
+	if ok then
+		blacklistStore = store
+	end
+
+	return blacklistStore
 end
 
-local function excludeUserFromBoard(userId: number, boardName: string)
-	excludedFromBoards[userId] = excludedFromBoards[userId] or {}
-	excludedFromBoards[userId][boardName] = true
+local function normalizeBlacklistPayload(data: any): { [number]: boolean }
+	local normalized: { [number]: boolean } = {}
+	if type(data) ~= "table" then
+		return normalized
+	end
+
+	local users = if type(data.Users) == "table"
+		then data.Users
+		elseif type(data.Blacklist) == "table" then data.Blacklist
+		else data
+
+	for key, value in users do
+		if value == true then
+			local userId = math.floor(tonumber(key) or 0)
+			if userId > 0 then
+				normalized[userId] = true
+			end
+		end
+	end
+
+	return normalized
+end
+
+local function applyLoadedBlacklist()
+	for userId in leaderboardBlacklist do
+		excludedFromBoards[userId] = excludedFromBoards[userId] or {}
+		for boardName in LeaderboardConfig.Boards do
+			excludedFromBoards[userId][boardName] = true
+		end
+	end
+end
+
+function LeaderboardService:loadLeaderboardBlacklist()
+	if blacklistLoaded then
+		return
+	end
+
+	blacklistLoaded = true
+	local store = getBlacklistStore()
+	if not store then
+		warn("[LeaderboardService] Failed to open leaderboard blacklist DataStore.")
+		return
+	end
+
+	local ok, data = pcall(function()
+		return store:GetAsync(BLACKLIST_DATA_KEY)
+	end)
+	if ok then
+		leaderboardBlacklist = normalizeBlacklistPayload(data)
+		applyLoadedBlacklist()
+	else
+		warn("[LeaderboardService] Failed to load leaderboard blacklist:", data)
+	end
+end
+
+local function persistLeaderboardBlacklist()
+	if blacklistSaveScheduled then
+		return
+	end
+
+	blacklistSaveScheduled = true
+	task.defer(function()
+		blacklistSaveScheduled = false
+
+		local store = getBlacklistStore()
+		if not store then
+			return
+		end
+
+		local payload = {
+			Blacklist = {},
+		}
+
+		for userId in leaderboardBlacklist do
+			payload.Blacklist[tostring(userId)] = true
+		end
+
+		local ok, err = pcall(function()
+			store:SetAsync(BLACKLIST_DATA_KEY, payload)
+		end)
+		if not ok then
+			warn("[LeaderboardService] Failed to save leaderboard blacklist:", err)
+		end
+	end)
+end
+
+local function isUserBlacklisted(userId: number): boolean
+	userId = math.floor(tonumber(userId) or 0)
+	return userId > 0 and leaderboardBlacklist[userId] == true
 end
 
 local function clearOnlinePublishState(userId: number)
@@ -527,6 +628,53 @@ local function clearOnlinePublishState(userId: number)
 	dirtyDebounceScheduled[onlinePlayer] = nil
 	publishQueue[onlinePlayer] = nil
 	lastPublishAttemptAt[onlinePlayer] = nil
+end
+
+function LeaderboardService:IsUserBlacklisted(userId: number): boolean
+	self:loadLeaderboardBlacklist()
+	return isUserBlacklisted(userId)
+end
+
+function LeaderboardService:BlacklistUser(userId: number)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return
+	end
+
+	self:loadLeaderboardBlacklist()
+	leaderboardBlacklist[userId] = true
+	excludedFromBoards[userId] = excludedFromBoards[userId] or {}
+	for boardName in LeaderboardConfig.Boards do
+		excludedFromBoards[userId][boardName] = true
+	end
+	clearOnlinePublishState(userId)
+	persistLeaderboardBlacklist()
+end
+
+function LeaderboardService:UnblacklistUser(userId: number)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return
+	end
+
+	self:loadLeaderboardBlacklist()
+	leaderboardBlacklist[userId] = nil
+	excludedFromBoards[userId] = nil
+	persistLeaderboardBlacklist()
+end
+
+local function isUserExcludedFromBoard(userId: number, boardName: string): boolean
+	if isUserBlacklisted(userId) then
+		return true
+	end
+
+	local userBoards = excludedFromBoards[userId]
+	return type(userBoards) == "table" and userBoards[boardName] == true
+end
+
+local function excludeUserFromBoard(userId: number, boardName: string)
+	excludedFromBoards[userId] = excludedFromBoards[userId] or {}
+	excludedFromBoards[userId][boardName] = true
 end
 
 local function correctExcessiveDatastoreEntry(
@@ -1266,6 +1414,16 @@ function LeaderboardService:RestoreUserToLeaderboards(userId: number): (boolean,
 	return true, nil
 end
 
+function LeaderboardService:AllowUserOnLeaderboards(userId: number): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, "UserId must be greater than 0."
+	end
+
+	self:UnblacklistUser(userId)
+	return self:RestoreUserToLeaderboards(userId)
+end
+
 function LeaderboardService:ClearUserFromLeaderboards(userId: number, boardName: string?): (number, string?)
 	userId = math.floor(tonumber(userId) or 0)
 	if userId <= 0 then
@@ -1279,6 +1437,12 @@ function LeaderboardService:ClearUserFromLeaderboards(userId: number, boardName:
 
 	if boardName == "all" or boardName == nil or boardName == "" then
 		local cleared = self:RemoveUserFromAllBoards(userId, options)
+		if cleared > 0 then
+			self:BlacklistUser(userId)
+			task.spawn(function()
+				self:renderBoards()
+			end)
+		end
 		return cleared, nil
 	end
 
@@ -1290,6 +1454,7 @@ function LeaderboardService:ClearUserFromLeaderboards(userId: number, boardName:
 		return 0, `Failed to remove user {userId} from {boardName}.`
 	end
 
+	self:BlacklistUser(userId)
 	return 1, nil
 end
 
@@ -1371,6 +1536,8 @@ function LeaderboardService:clearPlayerPublishing(player: Player)
 end
 
 function LeaderboardService:KnitStart()
+	self:loadLeaderboardBlacklist()
+
 	local PlayerDataService = Knit.GetService("PlayerDataService")
 
 	Players.PlayerAdded:Connect(function(player)

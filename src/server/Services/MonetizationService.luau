@@ -456,10 +456,6 @@ function MonetizationService:AdminRevokeGamePass(player: Player, gamePassKey: st
 end
 
 function MonetizationService:AdminGrantProduct(player: Player, productKey: string): (boolean, string?)
-	if not isMonetizationEnabled() then
-		return false, "monetization_disabled"
-	end
-
 	local product = Monetization.DeveloperProducts[productKey]
 	if not product then
 		return false, "unknown_product"
