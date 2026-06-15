@@ -7,14 +7,57 @@ local TierUnlockAnalytics = {}
 
 local FIRST_JOIN_FUNNEL_NAME = "FirstJoin"
 local TIER_UNLOCK_FUNNEL_NAME = "TierUnlocks"
-local TUTORIAL_COMPLETE_FUNNEL_NAME = "TutorialComplete"
+local TUTORIAL_FUNNEL_NAME = "Tutorial"
 local SESSION_TIME_FUNNEL_NAME = "SessionTime"
 local PLAYTIME_FUNNEL_NAME = "Playtime"
 local REBIRTH_FUNNEL_NAME = "Rebirths"
 local QUEST_FUNNEL_NAME = "Quests"
 
+local tierUnlockSteps: { number }? = nil
+local tierUnlockStepByTier: { [number]: number } = {}
+
+local function rebuildTierUnlockStepMap()
+	tierUnlockSteps = {}
+	table.clear(tierUnlockStepByTier)
+
+	for tier in AnimeDroppers.Tiers do
+		local normalizedTier = math.floor(tonumber(tier) or 0)
+		if normalizedTier >= 1 then
+			table.insert(tierUnlockSteps, normalizedTier)
+		end
+	end
+
+	table.sort(tierUnlockSteps)
+
+	for step, tier in tierUnlockSteps do
+		tierUnlockStepByTier[tier] = step
+	end
+end
+
+rebuildTierUnlockStepMap()
+
 local function getStepName(tier: number): string
 	return "Unlocked Tier " .. tostring(tier)
+end
+
+local function getMinuteLabel(minutes: number): string
+	minutes = math.max(math.floor(tonumber(minutes) or 0), 0)
+	if minutes == 0 then
+		return "0 Minutes"
+	end
+
+	local suffix = if minutes == 1 then "Minute" else "Minutes"
+	return "Played " .. tostring(minutes) .. " " .. suffix
+end
+
+local function getMilestoneStep(milestones: { number }, milestone: number): number
+	for step, value in milestones do
+		if value == milestone then
+			return step
+		end
+	end
+
+	return math.max(math.floor(tonumber(milestone) or 0) + 1, 1)
 end
 
 function TierUnlockAnalytics.logFirstJoin(player: Player): boolean
@@ -35,8 +78,13 @@ function TierUnlockAnalytics.logTierUnlocked(player: Player, tier: number): bool
 		return false
 	end
 
+	local step = tierUnlockStepByTier[tier]
+	if not step then
+		return false
+	end
+
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, TIER_UNLOCK_FUNNEL_NAME, nil, tier, getStepName(tier))
+		AnalyticsService:LogFunnelStepEvent(player, TIER_UNLOCK_FUNNEL_NAME, nil, step, getStepName(tier))
 	end)
 
 	if not ok then
@@ -47,21 +95,28 @@ function TierUnlockAnalytics.logTierUnlocked(player: Player, tier: number): bool
 end
 
 function TierUnlockAnalytics.getTierUnlockSteps(): { number }
-	local tiers = {}
-	for tier in AnimeDroppers.Tiers do
-		local normalizedTier = math.floor(tonumber(tier) or 0)
-		if normalizedTier >= 1 then
-			table.insert(tiers, normalizedTier)
-		end
+	if not tierUnlockSteps then
+		rebuildTierUnlockStepMap()
 	end
 
-	table.sort(tiers)
-	return tiers
+	return tierUnlockSteps
+end
+
+function TierUnlockAnalytics.logTutorialInProgress(player: Player): boolean
+	local ok, err = pcall(function()
+		AnalyticsService:LogFunnelStepEvent(player, TUTORIAL_FUNNEL_NAME, nil, 1, "Tutorial Not Completed")
+	end)
+
+	if not ok then
+		warn("[TierUnlockAnalytics] Failed to log tutorial in-progress funnel step:", err)
+	end
+
+	return ok
 end
 
 function TierUnlockAnalytics.logTutorialCompleted(player: Player): boolean
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, TUTORIAL_COMPLETE_FUNNEL_NAME, nil, 1, "Completed Tutorial")
+		AnalyticsService:LogFunnelStepEvent(player, TUTORIAL_FUNNEL_NAME, nil, 2, "Tutorial Completed")
 	end)
 
 	if not ok then
@@ -71,13 +126,8 @@ function TierUnlockAnalytics.logTutorialCompleted(player: Player): boolean
 	return ok
 end
 
-local function getMinuteLabel(minutes: number): string
-	local suffix = if minutes == 1 then "Minute" else "Minutes"
-	return "Played " .. tostring(minutes) .. " " .. suffix
-end
-
 function TierUnlockAnalytics.getSessionTimeMilestones(): { number }
-	local milestones = {}
+	local milestones = { 0 }
 
 	for minute = 1, 10 do
 		table.insert(milestones, minute)
@@ -106,13 +156,21 @@ end
 
 function TierUnlockAnalytics.logSessionTimeReached(player: Player, minutes: number, step: number?): boolean
 	minutes = math.floor(tonumber(minutes) or 0)
-	if minutes <= 0 then
+	if minutes < 0 then
 		return false
 	end
-	step = math.max(math.floor(tonumber(step) or minutes), 1)
+
+	local milestones = TierUnlockAnalytics.getSessionTimeMilestones()
+	local resolvedStep = math.max(math.floor(tonumber(step) or getMilestoneStep(milestones, minutes)), 1)
 
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, SESSION_TIME_FUNNEL_NAME, nil, step, getMinuteLabel(minutes))
+		AnalyticsService:LogFunnelStepEvent(
+			player,
+			SESSION_TIME_FUNNEL_NAME,
+			nil,
+			resolvedStep,
+			getMinuteLabel(minutes)
+		)
 	end)
 
 	if not ok then
@@ -124,13 +182,21 @@ end
 
 function TierUnlockAnalytics.logPlaytimeReached(player: Player, minutes: number, step: number?): boolean
 	minutes = math.floor(tonumber(minutes) or 0)
-	if minutes <= 0 then
+	if minutes < 0 then
 		return false
 	end
-	step = math.max(math.floor(tonumber(step) or minutes), 1)
+
+	local milestones = TierUnlockAnalytics.getPlaytimeMilestones()
+	local resolvedStep = math.max(math.floor(tonumber(step) or getMilestoneStep(milestones, minutes)), 1)
 
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, PLAYTIME_FUNNEL_NAME, nil, step, getMinuteLabel(minutes))
+		AnalyticsService:LogFunnelStepEvent(
+			player,
+			PLAYTIME_FUNNEL_NAME,
+			nil,
+			resolvedStep,
+			getMinuteLabel(minutes)
+		)
 	end)
 
 	if not ok then
@@ -142,18 +208,15 @@ end
 
 function TierUnlockAnalytics.logRebirthReached(player: Player, rebirths: number): boolean
 	rebirths = math.floor(tonumber(rebirths) or 0)
-	if rebirths <= 0 then
+	if rebirths < 0 then
 		return false
 	end
 
+	local step = rebirths + 1
+	local label = if rebirths == 0 then "0 Rebirths" else "Reached Rebirth " .. tostring(rebirths)
+
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(
-			player,
-			REBIRTH_FUNNEL_NAME,
-			nil,
-			rebirths,
-			"Reached Rebirth " .. tostring(rebirths)
-		)
+		AnalyticsService:LogFunnelStepEvent(player, REBIRTH_FUNNEL_NAME, nil, step, label)
 	end)
 
 	if not ok then
@@ -187,9 +250,14 @@ function TierUnlockAnalytics.logQuestOpened(player: Player): boolean
 	return ok
 end
 
-function TierUnlockAnalytics.logQuestClaimed(player: Player): boolean
+function TierUnlockAnalytics.logQuestClaimed(player: Player, claimCount: number): boolean
+	claimCount = math.max(math.floor(tonumber(claimCount) or 0), 1)
+	local step = claimCount + 2
+	local suffix = if claimCount == 1 then "" else "s"
+	local label = "Claimed " .. tostring(claimCount) .. " Quest" .. suffix
+
 	local ok, err = pcall(function()
-		AnalyticsService:LogFunnelStepEvent(player, QUEST_FUNNEL_NAME, nil, 3, "Claimed Quest")
+		AnalyticsService:LogFunnelStepEvent(player, QUEST_FUNNEL_NAME, nil, step, label)
 	end)
 
 	if not ok then

@@ -366,6 +366,60 @@ local function repairQuestData(data: { [string]: any })
 	data.Quests.Weekly = repairQuestCategory(data.Quests.Weekly)
 end
 
+local function repairGuildData(data: { [string]: any })
+	if type(data.Guild) ~= "table" then
+		data.Guild = {}
+	end
+
+	if type(data.Guild.GuildId) ~= "string" then
+		data.Guild.GuildId = ""
+	end
+
+	if type(data.Guild.Role) ~= "string" then
+		data.Guild.Role = ""
+	end
+
+	if type(data.Guild.OwnedGuildId) ~= "string" then
+		data.Guild.OwnedGuildId = ""
+	end
+
+	if data.Guild.Role ~= "Owner" and data.Guild.Role ~= "Member" then
+		data.Guild.Role = ""
+	end
+
+	if data.Guild.GuildId == "" then
+		data.Guild.Role = ""
+	end
+end
+
+local function repairGuildInvites(data: { [string]: any })
+	if type(data.GuildInvites) ~= "table" then
+		data.GuildInvites = {}
+		return
+	end
+
+	local normalized = {}
+	local seenGuildIds: { [string]: boolean } = {}
+	for _, invite in data.GuildInvites do
+		if type(invite) ~= "table" then
+			continue
+		end
+
+		local guildId = if type(invite.GuildId) == "string" then invite.GuildId else ""
+		if guildId == "" or seenGuildIds[guildId] then
+			continue
+		end
+
+		seenGuildIds[guildId] = true
+		table.insert(normalized, {
+			GuildId = guildId,
+			InvitedAt = finiteNonNegativeInteger(invite.InvitedAt, 0),
+		})
+	end
+
+	data.GuildInvites = normalized
+end
+
 local function ensureManaData(data: { [string]: any })
 	migrateNumberFieldInData(data, "Money", "Yen", TycoonConfig.StarterYen or 0)
 	migrateNumberFieldInData(data, "MagicPowerInBag", "ManaInBag", 0)
@@ -467,12 +521,10 @@ local function ensureManaData(data: { [string]: any })
 		data.Analytics = {}
 	end
 	data.Analytics.FirstJoinFunnelLogged = data.Analytics.FirstJoinFunnelLogged == true
+	data.Analytics.TutorialStartFunnelLogged = data.Analytics.TutorialStartFunnelLogged == true
 	data.Analytics.TutorialCompleteFunnelLogged = data.Analytics.TutorialCompleteFunnelLogged == true
 	if type(data.Analytics.TierUnlockFunnelLogged) ~= "table" then
 		data.Analytics.TierUnlockFunnelLogged = {}
-	end
-	if type(data.Analytics.SessionTimeFunnelLogged) ~= "table" then
-		data.Analytics.SessionTimeFunnelLogged = {}
 	end
 	if type(data.Analytics.PlaytimeFunnelLogged) ~= "table" then
 		data.Analytics.PlaytimeFunnelLogged = {}
@@ -482,7 +534,14 @@ local function ensureManaData(data: { [string]: any })
 	end
 	data.Analytics.QuestUnlockedFunnelLogged = data.Analytics.QuestUnlockedFunnelLogged == true
 	data.Analytics.QuestOpenedFunnelLogged = data.Analytics.QuestOpenedFunnelLogged == true
-	data.Analytics.QuestClaimedFunnelLogged = data.Analytics.QuestClaimedFunnelLogged == true
+	data.Analytics.QuestClaimsFunnelLogged = finiteNonNegativeInteger(data.Analytics.QuestClaimsFunnelLogged, 0)
+	if data.Analytics.QuestClaimedFunnelLogged == true and data.Analytics.QuestClaimsFunnelLogged < 1 then
+		data.Analytics.QuestClaimsFunnelLogged = 1
+	end
+	data.Analytics.QuestClaimedFunnelLogged = nil
+	if type(data.Analytics.SessionTimeFunnelLogged) == "table" then
+		data.Analytics.SessionTimeFunnelLogged = nil
+	end
 
 	if type(data.RebirthUpgrades) ~= "table" then
 		data.RebirthUpgrades = {}
@@ -627,6 +686,8 @@ local function ensureManaData(data: { [string]: any })
 		math.max(data.TotalUnitsBought, finiteNonNegativeInteger(Pricing.getBaseUnitCount(data.Units), 0))
 
 	data.UnlockedAnimeDroppers = normalizeUnlockedAnimeDroppers(data.UnlockedAnimeDroppers, data.Units)
+	repairGuildData(data)
+	repairGuildInvites(data)
 end
 
 local function syncLeaderstats(player: Player)
@@ -688,17 +749,40 @@ local function logInitialAnalyticsFunnels(player: Player, data: { [string]: any 
 		data.Analytics.FirstJoinFunnelLogged = true
 	end
 
+	if data.Analytics.RebirthFunnelLogged["0"] ~= true then
+		if TierUnlockAnalytics.logRebirthReached(player, 0) then
+			markAnalyticsFlag(data, { "Analytics", "RebirthFunnelLogged", "0" }, true)
+		end
+	end
+
+	if data.Tutorial.Completed == true then
+		if data.Analytics.TutorialStartFunnelLogged ~= true then
+			if TierUnlockAnalytics.logTutorialInProgress(player) then
+				data.Analytics.TutorialStartFunnelLogged = true
+			end
+		end
+		if data.Analytics.TutorialCompleteFunnelLogged ~= true then
+			if TierUnlockAnalytics.logTutorialCompleted(player) then
+				data.Analytics.TutorialCompleteFunnelLogged = true
+			end
+		end
+	elseif data.Analytics.TutorialStartFunnelLogged ~= true then
+		if TierUnlockAnalytics.logTutorialInProgress(player) then
+			data.Analytics.TutorialStartFunnelLogged = true
+		end
+	end
+
+	if data.Analytics.PlaytimeFunnelLogged["0"] ~= true then
+		if TierUnlockAnalytics.logPlaytimeReached(player, 0) then
+			markAnalyticsFlag(data, { "Analytics", "PlaytimeFunnelLogged", "0" }, true)
+		end
+	end
+
 	for _, tier in
 		TierUnlockAnalytics.getUnlockedTiersToLog(data.UnlockedAnimeDroppers, data.Analytics.TierUnlockFunnelLogged)
 	do
 		if TierUnlockAnalytics.logTierUnlocked(player, tier) then
 			markAnalyticsFlag(data, { "Analytics", "TierUnlockFunnelLogged", tostring(tier) }, true)
-		end
-	end
-
-	if data.Tutorial.Completed == true and data.Analytics.TutorialCompleteFunnelLogged ~= true then
-		if TierUnlockAnalytics.logTutorialCompleted(player) then
-			data.Analytics.TutorialCompleteFunnelLogged = true
 		end
 	end
 
@@ -718,6 +802,22 @@ local function logInitialAnalyticsFunnels(player: Player, data: { [string]: any 
 		if TierUnlockAnalytics.logQuestUnlocked(player) then
 			data.Analytics.QuestUnlockedFunnelLogged = true
 		end
+	end
+end
+
+function PlayerDataService:LogSessionStartFunnel(player: Player)
+	local logged = sessionTimeFunnelLogged[player]
+	if not logged then
+		logged = {}
+		sessionTimeFunnelLogged[player] = logged
+	end
+
+	if logged[0] == true then
+		return
+	end
+
+	if TierUnlockAnalytics.logSessionTimeReached(player, 0) then
+		logged[0] = true
 	end
 end
 
@@ -759,6 +859,7 @@ function PlayerDataService:KnitInit()
 			PlayerDataService:LogPlaytimeFunnel(player)
 		end)
 		logInitialAnalyticsFunnels(player, data)
+		PlayerDataService:LogSessionStartFunnel(player)
 
 		task.defer(function()
 			local ok, TycoonService = pcall(function()
@@ -1023,6 +1124,11 @@ function PlayerDataService:PersistPlaytime(player: Player)
 		local nextPlaytime = finiteNonNegativeInteger(current, 0) + elapsed
 		return math.min(nextPlaytime, MAX_REASONABLE_PLAYTIME_SECONDS)
 	end)
+
+	pcall(function()
+		local QuestService = Knit.GetService("QuestService")
+		QuestService:RefreshPlaytimeProgress(player)
+	end)
 end
 
 function PlayerDataService:LogSessionTimeFunnel(player: Player)
@@ -1032,60 +1138,66 @@ function PlayerDataService:LogSessionTimeFunnel(player: Player)
 	end
 
 	local elapsedMinutes = math.floor(math.max(os.time() - startedAt, 0) / 60)
-	if elapsedMinutes <= 0 then
-		return
-	end
 
 	local logged = sessionTimeFunnelLogged[player]
 	if not logged then
 		logged = {}
 		sessionTimeFunnelLogged[player] = logged
 	end
-	local persistentLogged = self:Get(player, { "Analytics", "SessionTimeFunnelLogged" })
-	if type(persistentLogged) ~= "table" then
-		persistentLogged = {}
+
+	if logged[0] ~= true then
+		self:LogSessionStartFunnel(player)
+		logged = sessionTimeFunnelLogged[player] or logged
 	end
 
 	for step, milestone in SESSION_TIME_MILESTONES do
-		if milestone > elapsedMinutes then
+		if milestone > 0 and milestone > elapsedMinutes then
 			break
 		end
 
-		local key = tostring(milestone)
-		if logged[milestone] == true or persistentLogged[key] == true or persistentLogged[milestone] == true then
+		if milestone > 0 and logged[milestone] == true then
+			continue
+		end
+
+		if milestone == 0 and logged[0] == true then
 			continue
 		end
 
 		if TierUnlockAnalytics.logSessionTimeReached(player, milestone, step) then
 			logged[milestone] = true
-			self:Set(player, { "Analytics", "SessionTimeFunnelLogged", key }, true)
 		end
 	end
 end
 
 function PlayerDataService:LogPlaytimeFunnel(player: Player)
 	local totalMinutes = math.floor(self:GetPlaytimeSeconds(player) / 60)
-	if totalMinutes <= 0 then
-		return
-	end
 
 	local logged = self:Get(player, { "Analytics", "PlaytimeFunnelLogged" })
 	if type(logged) ~= "table" then
 		logged = {}
 	end
 
+	if logged["0"] ~= true then
+		if TierUnlockAnalytics.logPlaytimeReached(player, 0) then
+			self:Set(player, { "Analytics", "PlaytimeFunnelLogged", "0" }, true)
+			logged["0"] = true
+		end
+	end
+
 	for step, milestone in PLAYTIME_MILESTONES do
-		if milestone > totalMinutes then
+		if milestone > 0 and milestone > totalMinutes then
 			break
 		end
 
-		local key = tostring(milestone)
-		if logged[key] == true or logged[milestone] == true then
-			continue
-		end
+		if milestone > 0 then
+			local key = tostring(milestone)
+			if logged[key] == true or logged[milestone] == true then
+				continue
+			end
 
-		if TierUnlockAnalytics.logPlaytimeReached(player, milestone, step) then
-			self:Set(player, { "Analytics", "PlaytimeFunnelLogged", key }, true)
+			if TierUnlockAnalytics.logPlaytimeReached(player, milestone, step) then
+				self:Set(player, { "Analytics", "PlaytimeFunnelLogged", key }, true)
+			end
 		end
 	end
 end
@@ -1282,6 +1394,187 @@ function PlayerDataService:ResetLeaderboardStatsByUserId(userId: number): (boole
 	end
 
 	applyLeaderboardStatsReset(profile.Data)
+	local ok, err = pcall(function()
+		profile:SetAsync()
+	end)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	return true, nil
+end
+
+function PlayerDataService:GetGuildData(player: Player): { GuildId: string, Role: string, OwnedGuildId: string }
+	local guild = self:Get(player, "Guild")
+	if type(guild) ~= "table" then
+		return { GuildId = "", Role = "", OwnedGuildId = "" }
+	end
+
+	return {
+		GuildId = if type(guild.GuildId) == "string" then guild.GuildId else "",
+		Role = if type(guild.Role) == "string" then guild.Role else "",
+		OwnedGuildId = if type(guild.OwnedGuildId) == "string" then guild.OwnedGuildId else "",
+	}
+end
+
+function PlayerDataService:SetGuildMembership(
+	player: Player,
+	guildId: string,
+	role: string,
+	ownedGuildId: string?
+)
+	local current = self:GetGuildData(player)
+	self:Set(player, "Guild", {
+		GuildId = guildId,
+		Role = role,
+		OwnedGuildId = if ownedGuildId ~= nil then ownedGuildId else current.OwnedGuildId,
+	})
+end
+
+function PlayerDataService:ClearGuildMembershipForUserId(userId: number): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 then
+		return false, "Invalid user"
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		self:WaitForData(onlinePlayer)
+		local current = self:GetGuildData(onlinePlayer)
+		self:Set(onlinePlayer, "Guild", {
+			GuildId = "",
+			Role = "",
+			OwnedGuildId = current.OwnedGuildId,
+		})
+		return true, nil
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile or type(profile.Data) ~= "table" then
+		return false, `No saved data found for user {userId}.`
+	end
+
+	ensureManaData(profile.Data)
+	local ownedGuildId = ""
+	if type(profile.Data.Guild) == "table" and type(profile.Data.Guild.OwnedGuildId) == "string" then
+		ownedGuildId = profile.Data.Guild.OwnedGuildId
+	end
+
+	profile.Data.Guild = {
+		GuildId = "",
+		Role = "",
+		OwnedGuildId = ownedGuildId,
+	}
+
+	local ok, err = pcall(function()
+		profile:SetAsync()
+	end)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	return true, nil
+end
+
+function PlayerDataService:GetGuildInvites(player: Player): { { GuildId: string, InvitedAt: number } }
+	local invites = self:Get(player, "GuildInvites")
+	if type(invites) ~= "table" then
+		return {}
+	end
+
+	local normalized = {}
+	for _, invite in invites do
+		if type(invite) ~= "table" or type(invite.GuildId) ~= "string" or invite.GuildId == "" then
+			continue
+		end
+
+		table.insert(normalized, {
+			GuildId = invite.GuildId,
+			InvitedAt = finiteNonNegativeInteger(invite.InvitedAt, 0),
+		})
+	end
+
+	return normalized
+end
+
+function PlayerDataService:HasGuildInvite(player: Player, guildId: string): boolean
+	if guildId == "" then
+		return false
+	end
+
+	for _, invite in self:GetGuildInvites(player) do
+		if invite.GuildId == guildId then
+			return true
+		end
+	end
+
+	return false
+end
+
+function PlayerDataService:RemoveGuildInvite(player: Player, guildId: string)
+	if guildId == "" then
+		return
+	end
+
+	self:Update(player, "GuildInvites", function(current: any)
+		local invites = if type(current) == "table" then current else {}
+		local nextInvites = {}
+		for _, invite in invites do
+			if type(invite) == "table" and invite.GuildId ~= guildId then
+				table.insert(nextInvites, invite)
+			end
+		end
+		return nextInvites
+	end)
+end
+
+function PlayerDataService:AddGuildInviteForUserId(userId: number, guildId: string): (boolean, string?)
+	userId = math.floor(tonumber(userId) or 0)
+	if userId <= 0 or guildId == "" then
+		return false, "Invalid invite"
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		self:WaitForData(onlinePlayer)
+		if self:HasGuildInvite(onlinePlayer, guildId) then
+			return true, nil
+		end
+
+		self:Update(onlinePlayer, "GuildInvites", function(current: any)
+			local invites = if type(current) == "table" then current else {}
+			table.insert(invites, {
+				GuildId = guildId,
+				InvitedAt = os.time(),
+			})
+			return invites
+		end)
+		return true, nil
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile or type(profile.Data) ~= "table" then
+		return false, `No saved data found for user {userId}.`
+	end
+
+	ensureManaData(profile.Data)
+	repairGuildInvites(profile.Data)
+
+	if type(profile.Data.Guild) == "table" and type(profile.Data.Guild.GuildId) == "string" and profile.Data.Guild.GuildId ~= "" then
+		return false, "Player already in a guild"
+	end
+
+	for _, invite in profile.Data.GuildInvites do
+		if invite.GuildId == guildId then
+			return true, nil
+		end
+	end
+
+	table.insert(profile.Data.GuildInvites, {
+		GuildId = guildId,
+		InvitedAt = os.time(),
+	})
+
 	local ok, err = pcall(function()
 		profile:SetAsync()
 	end)

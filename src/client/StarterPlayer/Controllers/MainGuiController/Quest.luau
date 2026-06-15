@@ -16,6 +16,9 @@ local timerRunning = false
 local QUEST_NOTI_KEY = "Quests"
 local QUEST_BUTTON_NAME = "QuestsButton"
 
+local playtimeBaselineAtSessionStart = 0
+local playtimeSessionStartedAt = 0
+
 local CATEGORY_FRAMES = { "Hourly", "Daily", "Weekly" }
 
 local acknowledgedQuestPeriods: { [string]: string } = {
@@ -105,6 +108,37 @@ local function shouldShowQuestNoti(quests: any): boolean
 	end
 
 	return hasNewClaimableQuests(quests)
+end
+
+local function syncPlaytimeSessionBaseline()
+	local PlayerDataController = Knit.GetController("PlayerDataController")
+	playtimeBaselineAtSessionStart = math.max(math.floor(tonumber(PlayerDataController:Get("PlaytimeSeconds")) or 0), 0)
+	playtimeSessionStartedAt = os.time()
+end
+
+local function getEstimatedPlaytimeSeconds(): number
+	return playtimeBaselineAtSessionStart + math.max(os.time() - playtimeSessionStartedAt, 0)
+end
+
+local function getQuestSlotProgress(category: string, slot: any): number
+	if type(slot) ~= "table" then
+		return 0
+	end
+
+	if slot.Type == "Playtime" then
+		local PlayerDataController = Knit.GetController("PlayerDataController")
+		local quests = PlayerDataController:Get("Quests")
+		local categoryData = if type(quests) == "table" then quests[category] else nil
+		local baselines = if type(categoryData) == "table" and type(categoryData.Baselines) == "table"
+			then categoryData.Baselines
+			else {}
+
+		return QuestUtil.computeProgress(slot.Type, slot.Target, {
+			PlaytimeSeconds = getEstimatedPlaytimeSeconds(),
+		}, baselines)
+	end
+
+	return math.max(math.floor(tonumber(slot.Progress) or 0), 0)
 end
 
 function Quest.Install(MainGuiController)
@@ -221,7 +255,7 @@ function Quest.Install(MainGuiController)
 			return
 		end
 
-		local progress = math.max(math.floor(tonumber(slot.Progress) or 0), 0)
+		local progress = getQuestSlotProgress(category, slot)
 		local isComplete = QuestUtil.isQuestComplete(slot.Type, slot.Target, progress)
 		local claimed = slot.Claimed == true
 
@@ -365,6 +399,7 @@ function Quest.Install(MainGuiController)
 				local frame = self:getQuestsFrame()
 				if frame and frame.Visible and self:areQuestsUnlocked() then
 					self:updateQuestCategoryTimers(frame)
+					self:updateQuestsFrame()
 				end
 				task.wait(1)
 			end
@@ -429,9 +464,7 @@ function Quest.Install(MainGuiController)
 							return
 						end
 
-						local progress = if type(slot) == "table"
-							then math.max(math.floor(tonumber(slot.Progress) or 0), 0)
-							else 0
+						local progress = if type(slot) == "table" then getQuestSlotProgress(category, slot) else 0
 						if type(slot) ~= "table"
 							or not QuestUtil.isQuestComplete(slot.Type, slot.Target, progress)
 						then
@@ -467,6 +500,15 @@ function Quest.Install(MainGuiController)
 		end
 
 		self:updateQuestsButtonNoti()
+
+		task.spawn(function()
+			local PlayerDataController = Knit.GetController("PlayerDataController")
+			PlayerDataController:WaitForData()
+			syncPlaytimeSessionBaseline()
+			table.insert(questConnections, PlayerDataController:Observe("PlaytimeSeconds", function()
+				syncPlaytimeSessionBaseline()
+			end))
+		end)
 	end
 end
 

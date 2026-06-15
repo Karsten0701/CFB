@@ -183,6 +183,34 @@ local function refreshCategoryProgress(PlayerDataService, player: Player, catego
 	end
 end
 
+local function ensurePlaytimeBaseline(PlayerDataService, player: Player, category: string)
+	local baselines = PlayerDataService:Get(player, { "Quests", category, "Baselines" })
+	if type(baselines) == "table" and baselines.PlaytimeSeconds ~= nil then
+		return
+	end
+
+	local liveStats = getLiveStats(PlayerDataService, player, PlayerDataService:GetPlaytimeSeconds(player))
+	PlayerDataService:Set(
+		player,
+		{ "Quests", category, "Baselines", "PlaytimeSeconds" },
+		QuestUtil.createBaselines(liveStats).PlaytimeSeconds
+	)
+end
+
+function QuestService:RefreshPlaytimeProgress(player: Player)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+	if not areQuestsUnlocked(PlayerDataService, player) then
+		return
+	end
+
+	local playtimeSeconds = PlayerDataService:GetPlaytimeSeconds(player)
+	for _, category in QuestConfig.Categories do
+		ensurePlaytimeBaseline(PlayerDataService, player, category)
+		refreshCategoryProgress(PlayerDataService, player, category, playtimeSeconds)
+	end
+end
+
 local function incrementCategoryStatNow(player: Player, statKey: string, amount: number)
 	if amount <= 0 then
 		return
@@ -302,7 +330,6 @@ function QuestService:EnsureQuestsFresh(player: Player)
 			else nil
 		local needsRoll = type(categoryData) ~= "table"
 			or categoryData.PeriodId ~= periodId
-			or (tonumber(categoryData.PeriodEnd) or 0) <= now
 			or type(firstSlot) ~= "table"
 			or firstSlot.QuestId == ""
 			or type(categoryData.Stats) ~= "table"
@@ -310,10 +337,11 @@ function QuestService:EnsureQuestsFresh(player: Player)
 		if needsRoll then
 			rollCategoryQuests(PlayerDataService, player, category, now)
 		else
-			if categoryData.PeriodEnd ~= periodEnd then
+			if (tonumber(categoryData.PeriodEnd) or 0) ~= periodEnd then
 				PlayerDataService:Set(player, { "Quests", category, "PeriodEnd" }, periodEnd)
 			end
 			migrateLegacyPeriodStats(PlayerDataService, player, category)
+			ensurePlaytimeBaseline(PlayerDataService, player, category)
 			refreshCategoryProgress(PlayerDataService, player, category)
 		end
 	end
@@ -445,10 +473,9 @@ function QuestService.Client:ClaimQuest(player: Player, category: string, slotIn
 
 	PlayerDataService:Set(player, { "Quests", category, "Slots", slotIndex, "Claimed" }, true)
 	PlayerDataService:Set(player, { "Quests", category, "Slots", slotIndex, "Progress" }, progress)
-	if PlayerDataService:Get(player, { "Analytics", "QuestClaimedFunnelLogged" }) ~= true then
-		if TierUnlockAnalytics.logQuestClaimed(player) then
-			PlayerDataService:Set(player, { "Analytics", "QuestClaimedFunnelLogged" }, true)
-		end
+	local claimCount = math.max(math.floor(PlayerDataService:Get(player, { "Analytics", "QuestClaimsFunnelLogged" }) or 0), 0) + 1
+	if TierUnlockAnalytics.logQuestClaimed(player, claimCount) then
+		PlayerDataService:Set(player, { "Analytics", "QuestClaimsFunnelLogged" }, claimCount)
 	end
 	return true, nil, QuestUtil.formatGrantedRewardText(resolvedReward)
 end
@@ -487,7 +514,7 @@ function QuestService:KnitStart()
 
 			PlayerDataService:Observe(player, "PlaytimeSeconds", function()
 				if areQuestsUnlocked(PlayerDataService, player) then
-					self:EnsureQuestsFresh(player)
+					self:RefreshPlaytimeProgress(player)
 				end
 			end)
 
@@ -513,11 +540,12 @@ function QuestService:KnitStart()
 
 	task.spawn(function()
 		while true do
-			task.wait(30)
+			task.wait(15)
 			for _, player in Players:GetPlayers() do
 				pcall(function()
 					if areQuestsUnlocked(PlayerDataService, player) then
 						self:EnsureQuestsFresh(player)
+						self:RefreshPlaytimeProgress(player)
 					end
 				end)
 			end

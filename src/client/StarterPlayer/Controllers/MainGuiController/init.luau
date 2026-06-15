@@ -28,6 +28,7 @@ local TeleportFeature = require(script.Teleport)
 local EventFeature = require(script.Event)
 local AdminMessagesFeature = require(script.AdminMessages)
 local SidePurchasesFeature = require(script.SidePurchases)
+local GuildsFeature = require(script.Guilds)
 
 local MainGuiController = Knit.CreateController({
 	Name = "MainGuiController",
@@ -272,6 +273,7 @@ TeleportFeature.Install(MainGuiController)
 EventFeature.Install(MainGuiController)
 AdminMessagesFeature.Install(MainGuiController)
 SidePurchasesFeature.Install(MainGuiController)
+GuildsFeature.Install(MainGuiController)
 
 function MainGuiController:getAmountLabel(containerName: string): TextLabel?
 	local mainGui = self:getMainGui()
@@ -1022,7 +1024,7 @@ function MainGuiController:ShowQuestRewardMessage(rewardText: string)
 end
 
 function MainGuiController:ShowMaxButtonLockedMessage()
-	self:showMessage("MaxButtonLocked", "Unlock this button in the Rebirth Upgrades.")
+	self:showMessage("MaxButtonLocked", "Unlock this button in the Upgrades.")
 end
 
 function MainGuiController:setupHomeIcon()
@@ -1120,7 +1122,8 @@ function MainGuiController:setupUpdateLogFrame()
 	end)
 
 	local topBar = updateLogFrame:FindFirstChild("TopBar")
-	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true) or updateLogFrame:FindFirstChild("CloseButton", true)
+	local closeButton = topBar and topBar:FindFirstChild("CloseButton", true)
+		or updateLogFrame:FindFirstChild("CloseButton", true)
 	if closeButton and closeButton:IsA("GuiObject") then
 		local clickable = self:getClickableGui(closeButton)
 		if clickable:IsA("TextButton") or clickable:IsA("ImageButton") then
@@ -1400,6 +1403,7 @@ function MainGuiController:updateAll(instant: boolean?)
 	self:setupUpgradesFrame()
 	self:setupYenUpgradesFrame()
 	self:setupQuestsFrame()
+	self:setupGuildsFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
 	self:setupEventFrame()
@@ -1440,6 +1444,7 @@ function MainGuiController:KnitStart()
 	self:setupUpgradesFrame()
 	self:setupYenUpgradesFrame()
 	self:setupQuestsFrame()
+	self:setupGuildsFrame()
 	self:setupOfflineEarningFrame()
 	self:setupIndexFrame()
 	self:setupOpenCapsuleFrame()
@@ -1611,6 +1616,7 @@ function MainGuiController:KnitStart()
 				self:setupUpgradesFrame()
 				self:setupYenUpgradesFrame()
 				self:setupQuestsFrame()
+				self:setupGuildsFrame()
 				self:setupOfflineEarningFrame()
 				self:setupIndexFrame()
 				self:setupOpenCapsuleFrame()

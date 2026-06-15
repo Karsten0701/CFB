@@ -1,7 +1,7 @@
 local RebirthUpgrades = {}
 
 RebirthUpgrades.UnitSpawnTier = {
-	MaxLevel = 4,
+	MaxLevel = 5,
 	kind = "RebirthTokens",
 	Costs = { 1, 4, 8, 20, 45 },
 }

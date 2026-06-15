@@ -1204,6 +1204,11 @@ function TycoonService.Client:CompleteTutorial(player: Player): (boolean, string
 	PlayerDataService:Set(player, { "Tutorial", "Prompted" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Accepted" }, true)
 	PlayerDataService:Set(player, { "Tutorial", "Completed" }, true)
+	if PlayerDataService:Get(player, { "Analytics", "TutorialStartFunnelLogged" }) ~= true then
+		if TierUnlockAnalytics.logTutorialInProgress(player) then
+			PlayerDataService:Set(player, { "Analytics", "TutorialStartFunnelLogged" }, true)
+		end
+	end
 	if PlayerDataService:Get(player, { "Analytics", "TutorialCompleteFunnelLogged" }) ~= true then
 		if TierUnlockAnalytics.logTutorialCompleted(player) then
 			PlayerDataService:Set(player, { "Analytics", "TutorialCompleteFunnelLogged" }, true)
@@ -1705,6 +1710,9 @@ end
 
 local function grantCapsuleUnit(player: Player, tier: number): (boolean, string?)
 	if TycoonService:GrantUnitAtTier(player, tier, 1) then
+		pcall(function()
+			Knit.GetService("QuestService"):TrackUnitsBought(player, getQuestUnitBuyProgressAmount(1, tier))
+		end)
 		return true
 	end
 
