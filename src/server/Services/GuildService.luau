@@ -58,9 +58,75 @@ local function buildSummary(guild: { [string]: any }, rank: number?): { [string]
 	return GuildUtil.toSummary(guild, rank)
 end
 
-local function getMemberPoints(PlayerDataService, userId: number): number
-	local points = PlayerDataService:GetLeaderboardValueByUserId(userId, "TotalUnitsBought")
-	return math.max(math.floor(tonumber(points) or 0), 0)
+local function getMemberPower(PlayerDataService, userId: number): number
+	return PlayerDataService:GetUnitPowerByUserId(userId)
+end
+
+local function computeGuildScore(PlayerDataService, guild: { [string]: any }): number
+	if type(guild.Members) ~= "table" then
+		return 0
+	end
+
+	local total = 0
+	for userIdStr in guild.Members do
+		local userId = tonumber(userIdStr)
+		if userId then
+			total += getMemberPower(PlayerDataService, userId)
+		end
+	end
+
+	return math.max(math.floor(total), 0)
+end
+
+local function buildRankMap(): { [string]: number }
+	return GuildDataStore.getRankMap()
+end
+
+function GuildService:RecalculateGuildScore(guildId: string)
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local guild = GuildDataStore.getGuild(guildId)
+	if not guild then
+		return
+	end
+
+	local score = computeGuildScore(PlayerDataService, guild)
+	if score == guild.GuildScore then
+		return
+	end
+
+	GuildDataStore.updateGuild(guildId, function(current)
+		if not current then
+			return nil
+		end
+		current.GuildScore = score
+		return current
+	end)
+end
+
+function GuildService:SyncGuildPowerScores()
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	local guildIds: { [string]: boolean } = {}
+
+	for _, player in Players:GetPlayers() do
+		PlayerDataService:WaitForData(player)
+		local guildData = PlayerDataService:GetGuildData(player)
+		if guildData.GuildId ~= "" then
+			guildIds[guildData.GuildId] = true
+		end
+	end
+
+	if next(guildIds) ~= nil then
+		GuildDataStore.setBatchLeaderboardMode(true)
+		for guildId in guildIds do
+			self:RecalculateGuildScore(guildId)
+		end
+		GuildDataStore.setBatchLeaderboardMode(false)
+		GuildDataStore.flushLeaderboardScores()
+	end
+
+	for guildId in guildIds do
+		self:FireGuildUpdated(guildId)
+	end
 end
 
 local function buildMemberList(
@@ -92,7 +158,7 @@ local function buildMemberList(
 				UserId = userId,
 				Role = tostring(role),
 				DisplayName = displayName,
-				Points = getMemberPoints(PlayerDataService, userId),
+				Points = getMemberPower(PlayerDataService, userId),
 			})
 		end
 	end
@@ -157,13 +223,15 @@ local function invitePlayerByUserId(
 	end
 
 	local added, addErr = PlayerDataService:AddGuildInviteForUserId(targetUserId, guildData.GuildId)
-	if not added then
+	local targetOnThisServer = targetPlayer ~= nil
+	if not added and targetOnThisServer then
 		return false, addErr or "Could not send invite"
 	end
 
-	local invitedPlayer = Players:GetPlayerByUserId(targetUserId)
-	if invitedPlayer then
-		self:FireGuildInvitesUpdated(invitedPlayer)
+	self:PublishGuildInvite(targetUserId, guildData.GuildId)
+
+	if targetOnThisServer and targetPlayer then
+		self:FireGuildInvitesUpdated(targetPlayer)
 	end
 
 	return true, nil
@@ -199,8 +267,256 @@ function GuildService:FireGuildUpdated(guildId: string)
 	end
 end
 
+function GuildService:FireGuildUpdatedToPlayer(player: Player, guildId: string)
+	self.Client.GuildUpdated:Fire(player, guildId)
+end
+
+function GuildService:BroadcastGuildUpdated(guildId: string)
+	self:FireGuildUpdated(guildId)
+	GuildDataStore.publishGuildSync({
+		Type = "guild_updated",
+		GuildId = guildId,
+	})
+end
+
+function GuildService:PublishGuildInvite(targetUserId: number, guildId: string)
+	GuildDataStore.publishGuildSync({
+		Type = "invite",
+		TargetUserId = targetUserId,
+		GuildId = guildId,
+	})
+end
+
+function GuildService:PublishPlayerGuildSync(
+	userId: number,
+	guildId: string,
+	role: string,
+	ownedGuildId: string?,
+	clearOwnedGuildId: boolean?
+)
+	GuildDataStore.publishGuildSync({
+		Type = "player_sync",
+		UserId = userId,
+		GuildId = guildId,
+		Role = role,
+		OwnedGuildId = ownedGuildId,
+		ClearOwnedGuildId = clearOwnedGuildId == true,
+	})
+end
+
+function GuildService:PublishGuildDisbanded(guildId: string)
+	GuildDataStore.publishGuildSync({
+		Type = "guild_disbanded",
+		GuildId = guildId,
+	})
+end
+
+local function applyRemotePlayerSync(guildService: typeof(GuildService), data: { [string]: any })
+	local userId = math.floor(tonumber(data.UserId) or 0)
+	if userId <= 0 then
+		return
+	end
+
+	local player = Players:GetPlayerByUserId(userId)
+	if not player then
+		return
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local previousGuildId = PlayerDataService:GetGuildData(player).GuildId
+	local guildId = if type(data.GuildId) == "string" then data.GuildId else ""
+	local role = if type(data.Role) == "string" then data.Role else ""
+
+	if guildId == "" then
+		PlayerDataService:SetGuildMembership(player, "", "", if data.ClearOwnedGuildId == true then "" else nil)
+	else
+		local ownedGuildId = if type(data.OwnedGuildId) == "string" then data.OwnedGuildId else nil
+		PlayerDataService:SetGuildMembership(player, guildId, role, ownedGuildId)
+		PlayerDataService:RemoveGuildInvite(player, guildId)
+	end
+
+	guildService:FireGuildInvitesUpdated(player)
+
+	if guildId ~= "" then
+		guildService:FireGuildUpdated(guildId)
+	elseif previousGuildId ~= "" then
+		guildService:FireGuildUpdated(previousGuildId)
+	end
+
+	guildService:FireGuildUpdatedToPlayer(player, if guildId ~= "" then guildId else previousGuildId)
+end
+
+local function applyRemoteInvite(guildService: typeof(GuildService), data: { [string]: any })
+	local targetUserId = math.floor(tonumber(data.TargetUserId) or 0)
+	local guildId = data.GuildId
+	if targetUserId <= 0 or type(guildId) ~= "string" or guildId == "" then
+		return
+	end
+
+	local player = Players:GetPlayerByUserId(targetUserId)
+	if not player then
+		return
+	end
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	PlayerDataService:WaitForData(player)
+
+	local guildData = PlayerDataService:GetGuildData(player)
+	if guildData.GuildId ~= "" then
+		return
+	end
+
+	if not PlayerDataService:HasGuildInvite(player, guildId) then
+		PlayerDataService:Update(player, "GuildInvites", function(current: any)
+			local invites = if type(current) == "table" then current else {}
+			table.insert(invites, {
+				GuildId = guildId,
+				InvitedAt = os.time(),
+			})
+			return invites
+		end)
+	end
+
+	guildService:FireGuildInvitesUpdated(player)
+end
+
+local function applyRemoteGuildUpdated(guildService: typeof(GuildService), data: { [string]: any })
+	local guildId = data.GuildId
+	if type(guildId) ~= "string" or guildId == "" then
+		return
+	end
+
+	GuildDataStore.invalidateGuildCache(guildId)
+	guildService:FireGuildUpdated(guildId)
+end
+
+local function applyRemoteGuildDisbanded(guildService: typeof(GuildService), data: { [string]: any })
+	local guildId = data.GuildId
+	if type(guildId) ~= "string" or guildId == "" then
+		return
+	end
+
+	GuildDataStore.invalidateGuildCache(guildId)
+	GuildDataStore.invalidateTopGuildsCache()
+
+	local PlayerDataService = Knit.GetService("PlayerDataService")
+	for _, player in Players:GetPlayers() do
+		task.spawn(function()
+			PlayerDataService:WaitForData(player)
+			local guildData = PlayerDataService:GetGuildData(player)
+			if guildData.GuildId ~= guildId then
+				return
+			end
+
+			local clearOwned = guildData.Role == GuildUtil.RoleOwner
+			PlayerDataService:SetGuildMembership(player, "", "", if clearOwned then "" else nil)
+			guildService:FireGuildUpdatedToPlayer(player, guildId)
+		end)
+	end
+end
+
+local function handleGuildSyncMessage(guildService: typeof(GuildService), data: { [string]: any })
+	local eventType = data.Type
+	if eventType == "invite" then
+		applyRemoteInvite(guildService, data)
+	elseif eventType == "player_sync" then
+		applyRemotePlayerSync(guildService, data)
+	elseif eventType == "guild_updated" then
+		applyRemoteGuildUpdated(guildService, data)
+	elseif eventType == "guild_disbanded" then
+		applyRemoteGuildDisbanded(guildService, data)
+	end
+end
+
 function GuildService:FireGuildInvitesUpdated(player: Player)
 	self.Client.GuildInvitesUpdated:Fire(player)
+end
+
+local function disbandGuild(
+	guildService: typeof(GuildService),
+	PlayerDataService,
+	guildId: string
+): (boolean, string?)
+	local guild = GuildDataStore.getGuild(guildId)
+	if not guild then
+		return false, "Guild not found"
+	end
+
+	local memberUserIds: { number } = {}
+	if type(guild.Members) == "table" then
+		for userIdStr in guild.Members do
+			local userId = tonumber(userIdStr)
+			if userId then
+				table.insert(memberUserIds, userId)
+			end
+		end
+	end
+
+	local onlineMembers = getOnlineMembers(guild)
+	local ownerId = guild.OwnerId
+
+	local deleted, deleteErr = GuildDataStore.deleteGuild(guildId)
+	if not deleted then
+		return false, deleteErr or "Could not disband guild"
+	end
+
+	for _, userId in memberUserIds do
+		local clearOwned = userId == ownerId
+		local memberPlayer = Players:GetPlayerByUserId(userId)
+		if memberPlayer then
+			PlayerDataService:SetGuildMembership(memberPlayer, "", "", if clearOwned then "" else nil)
+		else
+			PlayerDataService:ClearGuildMembershipForUserId(userId, clearOwned)
+		end
+	end
+
+	for _, memberPlayer in onlineMembers do
+		guildService.Client.GuildUpdated:Fire(memberPlayer, guildId)
+	end
+
+	for _, userId in memberUserIds do
+		guildService:PublishPlayerGuildSync(userId, "", "", nil, userId == ownerId)
+	end
+	guildService:PublishGuildDisbanded(guildId)
+
+	return true, nil
+end
+
+local function leaveMemberFromGuild(
+	guildService: typeof(GuildService),
+	PlayerDataService,
+	player: Player
+): (boolean, string?)
+	local guildData = PlayerDataService:GetGuildData(player)
+	if guildData.GuildId == "" then
+		return true, nil
+	end
+
+	if guildData.Role == GuildUtil.RoleOwner then
+		return disbandGuild(guildService, PlayerDataService, guildData.GuildId)
+	end
+
+	local guildId = guildData.GuildId
+	local userIdStr = tostring(player.UserId)
+	local updatedGuild = GuildDataStore.updateGuild(guildId, function(current)
+		if not current or type(current.Members) ~= "table" then
+			return nil
+		end
+		current.Members[userIdStr] = nil
+		return current
+	end)
+
+	if not updatedGuild then
+		return false, "Could not leave guild"
+	end
+
+	PlayerDataService:SetGuildMembership(player, "", "", guildData.OwnedGuildId)
+	guildService:RecalculateGuildScore(guildId)
+	guildService:PublishPlayerGuildSync(player.UserId, "", "", nil, false)
+	guildService:BroadcastGuildUpdated(guildId)
+	return true, nil
 end
 
 local function addMemberToGuild(
@@ -234,6 +550,9 @@ local function addMemberToGuild(
 	local guildData = PlayerDataService:GetGuildData(player)
 	PlayerDataService:SetGuildMembership(player, guildId, role, guildData.OwnedGuildId)
 	PlayerDataService:RemoveGuildInvite(player, guildId)
+
+	local guildService = Knit.GetService("GuildService")
+	guildService:RecalculateGuildScore(guildId)
 	return true, nil
 end
 
@@ -254,6 +573,11 @@ function GuildService:ReconcilePlayerGuild(player: Player)
 end
 
 function GuildService:KnitStart()
+	GuildDataStore.subscribeLeaderboardInvalidation()
+	GuildDataStore.subscribeGuildSync(function(data)
+		handleGuildSyncMessage(self, data)
+	end)
+
 	for _, player in Players:GetPlayers() do
 		task.spawn(function()
 			self:ReconcilePlayerGuild(player)
@@ -268,6 +592,16 @@ function GuildService:KnitStart()
 
 	Players.PlayerRemoving:Connect(function(player)
 		releaseLock(player.UserId)
+	end)
+
+	task.spawn(function()
+		local interval = math.max(math.floor(tonumber(GuildConfig.PowerSyncIntervalSeconds) or 300), 60)
+		while true do
+			task.wait(interval)
+			pcall(function()
+				self:SyncGuildPowerScores()
+			end)
+		end
 	end)
 end
 
@@ -296,8 +630,13 @@ function GuildService.Client:CreateGuild(
 	end
 
 	if guildData.OwnedGuildId ~= "" then
-		releaseLock(player.UserId)
-		return false, "You already created a guild", nil
+		local ownedGuild = GuildDataStore.getGuild(guildData.OwnedGuildId)
+		if ownedGuild then
+			releaseLock(player.UserId)
+			return false, "You already created a guild", nil
+		end
+
+		PlayerDataService:SetGuildMembership(player, guildData.GuildId, guildData.Role, "")
 	end
 
 	local validName, nameErr = GuildUtil.isValidGuildName(name)
@@ -349,7 +688,7 @@ function GuildService.Client:CreateGuild(
 		Members = {
 			[tostring(player.UserId)] = GuildUtil.RoleOwner,
 		},
-		GuildScore = 0,
+		GuildScore = PlayerDataService:GetUnitPowerByUserId(player.UserId),
 		MaxMembers = GuildConfig.MaxMembers,
 		CreatedAt = os.time(),
 	}
@@ -363,7 +702,7 @@ function GuildService.Client:CreateGuild(
 	end
 
 	PlayerDataService:SetGuildMembership(player, guildId, GuildUtil.RoleOwner, guildId)
-	self.Server:FireGuildUpdated(guildId)
+	self.Server:BroadcastGuildUpdated(guildId)
 	releaseLock(player.UserId)
 
 	return true, nil, buildSummary(guildRecord, 0)
@@ -383,19 +722,29 @@ function GuildService.Client:GetTopGuilds(player: Player): { guilds: { { [string
 	return { guilds = guilds }
 end
 
-function GuildService.Client:BrowseGuilds(player: Player, page: any): ({ guilds: { { [string]: any } } }, boolean)
-	page = math.max(math.floor(tonumber(page) or 1), 1)
-	local pageEntries, hasMore = GuildDataStore.getPublicGuildsPage(page, GuildConfig.BrowsePageSize)
+function GuildService.Client:BrowseGuilds(
+	player: Player,
+	searchQuery: any
+): ({ guilds: { { [string]: any } } }, boolean)
+	local query = if type(searchQuery) == "string" then GuildUtil.normalizeGuildName(searchQuery) else ""
+	local browseEntries
+	if query ~= "" then
+		browseEntries = GuildDataStore.searchPublicGuilds(query, GuildConfig.BrowseSearchMaxResults)
+	else
+		browseEntries = GuildDataStore.getBrowseGuildsRandom(GuildConfig.BrowseRandomCount)
+	end
+
+	local rankMap = buildRankMap()
 	local guilds = {}
 
-	for _, entry in pageEntries do
-		local summary = buildSummary(entry.guild, 0)
+	for _, entry in browseEntries do
+		local summary = buildSummary(entry.guild, rankMap[entry.guild.Id] or 0)
 		if summary then
 			table.insert(guilds, summary)
 		end
 	end
 
-	return { guilds = guilds }, hasMore
+	return { guilds = guilds }, false
 end
 
 function GuildService.Client:GetGuildDetails(
@@ -511,11 +860,16 @@ function GuildService.Client:AcceptGuildInvite(player: Player, guildId: any): (b
 
 	local guildData = PlayerDataService:GetGuildData(player)
 	if guildData.GuildId ~= "" then
-		releaseLock(player.UserId)
 		if guildData.GuildId == guildId then
+			releaseLock(player.UserId)
 			return false, "Already in this guild"
 		end
-		return false, "Already in a guild"
+
+		local left, leaveErr = leaveMemberFromGuild(self.Server, PlayerDataService, player)
+		if not left then
+			releaseLock(player.UserId)
+			return false, leaveErr or "Could not leave current guild"
+		end
 	end
 
 	local guild = GuildDataStore.getGuild(guildId)
@@ -536,7 +890,9 @@ function GuildService.Client:AcceptGuildInvite(player: Player, guildId: any): (b
 		return false, err
 	end
 
-	self.Server:FireGuildUpdated(guildId)
+	local updatedGuildData = PlayerDataService:GetGuildData(player)
+	self.Server:PublishPlayerGuildSync(player.UserId, guildId, GuildUtil.RoleMember, updatedGuildData.OwnedGuildId)
+	self.Server:BroadcastGuildUpdated(guildId)
 	self.Server:FireGuildInvitesUpdated(player)
 	releaseLock(player.UserId)
 	return true, nil
@@ -629,9 +985,11 @@ function GuildService.Client:SetGuildVisibility(player: Player, isPublic: any): 
 
 	if nextIsPublic then
 		GuildDataStore.appendPublicGuildId(guildId)
+	else
+		GuildDataStore.removePublicGuildId(guildId)
 	end
 
-	self.Server:FireGuildUpdated(guildId)
+	self.Server:BroadcastGuildUpdated(guildId)
 	return true, nil
 end
 
@@ -645,8 +1003,16 @@ function GuildService.Client:JoinGuild(player: Player, guildId: any): (boolean, 
 
 	local guildData = PlayerDataService:GetGuildData(player)
 	if guildData.GuildId ~= "" then
-		releaseLock(player.UserId)
-		return false, "Already in a guild"
+		if guildData.GuildId == guildId then
+			releaseLock(player.UserId)
+			return false, "Already in this guild"
+		end
+
+		local left, leaveErr = leaveMemberFromGuild(self.Server, PlayerDataService, player)
+		if not left then
+			releaseLock(player.UserId)
+			return false, leaveErr or "Could not leave current guild"
+		end
 	end
 
 	if type(guildId) ~= "string" or guildId == "" then
@@ -674,7 +1040,9 @@ function GuildService.Client:JoinGuild(player: Player, guildId: any): (boolean, 
 		return false, err or "Could not join guild"
 	end
 
-	self.Server:FireGuildUpdated(guildId)
+	local updatedGuildData = PlayerDataService:GetGuildData(player)
+	self.Server:PublishPlayerGuildSync(player.UserId, guildId, GuildUtil.RoleMember, updatedGuildData.OwnedGuildId)
+	self.Server:BroadcastGuildUpdated(guildId)
 	releaseLock(player.UserId)
 	return true, nil
 end
@@ -693,29 +1061,12 @@ function GuildService.Client:LeaveGuild(player: Player): (boolean, string?)
 		return false, "Not in a guild"
 	end
 
-	if guildData.Role == GuildUtil.RoleOwner then
-		releaseLock(player.UserId)
-		return false, "Owner cannot leave"
-	end
-
-	local guildId = guildData.GuildId
-	local userIdStr = tostring(player.UserId)
-	local updatedGuild = GuildDataStore.updateGuild(guildId, function(current)
-		if not current or type(current.Members) ~= "table" then
-			return nil
-		end
-		current.Members[userIdStr] = nil
-		return current
-	end)
-
-	if not updatedGuild then
-		releaseLock(player.UserId)
-		return false, "Could not leave guild"
-	end
-
-	PlayerDataService:SetGuildMembership(player, "", "", guildData.OwnedGuildId)
-	self.Server:FireGuildUpdated(guildId)
+	local success, err = leaveMemberFromGuild(self.Server, PlayerDataService, player)
 	releaseLock(player.UserId)
+	if not success then
+		return false, err or "Could not leave guild"
+	end
+
 	return true, nil
 end
 
@@ -763,7 +1114,9 @@ function GuildService.Client:KickMember(player: Player, targetUserId: any): (boo
 	end
 
 	PlayerDataService:ClearGuildMembershipForUserId(targetUserId)
-	self.Server:FireGuildUpdated(guildId)
+	self.Server:PublishPlayerGuildSync(targetUserId, "", "", nil, false)
+	self.Server:RecalculateGuildScore(guildId)
+	self.Server:BroadcastGuildUpdated(guildId)
 	releaseLock(player.UserId)
 	return true, nil
 end

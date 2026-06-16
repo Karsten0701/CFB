@@ -1,5 +1,6 @@
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
+local MessagingService = game:GetService("MessagingService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local GuildConfig = require(ReplicatedStorage.Shared.Data.GuildConfig)
@@ -15,6 +16,19 @@ local publicIndexStore = DataStoreService:GetDataStore(GuildConfig.DataStorePref
 local PUBLIC_INDEX_KEY = "GuildIds"
 local DATASTORE_RETRIES = 3
 
+local topGuildsCache: {
+	entries: { { guild: { [string]: any }, rank: number } },
+	rankMap: { [string]: number },
+	expiresAt: number,
+}? = nil
+
+local guildRecordCache: { [string]: { guild: { [string]: any }?, expiresAt: number } } = {}
+local pendingLeaderboardWrites: { [string]: number } = {}
+local batchLeaderboardMode = false
+local leaderboardFlushThread: thread? = nil
+local messagingSubscribed = false
+local guildSyncSubscribed = false
+
 local function retryAsync(callback: () -> any): (boolean, any)
 	local lastErr: any = nil
 	for attempt = 1, DATASTORE_RETRIES do
@@ -26,6 +40,130 @@ local function retryAsync(callback: () -> any): (boolean, any)
 		task.wait(0.25 * attempt)
 	end
 	return false, lastErr
+end
+
+local function getGuildRecordCacheSeconds(): number
+	return math.max(math.floor(tonumber(GuildConfig.GuildRecordCacheSeconds) or 60), 1)
+end
+
+local function getLeaderboardCacheSeconds(): number
+	return math.max(math.floor(tonumber(GuildConfig.LeaderboardCacheSeconds) or 300), 1)
+end
+
+local function invalidateGuildRecordCache(guildId: string?)
+	if guildId then
+		guildRecordCache[guildId] = nil
+	else
+		table.clear(guildRecordCache)
+	end
+end
+
+function GuildDataStore.setBatchLeaderboardMode(enabled: boolean)
+	batchLeaderboardMode = enabled == true
+end
+
+function GuildDataStore.publishLeaderboardInvalidation()
+	pcall(function()
+		MessagingService:PublishAsync(GuildConfig.MessagingTopicLeaderboard, {
+			At = os.time(),
+		})
+	end)
+end
+
+function GuildDataStore.subscribeLeaderboardInvalidation()
+	if messagingSubscribed then
+		return
+	end
+
+	messagingSubscribed = true
+	pcall(function()
+		MessagingService:SubscribeAsync(GuildConfig.MessagingTopicLeaderboard, function()
+			GuildDataStore.invalidateTopGuildsCache()
+		end)
+	end)
+end
+
+function GuildDataStore.invalidateGuildCache(guildId: string?)
+	invalidateGuildRecordCache(guildId)
+end
+
+function GuildDataStore.publishGuildSync(payload: { [string]: any })
+	local message = table.clone(payload)
+	message.OriginJobId = game.JobId
+	message.At = os.time()
+
+	pcall(function()
+		MessagingService:PublishAsync(GuildConfig.MessagingTopicGuildSync, message)
+	end)
+end
+
+function GuildDataStore.subscribeGuildSync(handler: (message: { [string]: any }) -> ())
+	if guildSyncSubscribed then
+		return
+	end
+
+	guildSyncSubscribed = true
+	pcall(function()
+		MessagingService:SubscribeAsync(GuildConfig.MessagingTopicGuildSync, function(message)
+			local data = message.Data
+			if type(data) ~= "table" then
+				return
+			end
+
+			if data.OriginJobId == game.JobId then
+				return
+			end
+
+			handler(data)
+		end)
+	end)
+end
+
+local function writeLeaderboardScore(guildId: string, score: number)
+	score = math.max(math.floor(tonumber(score) or 0), 0)
+	retryAsync(function()
+		leaderboardStore:SetAsync(guildId, score)
+	end)
+end
+
+function GuildDataStore.queueLeaderboardScore(guildId: string, score: number)
+	if type(guildId) ~= "string" or guildId == "" then
+		return
+	end
+
+	pendingLeaderboardWrites[guildId] = math.max(math.floor(tonumber(score) or 0), 0)
+
+	if leaderboardFlushThread then
+		return
+	end
+
+	local delaySeconds = math.max(tonumber(GuildConfig.LeaderboardWriteIntervalSeconds) or 2, 0.5)
+	leaderboardFlushThread = task.delay(delaySeconds, function()
+		leaderboardFlushThread = nil
+		GuildDataStore.flushLeaderboardScores()
+	end)
+end
+
+function GuildDataStore.flushLeaderboardScores()
+	if leaderboardFlushThread then
+		task.cancel(leaderboardFlushThread)
+		leaderboardFlushThread = nil
+	end
+
+	local writes = pendingLeaderboardWrites
+	pendingLeaderboardWrites = {}
+
+	local wroteAny = false
+	for guildId, score in writes do
+		writeLeaderboardScore(guildId, score)
+		wroteAny = true
+		task.wait(0.15)
+	end
+
+	if wroteAny then
+		GuildDataStore.invalidateTopGuildsCache()
+		GuildDataStore.publishLeaderboardInvalidation()
+	end
 end
 
 local function normalizeGuildRecord(guild: any): { [string]: any }?
@@ -62,6 +200,26 @@ local function appendPublicGuildId(guildId: string)
 	end)
 end
 
+local function removePublicGuildId(guildId: string)
+	retryAsync(function()
+		publicIndexStore:UpdateAsync(PUBLIC_INDEX_KEY, function(current)
+			local ids = if type(current) == "table" then current else {}
+			local index = table.find(ids, guildId)
+			if index then
+				table.remove(ids, index)
+			end
+			return ids
+		end)
+	end)
+end
+
+local function shuffleInPlace(list: { any })
+	for index = #list, 2, -1 do
+		local swapIndex = math.random(1, index)
+		list[index], list[swapIndex] = list[swapIndex], list[index]
+	end
+end
+
 local function getPublicGuildIds(): { string }
 	local ok, result = retryAsync(function()
 		return publicIndexStore:GetAsync(PUBLIC_INDEX_KEY)
@@ -88,6 +246,19 @@ function GuildDataStore.reserveName(nameKey: string, guildId: string): (boolean,
 		return false, "Invalid name"
 	end
 
+	local okGet, currentGuildId = retryAsync(function()
+		return nameStore:GetAsync(nameKey)
+	end)
+	if okGet and type(currentGuildId) == "string" and currentGuildId ~= "" then
+		local existingGuild = GuildDataStore.getGuild(currentGuildId, true)
+		if existingGuild and currentGuildId ~= guildId then
+			return false, "Guild name already taken"
+		end
+		if not existingGuild then
+			GuildDataStore.forceReleaseName(nameKey)
+		end
+	end
+
 	local reserved = false
 	local ok, err = retryAsync(function()
 		nameStore:UpdateAsync(nameKey, function(current)
@@ -110,23 +281,43 @@ function GuildDataStore.reserveName(nameKey: string, guildId: string): (boolean,
 	return true, nil
 end
 
-function GuildDataStore.releaseName(nameKey: string, guildId: string)
+function GuildDataStore.releaseName(nameKey: string, guildId: string): boolean
 	if nameKey == "" then
-		return
+		return true
 	end
 
-	retryAsync(function()
+	local released = false
+	local ok = retryAsync(function()
 		nameStore:UpdateAsync(nameKey, function(current)
 			if current == guildId then
+				released = true
 				return nil
 			end
 			return current
 		end)
 	end)
+
+	return ok == true and released
+end
+
+function GuildDataStore.forceReleaseName(nameKey: string): boolean
+	if nameKey == "" then
+		return true
+	end
+
+	local ok = retryAsync(function()
+		nameStore:RemoveAsync(nameKey)
+	end)
+
+	return ok == true
 end
 
 function GuildDataStore.appendPublicGuildId(guildId: string)
 	appendPublicGuildId(guildId)
+end
+
+function GuildDataStore.removePublicGuildId(guildId: string)
+	removePublicGuildId(guildId)
 end
 
 function GuildDataStore.saveGuild(guild: { [string]: any }): (boolean, string?)
@@ -142,20 +333,29 @@ function GuildDataStore.saveGuild(guild: { [string]: any }): (boolean, string?)
 		return false, tostring(err)
 	end
 
-	retryAsync(function()
-		leaderboardStore:SetAsync(normalized.Id, normalized.GuildScore)
-	end)
+	invalidateGuildRecordCache(normalized.Id)
+	writeLeaderboardScore(normalized.Id, normalized.GuildScore)
 
 	if normalized.IsPublic then
 		appendPublicGuildId(normalized.Id)
 	end
 
+	GuildDataStore.invalidateTopGuildsCache()
+	GuildDataStore.publishLeaderboardInvalidation()
+
 	return true, nil
 end
 
-function GuildDataStore.getGuild(guildId: string): { [string]: any }?
+function GuildDataStore.getGuild(guildId: string, bypassCache: boolean?): { [string]: any }?
 	if type(guildId) ~= "string" or guildId == "" then
 		return nil
+	end
+
+	if bypassCache ~= true then
+		local cached = guildRecordCache[guildId]
+		if cached and cached.expiresAt > os.clock() then
+			return cached.guild
+		end
 	end
 
 	local ok, result = retryAsync(function()
@@ -165,7 +365,13 @@ function GuildDataStore.getGuild(guildId: string): { [string]: any }?
 		return nil
 	end
 
-	return normalizeGuildRecord(result)
+	local normalized = normalizeGuildRecord(result)
+	guildRecordCache[guildId] = {
+		guild = normalized,
+		expiresAt = os.clock() + getGuildRecordCacheSeconds(),
+	}
+
+	return normalized
 end
 
 function GuildDataStore.getGuildByName(name: string): { [string]: any }?
@@ -193,12 +399,15 @@ function GuildDataStore.updateGuild(
 	end
 
 	local updatedGuild: { [string]: any }? = nil
+	local previousScore: number? = nil
 	local ok, err = retryAsync(function()
 		guildStore:UpdateAsync(guildId, function(current)
 			local normalized = normalizeGuildRecord(current)
 			if not normalized then
 				return nil
 			end
+
+			previousScore = normalized.GuildScore
 
 			local nextGuild = mutator(normalized)
 			if type(nextGuild) ~= "table" then
@@ -215,10 +424,16 @@ function GuildDataStore.updateGuild(
 		return nil, tostring(err)
 	end
 
-	if updatedGuild then
-		retryAsync(function()
-			leaderboardStore:SetAsync(guildId, updatedGuild.GuildScore)
-		end)
+	invalidateGuildRecordCache(guildId)
+
+	if updatedGuild and updatedGuild.GuildScore ~= previousScore then
+		if batchLeaderboardMode then
+			GuildDataStore.queueLeaderboardScore(guildId, updatedGuild.GuildScore)
+		else
+			writeLeaderboardScore(guildId, updatedGuild.GuildScore)
+			GuildDataStore.invalidateTopGuildsCache()
+			GuildDataStore.publishLeaderboardInvalidation()
+		end
 	end
 
 	return updatedGuild, nil
@@ -232,43 +447,68 @@ function GuildDataStore.publishScore(guildId: string, score: number): boolean
 	return ok
 end
 
+function GuildDataStore.invalidateTopGuildsCache()
+	topGuildsCache = nil
+end
+
+function GuildDataStore.getRankMap(): { [string]: number }
+	GuildDataStore.getTopGuilds(GuildConfig.TopGuildsCount)
+	if topGuildsCache and topGuildsCache.rankMap then
+		return topGuildsCache.rankMap
+	end
+	return {}
+end
+
 function GuildDataStore.getGuildRank(guildId: string): number
 	if type(guildId) ~= "string" or guildId == "" then
 		return 0
 	end
 
-	local entries = GuildDataStore.getTopGuilds(GuildConfig.TopGuildsCount)
-	for _, entry in entries do
-		if entry.guild.Id == guildId then
-			return entry.rank
-		end
-	end
-
-	return 0
+	local rankMap = GuildDataStore.getRankMap()
+	return rankMap[guildId] or 0
 end
 
 function GuildDataStore.getTopGuilds(limit: number?): { { guild: { [string]: any }, rank: number } }
 	limit = math.max(math.floor(tonumber(limit) or GuildConfig.TopGuildsCount), 1)
 
+	if topGuildsCache and topGuildsCache.expiresAt > os.clock() then
+		local cached = {}
+		for index = 1, math.min(limit, #topGuildsCache.entries) do
+			local entry = topGuildsCache.entries[index]
+			if entry then
+				table.insert(cached, entry)
+			end
+		end
+		return cached
+	end
+
 	local ok, pages = retryAsync(function()
 		return leaderboardStore:GetSortedAsync(false, limit)
 	end)
 	if not ok or not pages then
-		return {}
+		return topGuildsCache and topGuildsCache.entries or {}
 	end
 
 	local entries = {}
+	local rankMap: { [string]: number } = {}
 	local rank = 0
 	for _, item in pages:GetCurrentPage() do
 		rank += 1
 		local guild = GuildDataStore.getGuild(item.key)
 		if guild then
+			rankMap[guild.Id] = rank
 			table.insert(entries, {
 				guild = guild,
 				rank = rank,
 			})
 		end
 	end
+
+	topGuildsCache = {
+		entries = entries,
+		rankMap = rankMap,
+		expiresAt = os.clock() + getLeaderboardCacheSeconds(),
+	}
 
 	return entries
 end
@@ -306,6 +546,92 @@ function GuildDataStore.getPublicGuildsPage(page: number, pageSize: number?): ({
 	end
 
 	return pageGuilds, endIndex < #guilds
+end
+
+function GuildDataStore.getBrowseGuildsRandom(limit: number?): { { guild: { [string]: any } } }
+	limit = math.max(math.floor(tonumber(limit) or GuildConfig.BrowseRandomCount), 1)
+
+	local guildIds = getPublicGuildIds()
+	shuffleInPlace(guildIds)
+
+	local result = {}
+	for index = 1, math.min(limit, #guildIds) do
+		local guildId = guildIds[index]
+		if type(guildId) == "string" and guildId ~= "" then
+			local guild = GuildDataStore.getGuild(guildId)
+			if guild and guild.IsPublic then
+				table.insert(result, { guild = guild })
+			end
+		end
+	end
+
+	return result
+end
+
+function GuildDataStore.searchPublicGuilds(query: string, limit: number?): { { guild: { [string]: any } } }
+	limit = math.max(math.floor(tonumber(limit) or GuildConfig.BrowseSearchMaxResults), 1)
+
+	local nameKey = GuildUtil.getNameKey(query)
+	if nameKey == "" then
+		return {}
+	end
+
+	local guildIds = getPublicGuildIds()
+	local results = {}
+
+	for _, guildId in guildIds do
+		if #results >= limit then
+			break
+		end
+
+		local guild = GuildDataStore.getGuild(guildId)
+		if guild and guild.IsPublic then
+			local guildNameKey = GuildUtil.getNameKey(guild.Name)
+			if string.find(guildNameKey, nameKey, 1, true) then
+				table.insert(results, { guild = guild })
+			end
+		end
+	end
+
+	table.sort(results, function(left, right)
+		return left.guild.Name < right.guild.Name
+	end)
+
+	return results
+end
+
+function GuildDataStore.deleteGuild(guildId: string): (boolean, string?)
+	if type(guildId) ~= "string" or guildId == "" then
+		return false, "Invalid guild"
+	end
+
+	local guild = GuildDataStore.getGuild(guildId, true)
+	if not guild then
+		return false, "Guild not found"
+	end
+
+	local nameKey = guild.NameKey
+	local ok, err = retryAsync(function()
+		guildStore:RemoveAsync(guildId)
+	end)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	retryAsync(function()
+		leaderboardStore:RemoveAsync(guildId)
+	end)
+
+	if not GuildDataStore.forceReleaseName(nameKey) then
+		GuildDataStore.releaseName(nameKey, guildId)
+	end
+	removePublicGuildId(guildId)
+	invalidateGuildRecordCache(guildId)
+	pendingLeaderboardWrites[guildId] = nil
+	GuildDataStore.invalidateTopGuildsCache()
+	GuildDataStore.publishLeaderboardInvalidation()
+
+	return true, nil
 end
 
 return GuildDataStore

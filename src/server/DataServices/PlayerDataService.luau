@@ -1431,7 +1431,7 @@ function PlayerDataService:SetGuildMembership(
 	})
 end
 
-function PlayerDataService:ClearGuildMembershipForUserId(userId: number): (boolean, string?)
+function PlayerDataService:ClearGuildMembershipForUserId(userId: number, clearOwnedGuildId: boolean?): (boolean, string?)
 	userId = math.floor(tonumber(userId) or 0)
 	if userId <= 0 then
 		return false, "Invalid user"
@@ -1444,7 +1444,7 @@ function PlayerDataService:ClearGuildMembershipForUserId(userId: number): (boole
 		self:Set(onlinePlayer, "Guild", {
 			GuildId = "",
 			Role = "",
-			OwnedGuildId = current.OwnedGuildId,
+			OwnedGuildId = if clearOwnedGuildId == true then "" else current.OwnedGuildId,
 		})
 		return true, nil
 	end
@@ -1456,8 +1456,10 @@ function PlayerDataService:ClearGuildMembershipForUserId(userId: number): (boole
 
 	ensureManaData(profile.Data)
 	local ownedGuildId = ""
-	if type(profile.Data.Guild) == "table" and type(profile.Data.Guild.OwnedGuildId) == "string" then
-		ownedGuildId = profile.Data.Guild.OwnedGuildId
+	if clearOwnedGuildId ~= true then
+		if type(profile.Data.Guild) == "table" and type(profile.Data.Guild.OwnedGuildId) == "string" then
+			ownedGuildId = profile.Data.Guild.OwnedGuildId
+		end
 	end
 
 	profile.Data.Guild = {
@@ -1624,6 +1626,28 @@ end
 
 function PlayerDataService:GetUnits(player: Player): { { Tier: number, Slot: number } }
 	return self:Get(player, "Units") or {}
+end
+
+function PlayerDataService:GetUnitPowerByUserId(userId: number): number
+	userId = finiteNonNegativeInteger(userId, 0)
+	if userId <= 0 then
+		return 0
+	end
+
+	local onlinePlayer = Players:GetPlayerByUserId(userId)
+	if onlinePlayer then
+		self:WaitForData(onlinePlayer)
+		return finiteNonNegativeInteger(Pricing.getBaseUnitCount(self:GetUnits(onlinePlayer)), 0)
+	end
+
+	local profile = DataService:asyncGetProfile(userId)
+	if not profile or type(profile.Data) ~= "table" then
+		return 0
+	end
+
+	ensureManaData(profile.Data)
+	local units = if type(profile.Data.Units) == "table" then profile.Data.Units else {}
+	return finiteNonNegativeInteger(Pricing.getBaseUnitCount(normalizeUnits(units)), 0)
 end
 
 function PlayerDataService:SetUnits(player: Player, units: { { Tier: number } }, options: { resetUnlocks: boolean }?)

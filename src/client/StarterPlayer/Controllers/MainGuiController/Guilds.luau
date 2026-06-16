@@ -20,6 +20,9 @@ local selectedGuildId: string? = nil
 local loadedGuilds: { { [string]: any } } = {}
 local browsePage = 1
 local browseHasMore = false
+local browseSearchQuery = ""
+local browseSearchDebounceThread: thread? = nil
+local lastRenderedListMode: string? = nil
 local createIsPublic = true
 local myGuildShowingSettings = false
 local myGuildViewGuildId: string? = nil
@@ -35,10 +38,24 @@ local pendingLeaveConfirmationAction: (() -> ())? = nil
 
 local GUILDS_BUTTON_NAME = "GuildsButton"
 local LEAVE_CONFIRMATION_MESSAGE = "Are you sure you want to LEAVE your guild?"
+local DISBAND_CONFIRMATION_MESSAGE = "Disband your guild? All members will be removed."
 local SWAP_GUILD_CONFIRMATION_MESSAGE = "Leave your current guild to join a new one."
+local SWAP_GUILD_JOIN_CONFIRMATION_MESSAGE = "Leave your current guild to join this one?"
 local JOIN_CONFIRMATION_MESSAGE = "Are you sure you want to JOIN this guild?"
 local PRIVACY_SELECTED_STROKE = 3
 local PRIVACY_UNSELECTED_STROKE = 0
+local TAB_ACTIVE_SCALE = 1.2
+local TAB_INACTIVE_SCALE = 1.0
+local BROWSE_SEARCH_MIN_LENGTH = 2
+local BROWSE_SEARCH_DEBOUNCE_SECONDS = 0.35
+
+local TAB_BUTTON_SPECS = {
+	{ tab = "Top", names = { "TopGuilds" } },
+	{ tab = "Browse", names = { "BrowseGuilds" } },
+	{ tab = "Create", names = { "CreateGuild" } },
+	{ tab = "Invites", names = { "Invites", "GuildInvites" } },
+	{ tab = "MyGuild", names = { "MyGuild" } },
+}
 
 local function clearInviteListConnections()
 	for _, connection in inviteListConnections do
@@ -270,6 +287,37 @@ local function setTextOnDescendants(parent: Instance?, names: { string }, text: 
 	end
 end
 
+local CONFIRMATION_BUTTON_NAMES = {
+	YesButton = true,
+	NoButton = true,
+}
+
+local function setConfirmationMessage(frame: Instance?, message: string)
+	if not frame then
+		return
+	end
+
+	local function isUnderConfirmationButton(inst: Instance): boolean
+		local parent = inst.Parent
+		while parent and parent ~= frame do
+			if CONFIRMATION_BUTTON_NAMES[parent.Name] then
+				return true
+			end
+			parent = parent.Parent
+		end
+		return false
+	end
+
+	for _, name in { "maintext", "Message", "Title" } do
+		for _, desc in frame:GetDescendants() do
+			if desc.Name == name and desc:IsA("TextLabel") and not isUnderConfirmationButton(desc) then
+				desc.Text = message
+				break
+			end
+		end
+	end
+end
+
 local function setImageOnDescendants(parent: Instance?, names: { string }, image: string)
 	local imageLabel = findImageLabel(parent, names)
 	if imageLabel then
@@ -356,6 +404,24 @@ function Guilds.Install(MainGuiController)
 		return if frame and frame:IsA("GuiObject") then frame else nil
 	end
 
+	function MainGuiController:getBrowseGuildsFrame(): GuiObject?
+		local guildsFrame = self:getGuildsFrame()
+		local frame = guildsFrame and guildsFrame:FindFirstChild("BrowseGuildsFrame")
+		return if frame and frame:IsA("GuiObject") then frame else nil
+	end
+
+	function MainGuiController:getBrowseSearchInput(): TextBox?
+		local browseFrame = self:getBrowseGuildsFrame()
+		local searchInput = browseFrame and browseFrame:FindFirstChild("SearchInput", true)
+		return if searchInput and searchInput:IsA("TextBox") then searchInput else nil
+	end
+
+	function MainGuiController:getBrowseRefreshButton(): GuiObject?
+		local browseFrame = self:getBrowseGuildsFrame()
+		local refreshButton = browseFrame and browseFrame:FindFirstChild("RefreshButton", true)
+		return if refreshButton and refreshButton:IsA("GuiObject") then refreshButton else nil
+	end
+
 	function MainGuiController:getGuildInvitesFrame(): GuiObject?
 		local guildsFrame = self:getGuildsFrame()
 		local frame = guildsFrame and guildsFrame:FindFirstChild("GuildInvites")
@@ -399,6 +465,15 @@ function Guilds.Install(MainGuiController)
 	end
 
 	function MainGuiController:getGuildScrollingFrame(): ScrollingFrame?
+		if listMode == "Browse" then
+			local browseFrame = self:getBrowseGuildsFrame()
+			local scrollContainer = browseFrame and browseFrame:FindFirstChild("BrowseGuildsScroll", true)
+			local scrollingFrame = scrollContainer and scrollContainer:FindFirstChild("ScrollingFrame", true)
+			if scrollingFrame and scrollingFrame:IsA("ScrollingFrame") then
+				return scrollingFrame
+			end
+		end
+
 		local topGuildsFrame = self:getTopGuildsFrame()
 		local scrollContainer = topGuildsFrame and topGuildsFrame:FindFirstChild("TopGuildsScroll", true)
 		local scrollingFrame = scrollContainer and scrollContainer:FindFirstChild("ScrollingFrame", true)
@@ -412,6 +487,14 @@ function Guilds.Install(MainGuiController)
 	end
 
 	function MainGuiController:getPreviewGuildFrame(): GuiObject?
+		if listMode == "Browse" then
+			local browseFrame = self:getBrowseGuildsFrame()
+			local preview = browseFrame and browseFrame:FindFirstChild("PreviewGuild", true)
+			if preview and preview:IsA("GuiObject") then
+				return preview
+			end
+		end
+
 		local topGuildsFrame = self:getTopGuildsFrame()
 		local preview = topGuildsFrame and topGuildsFrame:FindFirstChild("PreviewGuild", true)
 		return if preview and preview:IsA("GuiObject") then preview else nil
@@ -519,13 +602,17 @@ function Guilds.Install(MainGuiController)
 
 		local createFrame = self:getCreateGuildFrame()
 		local topFrame = self:getTopGuildsFrame()
+		local browseFrame = self:getBrowseGuildsFrame()
 		local invitesFrame = self:getGuildInvitesFrame()
 		local myGuildFrame = self:getMyGuildFrame()
 		if createFrame then
 			createFrame.Visible = tabName == "Create"
 		end
 		if topFrame then
-			topFrame.Visible = tabName == "Top" or tabName == "Browse"
+			topFrame.Visible = tabName == "Top"
+		end
+		if browseFrame then
+			browseFrame.Visible = tabName == "Browse"
 		end
 		if invitesFrame then
 			invitesFrame.Visible = tabName == "Invites"
@@ -534,6 +621,7 @@ function Guilds.Install(MainGuiController)
 			myGuildFrame.Visible = tabName == "MyGuild"
 		end
 
+		self:updateGuildTabScales(tabName)
 		self:hideGuildConfirmation()
 		self:hideGuildJoinConfirmation()
 
@@ -543,7 +631,7 @@ function Guilds.Install(MainGuiController)
 		elseif tabName == "Browse" then
 			listMode = "Browse"
 			browsePage = 1
-			self:refreshGuildList()
+			self:refreshBrowseRandomGuilds()
 		elseif tabName == "Invites" then
 			self:refreshGuildInvites()
 		elseif tabName == "MyGuild" then
@@ -551,6 +639,66 @@ function Guilds.Install(MainGuiController)
 			self:updateMyGuildViewMode()
 			self:refreshMyGuildDisplay()
 		end
+
+		self:updateGuildHeaderPower()
+	end
+
+	function MainGuiController:updateGuildTabScales(activeTabName: string)
+		local guildsFrame = self:getGuildsFrame()
+		local sideButtons = guildsFrame and guildsFrame:FindFirstChild("SideButtons", true)
+		if not sideButtons then
+			return
+		end
+
+		for _, spec in TAB_BUTTON_SPECS do
+			for _, buttonName in spec.names do
+				local button = sideButtons:FindFirstChild(buttonName, true)
+				if button and button:IsA("GuiObject") then
+					local uiScale = button:FindFirstChildOfClass("UIScale")
+					if not uiScale then
+						uiScale = Instance.new("UIScale")
+						uiScale.Parent = button
+					end
+					uiScale.Scale = if activeTabName == spec.tab then TAB_ACTIVE_SCALE else TAB_INACTIVE_SCALE
+				end
+			end
+		end
+	end
+
+	function MainGuiController:updateGuildHeaderPower()
+		local guildsFrame = self:getGuildsFrame()
+		if not guildsFrame then
+			return
+		end
+
+		local function applyPowerText(powerText: string)
+			local topFrame = guildsFrame:FindFirstChild("TopFrame", true)
+			if topFrame then
+				setTextOnDescendants(topFrame, { "Power", "GuildPower", "PointsCount" }, powerText)
+				local pointsCountFrame = topFrame:FindFirstChild("PointsCount", true)
+				if pointsCountFrame then
+					setTextOnDescendants(pointsCountFrame, { "Amount" }, powerText)
+				end
+			end
+		end
+
+		if not self:isInGuild() then
+			applyPowerText("0")
+			return
+		end
+
+		local GuildService = Knit.GetService("GuildService")
+		GuildService:GetMyGuild()
+			:andThen(function(summary)
+				if summary then
+					applyPowerText(getGuildScoreText(summary))
+				else
+					applyPowerText("0")
+				end
+			end)
+			:catch(function()
+				applyPowerText("0")
+			end)
 	end
 
 	function MainGuiController:hideGuildJoinConfirmation()
@@ -561,7 +709,7 @@ function Guilds.Install(MainGuiController)
 		end
 	end
 
-	function MainGuiController:showGuildJoinConfirmation(onConfirm: () -> ())
+	function MainGuiController:showGuildJoinConfirmation(onConfirm: () -> (), message: string?)
 		self:hideGuildConfirmation()
 		self:hideGuildLeaveConfirmation()
 
@@ -572,18 +720,15 @@ function Guilds.Install(MainGuiController)
 		end
 
 		pendingJoinConfirmationAction = onConfirm
-		local maintext = confirmationFrame:FindFirstChild("maintext", true)
-		if maintext and maintext:IsA("TextLabel") and maintext.Text == "" then
-			maintext.Text = JOIN_CONFIRMATION_MESSAGE
-		end
+		setConfirmationMessage(confirmationFrame, message or JOIN_CONFIRMATION_MESSAGE)
 		confirmationFrame.Visible = true
 	end
 
-	function MainGuiController:promptGuildInviteJoin(guildId: string)
+	function MainGuiController:promptGuildInviteJoin(guildId: string, message: string?)
 		self:showGuildJoinConfirmation(function()
 			self:hideGuildJoinConfirmation()
 			self:acceptGuildInvite(guildId)
-		end)
+		end, message)
 	end
 
 	function MainGuiController:hideGuildLeaveConfirmation()
@@ -597,7 +742,7 @@ function Guilds.Install(MainGuiController)
 		end
 	end
 
-	function MainGuiController:showGuildLeaveConfirmation(onConfirm: () -> ())
+	function MainGuiController:showGuildLeaveConfirmation(onConfirm: () -> (), message: string?)
 		self:hideGuildConfirmation()
 		self:hideGuildJoinConfirmation()
 
@@ -615,15 +760,11 @@ function Guilds.Install(MainGuiController)
 			pendingLeaveConfirmationAction = onConfirm
 		end
 
-		setTextOnDescendants(
-			confirmationFrame,
-			{ "TextLabel", "Message", "Title", "maintext" },
-			LEAVE_CONFIRMATION_MESSAGE
-		)
+		setConfirmationMessage(confirmationFrame, message or LEAVE_CONFIRMATION_MESSAGE)
 		confirmationFrame.Visible = true
 	end
 
-	function MainGuiController:promptLeaveGuild(onSuccess: (() -> ())?)
+	function MainGuiController:promptLeaveGuild(onSuccess: (() -> ())?, message: string?)
 		self:showGuildLeaveConfirmation(function()
 			self:hideGuildLeaveConfirmation()
 			self:executeLeaveGuild(function()
@@ -633,7 +774,7 @@ function Guilds.Install(MainGuiController)
 					onSuccess()
 				end
 			end)
-		end)
+		end, message)
 	end
 
 	function MainGuiController:hideGuildConfirmation()
@@ -655,7 +796,7 @@ function Guilds.Install(MainGuiController)
 		end
 
 		pendingConfirmationAction = onConfirm
-		setTextOnDescendants(confirmationFrame, { "TextLabel", "Message", "Title" }, message)
+		setConfirmationMessage(confirmationFrame, message)
 		confirmationFrame.Visible = true
 	end
 
@@ -672,11 +813,6 @@ function Guilds.Install(MainGuiController)
 			return
 		end
 
-		if guildData.Role == GuildUtil.RoleOwner then
-			warn("[MainGuiController] Owner cannot leave guild")
-			return
-		end
-
 		guildRequestOpen = true
 		local GuildService = Knit.GetService("GuildService")
 		GuildService:LeaveGuild()
@@ -684,7 +820,11 @@ function Guilds.Install(MainGuiController)
 				guildRequestOpen = false
 				if success then
 					SoundUtil.TutorialProgress()
-					self:refreshGuildList()
+					self:updateCreateGuildAccess()
+					self:updateGuildHeaderPower()
+					if activeTab == "Top" or activeTab == "Browse" then
+						self:refreshGuildList()
+					end
 					self:refreshGuildInvites()
 					if onSuccess then
 						onSuccess()
@@ -711,9 +851,9 @@ function Guilds.Install(MainGuiController)
 				guildRequestOpen = false
 				if success then
 					SoundUtil.TutorialProgress()
-					self:refreshGuildList()
 					self:refreshGuildInvites()
 					self:updateCreateGuildAccess()
+					self:updateGuildHeaderPower()
 					self:openMyGuildTab()
 				elseif err then
 					warn("[MainGuiController] Accept invite failed:", err)
@@ -736,16 +876,10 @@ function Guilds.Install(MainGuiController)
 		end
 
 		if guildData.GuildId ~= "" then
-			if guildData.Role == GuildUtil.RoleOwner then
-				warn("[MainGuiController] Leave your guild before joining another one")
-				return
-			end
-
-			self:showGuildConfirmation(SWAP_GUILD_CONFIRMATION_MESSAGE, function()
-				self:promptLeaveGuild(function()
-					self:promptGuildInviteJoin(summary.Id)
-				end)
-			end)
+			self:showGuildJoinConfirmation(function()
+				self:hideGuildJoinConfirmation()
+				self:acceptGuildInvite(summary.Id)
+			end, SWAP_GUILD_JOIN_CONFIRMATION_MESSAGE)
 			return
 		end
 
@@ -857,6 +991,11 @@ function Guilds.Install(MainGuiController)
 		setTextOnDescendants(item, { "MemberCount" }, getMemberCountText(summary))
 		setTextOnDescendants(item, { "GuildScore", "Score", "Points" }, getGuildScoreText(summary))
 		setImageOnDescendants(item, { "Icon", "ImageLabel" }, GuildUtil.formatIconImage(summary.IconId))
+
+		local pointsCountFrame = item:FindFirstChild("PointsCount", true)
+		if pointsCountFrame then
+			setTextOnDescendants(pointsCountFrame, { "Amount" }, getGuildScoreText(summary))
+		end
 	end
 
 	function MainGuiController:populateMyGuildPreview(item: GuiObject, summary: { [string]: any })
@@ -922,7 +1061,13 @@ function Guilds.Install(MainGuiController)
 			or preview:FindFirstChild("LEAVE", true)
 			or preview:FindFirstChild("Leave", true)
 		if leaveButton and leaveButton:IsA("GuiObject") then
-			leaveButton.Visible = not readOnly and viewingOwn and self:isInGuild() and not self:isGuildOwner()
+			leaveButton.Visible = not readOnly and viewingOwn and self:isInGuild()
+			local textButton = if leaveButton:IsA("TextButton")
+				then leaveButton
+				else leaveButton:FindFirstChildWhichIsA("TextButton", true)
+			if textButton then
+				textButton.Text = if self:isGuildOwner() then "DISBAND" else "LEAVE"
+			end
 		end
 	end
 
@@ -985,17 +1130,41 @@ function Guilds.Install(MainGuiController)
 			return
 		end
 
-		clearMyGuildListConnections()
-		self:clearMyGuildMemberItems()
 		template.Visible = false
 
+		local existingItems: { [number]: GuiObject } = {}
+		for _, child in scrollingFrame:GetChildren() do
+			if child:IsA("GuiObject") and string.sub(child.Name, 1, 7) == "Member_" then
+				local userId = tonumber(string.sub(child.Name, 8))
+				if userId then
+					existingItems[userId] = child
+				end
+			end
+		end
+
+		local newUserIds: { [number]: boolean } = {}
 		for index, member in members do
-			local item = template:Clone()
-			item.Name = "Member_" .. tostring(member.UserId)
+			local userId = member.UserId
+			if type(userId) ~= "number" then
+				continue
+			end
+
+			newUserIds[userId] = true
+			local item = existingItems[userId]
+			if not item then
+				item = template:Clone()
+				item.Name = "Member_" .. tostring(userId)
+				item.Parent = scrollingFrame
+			end
 			item.Visible = true
 			item.LayoutOrder = index
-			item.Parent = scrollingFrame
 			self:populateMyGuildMemberItem(item, member)
+		end
+
+		for userId, item in existingItems do
+			if not newUserIds[userId] then
+				item:Destroy()
+			end
 		end
 
 		local layout = scrollingFrame:FindFirstChildWhichIsA("UIListLayout")
@@ -1003,6 +1172,7 @@ function Guilds.Install(MainGuiController)
 			scrollingFrame.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 8)
 			if not layout:GetAttribute("MyGuildCanvasBound") then
 				layout:SetAttribute("MyGuildCanvasBound", true)
+				clearMyGuildListConnections()
 				table.insert(
 					myGuildListConnections,
 					layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -1042,6 +1212,7 @@ function Guilds.Install(MainGuiController)
 	function MainGuiController:applyMyGuildDisplayData(summary: { [string]: any }, members: { { [string]: any } }?)
 		myGuildIsPublic = summary.IsPublic == true
 		self:updateMyGuildPreview(summary)
+		self:updateGuildHeaderPower()
 		self:updateMyGuildVisibilityLabel(myGuildIsPublic)
 		if not isMyGuildReadOnlyView() and self:isGuildOwner() then
 			self:setPrivacySelection(self:getMyGuildSettingsFrame() or self:getMyGuildFrame() :: GuiObject, myGuildIsPublic)
@@ -1180,6 +1351,57 @@ function Guilds.Install(MainGuiController)
 		end
 	end
 
+	function MainGuiController:connectGuildListItem(item: GuiObject, summary: { [string]: any })
+		local function onSelect()
+			selectedGuildId = summary.Id
+			self:updateGuildPreview(summary)
+		end
+
+		if item:IsA("TextButton") or item:IsA("ImageButton") then
+			table.insert(listConnections, item.Activated:Connect(onSelect))
+		else
+			table.insert(
+				listConnections,
+				item.InputBegan:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then
+						onSelect()
+					end
+				end)
+			)
+		end
+	end
+
+	function MainGuiController:updateGuildListItemInPlace(summary: { [string]: any })
+		local scrollingFrame = self:getGuildScrollingFrame()
+		if not scrollingFrame then
+			return
+		end
+
+		for index, guild in loadedGuilds do
+			if guild.Id == summary.Id then
+				loadedGuilds[index] = summary
+				break
+			end
+		end
+
+		local item = scrollingFrame:FindFirstChild("GuildItem_" .. tostring(summary.Id))
+		if item and item:IsA("GuiObject") then
+			local listIndex = 0
+			for index, guild in loadedGuilds do
+				if guild.Id == summary.Id then
+					listIndex = index
+					break
+				end
+			end
+			local rank = if listMode == "Top" then listIndex else summary.Rank
+			self:populateGuildListItem(item, summary, rank)
+		end
+
+		if selectedGuildId == summary.Id then
+			self:updateGuildPreview(summary)
+		end
+	end
+
 	function MainGuiController:renderGuildList(guilds: { { [string]: any } })
 		local scrollingFrame = self:getGuildScrollingFrame()
 		local template = self:getGuildTemplate()
@@ -1187,44 +1409,82 @@ function Guilds.Install(MainGuiController)
 			return
 		end
 
-		clearListConnections()
-		self:clearGuildListItems()
-		template.Visible = false
+		local forceRebuild = lastRenderedListMode ~= listMode
+		lastRenderedListMode = listMode
 		loadedGuilds = guilds
 
-		for index, summary in guilds do
-			local item = template:Clone()
-			item.Name = "GuildItem_" .. tostring(summary.Id)
-			item.Visible = true
-			item.Parent = scrollingFrame
-			self:populateGuildListItem(item, summary, if listMode == "Top" then index else nil)
+		if forceRebuild then
+			clearListConnections()
+			self:clearGuildListItems()
+		end
 
-			local function onSelect()
-				selectedGuildId = summary.Id
-				self:updateGuildPreview(summary)
+		template.Visible = false
+
+		local existingItems: { [string]: GuiObject } = {}
+		for _, child in scrollingFrame:GetChildren() do
+			if child:IsA("GuiObject") and string.sub(child.Name, 1, 10) == "GuildItem_" then
+				existingItems[string.sub(child.Name, 11)] = child
 			end
+		end
 
-			if item:IsA("TextButton") or item:IsA("ImageButton") then
-				table.insert(listConnections, item.Activated:Connect(onSelect))
-			else
-				table.insert(
-					listConnections,
-					item.InputBegan:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 then
-							onSelect()
-						end
-					end)
-				)
+		local newIds: { [string]: boolean } = {}
+		for index, summary in guilds do
+			newIds[summary.Id] = true
+			local item = existingItems[summary.Id]
+			if not item then
+				item = template:Clone()
+				item.Name = "GuildItem_" .. tostring(summary.Id)
+				item.Parent = scrollingFrame
+				self:connectGuildListItem(item, summary)
+			end
+			item.Visible = true
+			item.LayoutOrder = index
+			self:populateGuildListItem(
+				item,
+				summary,
+				if listMode == "Top" then index else summary.Rank
+			)
+		end
+
+		for guildId, item in existingItems do
+			if not newIds[guildId] then
+				item:Destroy()
 			end
 		end
 
 		if #guilds > 0 then
-			local firstGuild = guilds[1]
-			selectedGuildId = firstGuild.Id
-			self:updateGuildPreview(firstGuild)
+			local stillSelected = false
+			if selectedGuildId then
+				for _, summary in guilds do
+					if summary.Id == selectedGuildId then
+						stillSelected = true
+						self:updateGuildPreview(summary)
+						break
+					end
+				end
+			end
+			if not stillSelected then
+				local firstGuild = guilds[1]
+				selectedGuildId = firstGuild.Id
+				self:updateGuildPreview(firstGuild)
+			end
 		else
 			selectedGuildId = nil
 			self:updateGuildPreview(nil)
+		end
+
+		local layout = scrollingFrame:FindFirstChildWhichIsA("UIListLayout")
+		if layout then
+			scrollingFrame.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 8)
+			if not layout:GetAttribute("GuildListCanvasBound") then
+				layout:SetAttribute("GuildListCanvasBound", true)
+				table.insert(
+					listConnections,
+					layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+						scrollingFrame.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 8)
+					end)
+				)
+			end
 		end
 	end
 
@@ -1282,8 +1542,10 @@ function Guilds.Install(MainGuiController)
 				active = true
 			end
 		elseif guildData.GuildId ~= "" then
-			joinButton.Visible = false
-			return
+			if textButton then
+				textButton.Text = "JOIN"
+			end
+			active = summary.IsPublic == true
 		elseif summary.IsPublic == true then
 			if textButton then
 				textButton.Text = "JOIN"
@@ -1302,10 +1564,57 @@ function Guilds.Install(MainGuiController)
 		end
 	end
 
+	function MainGuiController:refreshBrowseRandomGuilds()
+		if browseSearchDebounceThread then
+			task.cancel(browseSearchDebounceThread)
+			browseSearchDebounceThread = nil
+		end
+
+		browseSearchQuery = ""
+		local searchInput = self:getBrowseSearchInput()
+		if searchInput then
+			searchInput.Text = ""
+		end
+		self:refreshGuildList()
+	end
+
+	function MainGuiController:submitBrowseSearch()
+		local searchInput = self:getBrowseSearchInput()
+		local query = if searchInput then GuildUtil.normalizeGuildName(searchInput.Text) else ""
+
+		if query == "" then
+			browseSearchQuery = ""
+			self:refreshGuildList()
+			return
+		end
+
+		if #query < BROWSE_SEARCH_MIN_LENGTH then
+			return
+		end
+
+		browseSearchQuery = query
+		self:refreshGuildList()
+	end
+
+	function MainGuiController:scheduleBrowseSearch()
+		if browseSearchDebounceThread then
+			task.cancel(browseSearchDebounceThread)
+			browseSearchDebounceThread = nil
+		end
+
+		browseSearchDebounceThread = task.delay(BROWSE_SEARCH_DEBOUNCE_SECONDS, function()
+			browseSearchDebounceThread = nil
+			if activeTab ~= "Browse" then
+				return
+			end
+			self:submitBrowseSearch()
+		end)
+	end
+
 	function MainGuiController:refreshGuildList()
 		local GuildService = Knit.GetService("GuildService")
 		if listMode == "Browse" then
-			GuildService:BrowseGuilds(browsePage)
+			GuildService:BrowseGuilds(browseSearchQuery)
 				:andThen(function(result, hasMore)
 					browseHasMore = hasMore == true
 					local guilds = if type(result) == "table" and type(result.guilds) == "table" then result.guilds else {}
@@ -1635,25 +1944,38 @@ function Guilds.Install(MainGuiController)
 			return
 		end
 
-		if guildData.GuildId ~= "" or summary.IsPublic ~= true then
+		if summary.IsPublic ~= true then
 			return
 		end
 
-		guildRequestOpen = true
-		GuildService:JoinGuild(summary.Id)
-			:andThen(function(success, err)
-				guildRequestOpen = false
-				if success then
-					SoundUtil.TutorialProgress()
-					self:refreshGuildList()
-				elseif err then
+		local function performJoin()
+			guildRequestOpen = true
+			GuildService:JoinGuild(summary.Id)
+				:andThen(function(success, err)
+					guildRequestOpen = false
+					if success then
+						SoundUtil.TutorialProgress()
+						self:updateCreateGuildAccess()
+						self:updateGuildHeaderPower()
+						self:openMyGuildTab()
+						self:refreshGuildList()
+					elseif err then
+						warn("[MainGuiController] Join guild failed:", err)
+					end
+				end)
+				:catch(function(err)
+					guildRequestOpen = false
 					warn("[MainGuiController] Join guild failed:", err)
-				end
-			end)
-			:catch(function(err)
-				guildRequestOpen = false
-				warn("[MainGuiController] Join guild failed:", err)
-			end)
+				end)
+		end
+
+		local confirmationMessage = if guildData.GuildId ~= ""
+			then SWAP_GUILD_JOIN_CONFIRMATION_MESSAGE
+			else JOIN_CONFIRMATION_MESSAGE
+		self:showGuildJoinConfirmation(function()
+			self:hideGuildJoinConfirmation()
+			performJoin()
+		end, confirmationMessage)
 	end
 
 	function MainGuiController:setupGuildsFrame()
@@ -1831,6 +2153,14 @@ function Guilds.Install(MainGuiController)
 				if leaveButton and leaveButton:IsA("GuiObject") then
 					connectGui(leaveButton, function()
 						if self:isGuildOwner() then
+							self:showGuildLeaveConfirmation(function()
+								self:hideGuildLeaveConfirmation()
+								self:executeLeaveGuild(function()
+									myGuildViewGuildId = nil
+									myGuildShowingSettings = false
+									self:setGuildTab("Browse")
+								end)
+							end, DISBAND_CONFIRMATION_MESSAGE)
 							return
 						end
 
@@ -1898,6 +2228,85 @@ function Guilds.Install(MainGuiController)
 			end
 		end
 
+		local browseFrame = self:getBrowseGuildsFrame()
+		if browseFrame then
+			local browsePreview = browseFrame:FindFirstChild("PreviewGuild", true)
+			if browsePreview and browsePreview:IsA("GuiObject") then
+				local joinButton = browsePreview:FindFirstChild("JoinButton", true)
+				if joinButton and joinButton:IsA("GuiObject") then
+					connectGui(joinButton, function()
+						local summary = nil
+						for _, guild in loadedGuilds do
+							if guild.Id == selectedGuildId then
+								summary = guild
+								break
+							end
+						end
+						if summary then
+							self:handleGuildJoinAction(summary)
+						end
+					end)
+				end
+
+				local viewButton = browsePreview:FindFirstChild("ViewButton", true)
+				if viewButton and viewButton:IsA("GuiObject") then
+					connectGui(viewButton, function()
+						if selectedGuildId then
+							self:viewGuildInMyGuildTab(selectedGuildId)
+						end
+					end)
+				end
+			end
+
+			local searchInput = self:getBrowseSearchInput()
+			if searchInput then
+				table.insert(
+					guildConnections,
+					searchInput:GetPropertyChangedSignal("Text"):Connect(function()
+						if activeTab ~= "Browse" then
+							return
+						end
+
+						local query = GuildUtil.normalizeGuildName(searchInput.Text)
+						if query == "" then
+							if browseSearchQuery ~= "" then
+								browseSearchQuery = ""
+								self:refreshGuildList()
+							end
+							return
+						end
+
+						self:scheduleBrowseSearch()
+					end)
+				)
+
+				table.insert(guildConnections, searchInput.FocusLost:Connect(function(enterPressed)
+					if activeTab ~= "Browse" then
+						return
+					end
+
+					if enterPressed then
+						if browseSearchDebounceThread then
+							task.cancel(browseSearchDebounceThread)
+							browseSearchDebounceThread = nil
+						end
+						self:submitBrowseSearch()
+					end
+				end))
+			end
+
+			local refreshButton = self:getBrowseRefreshButton()
+			if refreshButton then
+				connectGui(refreshButton, function()
+					if activeTab ~= "Browse" then
+						return
+					end
+
+					self:refreshBrowseRandomGuilds()
+				end)
+			end
+		end
+
 		local createFrame = self:getCreateGuildFrame()
 		if createFrame then
 			createIsPublic = true
@@ -1950,6 +2359,7 @@ function Guilds.Install(MainGuiController)
 				OpenFrame.Toggle(frame)
 				if frame.Visible then
 					self:updateCreateGuildAccess()
+					self:updateGuildHeaderPower()
 					self:refreshGuildList()
 					self:refreshGuildInvites()
 					if self:isInGuild() then
@@ -1972,11 +2382,30 @@ function Guilds.Install(MainGuiController)
 
 		local GuildService = Knit.GetService("GuildService")
 		if not guildUpdatedConnection then
-			guildUpdatedConnection = GuildService.GuildUpdated:Connect(function()
+			guildUpdatedConnection = GuildService.GuildUpdated:Connect(function(updatedGuildId: string)
 				self:updateCreateGuildAccess()
-				self:refreshGuildList()
-				if activeTab == "MyGuild" then
-					self:refreshMyGuild()
+
+				if type(updatedGuildId) ~= "string" or updatedGuildId == "" then
+					return
+				end
+
+				if self:getPlayerGuildData().GuildId == updatedGuildId then
+					self:refreshMyGuildDisplay()
+					self:updateGuildHeaderPower()
+				end
+
+				if activeTab == "Top" or activeTab == "Browse" then
+					for _, guild in loadedGuilds do
+						if guild.Id == updatedGuildId then
+							GuildService:GetGuildDetails(updatedGuildId)
+								:andThen(function(summary)
+									if summary then
+										self:updateGuildListItemInPlace(summary)
+									end
+								end)
+							break
+						end
+					end
 				end
 			end)
 		end
@@ -2002,9 +2431,7 @@ function Guilds.Install(MainGuiController)
 		end)
 
 		PlayerDataController:Observe("GuildInvites", function()
-			if activeTab == "Invites" then
-				self:refreshGuildInvites()
-			end
+			self:refreshGuildInvites()
 		end)
 	end
 end
